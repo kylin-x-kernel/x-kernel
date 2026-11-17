@@ -316,7 +316,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
         let vruntime = task.fair().vruntime.get(tok);
         let id = self.alloc_enqueue_id();
         task.fair().tree_id.set(id, tok);
-        let deadline = task.fair().deadline.get(tok);
+        let key = Self::deadline_key(&task, tok);
         let weight = Self::weight(&task, tok);
         task.set_seat(QueueSeat::from_sched_class(SchedClass::Fair), tok);
         debug_assert!(!task.fair().ready_link.is_linked());
@@ -324,7 +324,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
         if self
             .first_deadline
             .as_ref()
-            .is_none_or(|first| (deadline, id) < Self::deadline_key(first, tok))
+            .is_none_or(|first| key < Self::deadline_key(first, tok))
         {
             self.first_deadline = Some(task.clone());
         }
@@ -399,10 +399,9 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
     }
 
     fn entity_before(a: &SchedTask<T>, b: &SchedTask<T>, tok: RqLocked) -> bool {
-        let a_deadline = a.fair().deadline.get(tok);
-        let b_deadline = b.fair().deadline.get(tok);
-        a_deadline < b_deadline
-            || (a_deadline == b_deadline && a.fair().tree_id.get(tok) < b.fair().tree_id.get(tok))
+        // The deadline is EEVDF virtual time, not wall time; ties fall back to
+        // enqueue order through the tree id.
+        Self::deadline_key(a, tok) < Self::deadline_key(b, tok)
     }
 
     fn set_next_buddy(&mut self, wakee: Owner, tok: RqLocked) {

@@ -55,6 +55,16 @@ pub(crate) const SYNC_IOC_FILE_INFO: u32 = ioc(
 );
 
 /// `SYNC_IOC_SET_DEADLINE`: publish a deadline on the file's fence.
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    unitless_time_integer,
+    reason = "CG-011-time-unit-names: Linux UAPI name `SYNC_IOC_SET_DEADLINE` from \
+              `include/uapi/linux/sync_file.h`"
+)]
 pub(crate) const SYNC_IOC_SET_DEADLINE: u32 = iow::<DrmSyncSetDeadline>(SYNC_IOC_MAGIC, 5);
 
 /// The fence a sync_file carries, with the bookkeeping the ABI reports.

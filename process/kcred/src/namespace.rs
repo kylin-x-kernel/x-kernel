@@ -15,7 +15,7 @@ static INIT_USER_NS: Once<Arc<UserNamespace>> = Once::new();
 ///
 /// This is used for namespace identities that are externally rendered as
 /// `/proc/[pid]/ns/*` inode-style identifiers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct NamespaceId(u64);
 
 impl Default for NamespaceId {

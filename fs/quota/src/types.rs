@@ -8,8 +8,8 @@ use bitflags::bitflags;
 use kerrno::{KResult, LinuxError};
 
 /// Independent quota classes within a filesystem.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum QuotaType {
     /// Quotas indexed by filesystem user ID.
     User,
@@ -67,8 +67,8 @@ impl QuotaId {
 }
 
 /// Supported v2 quota file revisions and their format IDs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QuotaFormat {
     /// Revision zero: 32-bit inode counts and space limits in 1 KiB units.
     VfsV0 = 2,

@@ -93,7 +93,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 pub use self::socket::VirtIoVsockDev;
 
 /// Read-only identification of a VirtIO MMIO device.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MmioIdentification {
     /// The version of the VirtIO MMIO transport supported by the device.
     pub version: MmioVersion,

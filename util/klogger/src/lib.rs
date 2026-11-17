@@ -166,7 +166,7 @@ static_lock! {
 
 /// Why a filter spec was rejected. The spec is applied atomically, so a
 /// rejected one leaves the previous filter in place.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FilterSpecError;
 
 /// Applies a filter spec: `[<level>] [<target>=<level>]...`, levels being

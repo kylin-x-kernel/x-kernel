@@ -28,6 +28,7 @@ use ksync::{Mutex, spin::SpinNoIrq};
 use ktask::{TaskInner, current};
 use memaddr::{PAGE_SIZE_4K, VirtAddr};
 use osvm::{read_vm_mem, write_vm_mem};
+use posix_types::UserRead;
 use unittest::{TestDescriptor, TestResult};
 
 static NEXT_TEST_USER_ADDR: AtomicUsize = AtomicUsize::new(kaddr_layout::USER_HEAP_BASE);
@@ -253,6 +254,16 @@ impl<T> TestUserValue<T> {
         self.buffer.as_user_ptr::<T>()
     }
 
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        user_copy_without_abi_contract,
+        reason = "CG-006-user-copy-abi-contract: test fixture seeds a test-owned user mapping \
+                  with an input value the test constructed; no kernel bytes reach userspace"
+    )]
     pub fn write(&mut self, value: T)
     where
         T: Copy,
@@ -263,7 +274,7 @@ impl<T> TestUserValue<T> {
 
     pub fn read(&self) -> T
     where
-        T: Copy,
+        T: Copy + UserRead,
     {
         let mut out = MaybeUninit::<T>::uninit();
         read_vm_mem(
@@ -271,7 +282,8 @@ impl<T> TestUserValue<T> {
             core::slice::from_mut(&mut out),
         )
         .expect("read test user value");
-        // SAFETY: `read_vm_mem` initialized the single `T` slot.
+        // SAFETY: `read_vm_mem` initialized the slot, and `T: UserRead`
+        // guarantees every copied bit pattern is a valid `T`.
         unsafe { out.assume_init() }
     }
 }
@@ -310,6 +322,16 @@ impl<T, const N: usize> TestUserArray<T, N> {
         self.buffer.as_user_ptr::<T>()
     }
 
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        user_copy_without_abi_contract,
+        reason = "CG-006-user-copy-abi-contract: test fixture seeds a test-owned user mapping \
+                  with an input value the test constructed; no kernel bytes reach userspace"
+    )]
     pub fn write(&mut self, value: [T; N])
     where
         T: Copy,
@@ -320,7 +342,7 @@ impl<T, const N: usize> TestUserArray<T, N> {
 
     pub fn read(&self) -> [T; N]
     where
-        T: Copy,
+        T: Copy + UserRead,
     {
         let mut out = MaybeUninit::<[T; N]>::uninit();
         read_vm_mem(
@@ -328,7 +350,8 @@ impl<T, const N: usize> TestUserArray<T, N> {
             core::slice::from_mut(&mut out),
         )
         .expect("read test user array");
-        // SAFETY: `read_vm_mem` initialized the single `[T; N]` slot.
+        // SAFETY: `read_vm_mem` initialized the slot, and each `T: UserRead`
+        // guarantees all copied elements have valid bit patterns.
         unsafe { out.assume_init() }
     }
 }

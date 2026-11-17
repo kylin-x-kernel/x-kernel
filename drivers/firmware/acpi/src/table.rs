@@ -13,7 +13,7 @@ use super::{desc, raw::bytes_from_addr};
 ///
 /// Produced only after the raw header passed signature and checksum
 /// validation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct AcpiTableHeader {
     /// Four-character table signature (e.g. `APIC`, `MCFG`, `FACP`).
     pub signature: [u8; 4],

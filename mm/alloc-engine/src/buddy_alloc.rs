@@ -574,8 +574,8 @@ impl<const PAGE_SIZE: usize> BuddyAllocator<PAGE_SIZE> {
 // ---------------------------------------------------------------------------
 
 /// Page allocation state (minimal subset of buddy-slab-allocator's `PageFlags`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageFlags {
     /// Page is free.
     Free      = 0,

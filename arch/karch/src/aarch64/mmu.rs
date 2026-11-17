@@ -9,7 +9,7 @@ use memaddr::PhysAddr;
 
 /// Hardware-ready page-table root value.
 #[repr(transparent)]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HwPageTableRoot(usize);
 
 impl HwPageTableRoot {

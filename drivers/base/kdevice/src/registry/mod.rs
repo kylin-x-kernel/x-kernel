@@ -45,7 +45,7 @@ fn fetch_add_u64(counter: &AtomicU64, what: &'static str) -> u64 {
 }
 
 /// Descriptor-first lifecycle state tracked before or alongside a live object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DeviceDescState {
     /// The descriptor has not yet been claimed by a successful probe.
     Pending,

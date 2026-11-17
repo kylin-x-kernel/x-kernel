@@ -22,7 +22,7 @@ use crate::{BufRead, Error, IoBuf, IoBufMut, Read, Result, Seek, SeekFrom, Write
 /// This struct is generally created by calling [`empty()`]. Please
 /// see the documentation of [`empty()`] for more details.
 #[non_exhaustive]
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Empty;
 
 /// Creates a value that is always at EOF for reads, and ignores all data written.

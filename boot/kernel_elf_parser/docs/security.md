@@ -31,9 +31,9 @@ A successfully stored `phdr` therefore cannot cause a panic at query time becaus
 | --- | --- |
 | Unsupported ELF class, wrong entry size, or incomplete program header table | The builder returns an error, and the parse result is not published |
 | Program header table at an offset that is not a multiple of the entry alignment | Entries are copied by value and parsed normally |
-| Header buffer shorter than the ELF header, or misaligned for the class-specific header part | `ElfHeadersBuilder::new` returns an error instead of panicking |
-| No segment covers the file offset of the program header table | Parser construction returns an error, instead of panicking later during auxiliary vector queries |
-| Overflow when adding the program header virtual address and the load offset | Parser construction returns an error |
+| Header buffer shorter than the ELF header, or misaligned for the class-specific header part | `ElfHeadersBuilder::new` returns `ElfError::InvalidHeader` or `ElfError::MisalignedHeader` instead of panicking |
+| No segment covers the file offset of the program header table | Construction returns `ElfError::ProgramHeaderTableUnmapped`, instead of panicking later during auxiliary vector queries |
+| Overflow when adding the program header virtual address and the load offset | Construction returns `ElfError::ProgramHeaderAddressOverflow` |
 | Allocation failure | The original failure behavior of the container still applies; the crate adds no recovery policy |
 
 ## Concurrency, Privacy, and Known Limitations

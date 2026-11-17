@@ -54,8 +54,8 @@ fn max_file(fs: Arc<SimpleFs>, cgroup: Arc<Cgroup>) -> Arc<SimpleFile> {
             }
             SimpleFileOperation::Write { data, .. } => {
                 let controller = controller(&cgroup)?;
-                let (quota, period) = parse_cpu_max(command::parse_command(data)?)?;
-                controller.set_bandwidth(quota, period)?;
+                let (quota, period_us) = parse_cpu_max(command::parse_command(data)?)?;
+                controller.set_bandwidth(quota, period_us)?;
                 Ok(None)
             }
         }),
@@ -71,13 +71,13 @@ fn parse_cpu_max(text: &str) -> VfsResult<(Option<u64>, u64)> {
         Some(value) => Some(value.parse::<u64>().map_err(|_| VfsError::InvalidInput)?),
         None => return Err(VfsError::InvalidInput),
     };
-    let period = fields
+    let period_us = fields
         .next()
         .map(str::parse::<u64>)
         .transpose()
         .map_err(|_| VfsError::InvalidInput)?
         .unwrap_or(DEFAULT_PERIOD);
-    Ok((quota, period))
+    Ok((quota, period_us))
 }
 
 fn weight_file(fs: Arc<SimpleFs>, cgroup: Arc<Cgroup>) -> Arc<SimpleFile> {

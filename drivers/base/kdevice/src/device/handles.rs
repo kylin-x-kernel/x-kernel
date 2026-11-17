@@ -7,7 +7,7 @@
 use crate::{BusId, DeviceId, DriverId};
 
 /// Long-lived bus handle identified by a stable [`BusId`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct BusHandle {
     id: BusId,
 }
@@ -25,7 +25,7 @@ impl BusHandle {
 }
 
 /// Long-lived driver handle identified by a stable [`DriverId`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DriverCore {
     id: DriverId,
 }
@@ -43,7 +43,7 @@ impl DriverCore {
 }
 
 /// Long-lived device handle identified by a stable [`DeviceId`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DeviceCore {
     id: DeviceId,
 }

@@ -65,7 +65,7 @@ pub(super) const TEE_ORIGIN_TRUSTED_APP: u32 = 0x0000_0004;
 ///
 /// ticket 06 的客户端把所有变体统一映射为 `TEE_ERROR_COMMUNICATION +
 /// TEE_ORIGIN_COMMS`（§6.3/§6.7），变体区分只服务诊断与测试。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ControlFrameError {
     /// postcard 序列化失败。
     Serialize,

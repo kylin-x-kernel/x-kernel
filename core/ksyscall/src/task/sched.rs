@@ -377,7 +377,27 @@ struct UserSchedAttr {
     sched_nice: i32,
     sched_priority: u32,
     sched_runtime: u64,
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        unitless_time_integer,
+        reason = "CG-011-time-unit-names: Linux UAPI name `struct sched_attr` field \
+                  `sched_deadline` from `include/uapi/linux/sched/types.h`"
+    )]
     sched_deadline: u64,
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        unitless_time_integer,
+        reason = "CG-011-time-unit-names: Linux UAPI name `struct sched_attr` field \
+                  `sched_period` from `include/uapi/linux/sched/types.h`"
+    )]
     sched_period: u64,
 }
 

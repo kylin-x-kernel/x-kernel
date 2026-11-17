@@ -233,10 +233,10 @@ fn block_on_with_state<F: IntoFuture>(f: F, state: TaskState) -> F::Output {
 unittest::path_mod_test!(prepared_tests, "../../ut-tests/future/prepared_tests.rs");
 
 /// Error returned by [`interruptible`].
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Interrupted(InterruptCause);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 enum InterruptCause {
     Task,
     Registration(PollRegisterError),

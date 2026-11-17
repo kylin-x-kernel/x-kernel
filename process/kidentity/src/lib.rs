@@ -146,8 +146,8 @@ impl PidNamespace {
 ///
 /// The transition table is closed: any other transition is rejected by
 /// [`PidLifecycleState::try_transition`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PidLifecycleState {
     /// Number allocated but not yet published.
     Reserved  = 0,
@@ -201,7 +201,7 @@ fn state_from_u8(value: u8) -> Option<PidLifecycleState> {
 }
 
 /// A namespace-scoped task number.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Upid {
     nr: u32,
     ns: Arc<PidNamespace>,

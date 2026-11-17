@@ -42,7 +42,7 @@ macro_rules! define_options {
 /// and resolves it at `getsockopt` time, because the peer PID must be
 /// projected into the observer's active PID namespace.
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct UnixCredentials {
     pub pid: u32,
     pub uid: u32,
@@ -73,12 +73,12 @@ impl UnixCredentials {
 /// observer can apply Linux's `pid_vnr` projection at `getsockopt` time.
 /// `SO_PEERCRED` records effective credentials, unlike per-message
 /// `SCM_CREDENTIALS`, which uses real credentials.
-#[derive(Default, Debug, Clone)]
+#[derive(Clone, Debug, Default)]
 pub struct PeerCredentials {
     identity: Option<PeerIdentity>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 struct PeerIdentity {
     pid: Arc<PidHandle>,
     uid: u32,
@@ -115,13 +115,13 @@ impl PeerCredentials {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PacketStatistics {
     pub packets: u32,
     pub drops: u32,
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct PacketMembership {
     pub ifindex: i32,
     pub membership_type: u16,

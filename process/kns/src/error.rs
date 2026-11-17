@@ -8,7 +8,7 @@
 ///
 /// Carries enough information for the syscall layer to translate each failure
 /// into the correct errno instead of collapsing them into a single value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CloneNsError {
     /// Mount namespace cloning was requested with a shared filesystem context
     /// (`CLONE_NEWNS` with `CLONE_FS`).
@@ -22,7 +22,7 @@ pub enum CloneNsError {
 
 /// Errors that can occur when setting a UTS namespace name (nodename or
 /// domainname).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UtsError {
     /// The supplied name exceeds the maximum length (64 bytes; the 65-byte
     /// buffer reserves one slot for the NUL terminator).

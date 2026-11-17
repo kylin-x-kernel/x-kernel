@@ -24,7 +24,7 @@ use memaddr::PhysAddrRange;
 pub use page::{AllocationInfo, PageMeta, ReferenceState, UsageKind};
 
 /// Failure to prepare or access physical-page metadata.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageMetaError {
     /// An address, size or physical-page range is invalid or overflows.
     InvalidRange,

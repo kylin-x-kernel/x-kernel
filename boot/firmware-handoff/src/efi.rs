@@ -31,8 +31,8 @@ pub const ACPI_TABLE_GUID: Guid = Guid::new(
 
 const EFI_PAGE_SIZE: usize = 4096;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Guid {
     pub data1: u32,
     pub data2: u16,
@@ -52,8 +52,8 @@ impl Guid {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TableHeader {
     pub signature: u64,
     pub size: u32,
@@ -61,15 +61,15 @@ pub struct TableHeader {
     pub reserved: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConfigurationTable {
     pub vendor_guid: Guid,
     pub vendor_table: *mut c_void,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemTable {
     pub header: TableHeader,
     pub firmware_vendor: *const u16,
@@ -115,8 +115,8 @@ impl Default for SystemTable {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MemoryType(pub u32);
 
 impl MemoryType {
@@ -138,8 +138,8 @@ impl MemoryType {
     pub const UNUSABLE: Self = Self(8);
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MemoryDescriptor {
     pub ty: MemoryType,
     pub phys_start: u64,
@@ -152,7 +152,7 @@ impl MemoryDescriptor {
     pub const VERSION: u32 = 1;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParseError {
     NullPointer,
     InvalidSystemTable,
@@ -160,7 +160,7 @@ pub enum ParseError {
     InvalidBootMemmap,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemoryRegionKind {
     Ram,
     RuntimeServices,
@@ -180,7 +180,7 @@ impl MemoryRegionKind {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct RawEfiContext<'a> {
     system_table: &'a SystemTable,
     configuration_table_paddr: usize,
@@ -318,8 +318,8 @@ impl<'a> RawEfiContext<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct LinuxEfiBootMemmapHeader {
     pub map_size: usize,
     pub desc_size: usize,
@@ -328,7 +328,7 @@ pub struct LinuxEfiBootMemmapHeader {
     pub buff_size: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct BootMemmapRef<'a> {
     header: &'a LinuxEfiBootMemmapHeader,
     descriptors: &'a [u8],
@@ -381,7 +381,7 @@ impl<'a> BootMemmapRef<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct BootMemmapIter<'a> {
     remaining: &'a [u8],
     desc_size: usize,
@@ -406,7 +406,7 @@ impl<'a> Iterator for BootMemmapIter<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MemoryDescriptorView {
     descriptor: MemoryDescriptor,
 }

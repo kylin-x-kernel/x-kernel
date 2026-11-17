@@ -17,7 +17,7 @@ use crate::{
 };
 
 /// One IO-APIC input pin and the controller instance that owns it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct VectorRoute {
     instance: IoApicInstanceId,
     pin: IoApicPin,

@@ -131,7 +131,7 @@ pub const fn edge_irq_desc(hwirq: usize) -> kirq::IrqDesc {
     kirq::gic_edge_irq_desc(hwirq)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum GicVersion {
     V2,
     V3,
@@ -146,7 +146,7 @@ impl fmt::Display for GicVersion {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GicMmioRegion {
     pub paddr: PhysAddr,
     pub size: usize,
@@ -162,7 +162,7 @@ pub const MAX_GICR_REGIONS: usize = 8;
 /// redistributor stride. The current arm-gic-driver backend walks one
 /// contiguous frame array, so [`init`] accepts this description only when the
 /// regions are contiguous and the stride is the architectural default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GicRedistributorConfig {
     /// Regions in firmware order; only the first `count` entries are used.
     pub regions: [Option<GicMmioRegion>; MAX_GICR_REGIONS],
@@ -182,7 +182,7 @@ impl GicRedistributorConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GicConfig {
     pub version: GicVersion,
     pub gicd: GicMmioRegion,
@@ -301,21 +301,127 @@ pub fn active_version() -> GicVersion {
         .expect("GIC config not initialized")
 }
 
+/// Failure to initialize the GIC or one CPU's interface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GicInitError {
+    /// A GICv2 configuration describes a redistributor.
+    UnexpectedRedistributor,
+    /// A GICv3 configuration lacks a redistributor.
+    MissingRedistributor,
+    /// The GICv3 redistributor region count is zero or exceeds the backend limit.
+    InvalidRedistributorCount,
+    /// The declared GICv3 redistributor region count differs from the regions present.
+    RedistributorCountMismatch,
+    /// The GICv3 redistributor stride is not the architected frame size.
+    UnsupportedRedistributorStride,
+    /// A GICv3 redistributor region is not a whole number of frames.
+    UnalignedRedistributorRegion,
+    /// GICv3 redistributor regions are not contiguous.
+    DiscontiguousRedistributorRegions,
+    /// A GICv3 redistributor region end overflows the address space.
+    RedistributorRegionOverflow,
+    /// The firmware description of the controller is malformed.
+    InvalidFirmwareConfig(GicConfigError),
+    /// The firmware description has no available supported controller.
+    NoController,
+    /// The controller node could not be associated with its IRQ domain.
+    DomainRegistration(kirq::IrqDomainRegisterError),
+    /// Local initialization was entered with IRQ delivery enabled.
+    LocalIrqsEnabled,
+    /// Local initialization was already attempted on this CPU.
+    LocalInitAlreadyAttempted,
+    /// The GICv2 controller has not been initialized.
+    NotInitialized,
+    /// The GICv2 logical CPU exceeds the CPU-interface range.
+    LogicalCpuOutOfRange,
+    /// The GICv2 CPU target is not one implemented CPU-interface bit.
+    InvalidCpuTarget,
+    /// The GICv2 CPU target conflicts with an established association.
+    ConflictingCpuTarget,
+    /// The current CPU has no hardware identity.
+    MissingHardwareCpuId,
+    /// The boot CPU's GICv2 target could not be discovered.
+    BootCpuTargetDiscovery,
+    /// The current CPU's GICv2 target could not be discovered.
+    CurrentCpuTargetDiscovery,
+    /// The GICv3 CPU interface failed to initialize.
+    CpuInterface {
+        /// Backend diagnostic.
+        reason: &'static str,
+    },
+}
+
+impl fmt::Display for GicInitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnexpectedRedistributor => {
+                f.write_str("GICv2 configuration carries a redistributor")
+            }
+            Self::MissingRedistributor => f.write_str("GICv3 configuration lacks a redistributor"),
+            Self::InvalidRedistributorCount => {
+                f.write_str("invalid GICv3 redistributor region count")
+            }
+            Self::RedistributorCountMismatch => {
+                f.write_str("GICv3 redistributor region count mismatch")
+            }
+            Self::UnsupportedRedistributorStride => {
+                f.write_str("unsupported GICv3 redistributor stride")
+            }
+            Self::UnalignedRedistributorRegion => {
+                f.write_str("GICv3 redistributor region is not frame-aligned")
+            }
+            Self::DiscontiguousRedistributorRegions => {
+                f.write_str("discontiguous GICv3 redistributor regions are unsupported")
+            }
+            Self::RedistributorRegionOverflow => {
+                f.write_str("GICv3 redistributor region overflows")
+            }
+            Self::InvalidFirmwareConfig(error) => {
+                write!(f, "invalid GIC firmware configuration: {error:?}")
+            }
+            Self::NoController => {
+                f.write_str("no available supported GIC controller in firmware description")
+            }
+            Self::DomainRegistration(error) => {
+                write!(f, "failed to register GIC IRQ domain: {error:?}")
+            }
+            Self::LocalIrqsEnabled => f.write_str("local GIC initialization requires IRQs masked"),
+            Self::LocalInitAlreadyAttempted => {
+                f.write_str("local GIC initialization already attempted")
+            }
+            Self::NotInitialized => f.write_str("GICv2 is not initialized"),
+            Self::LogicalCpuOutOfRange => {
+                f.write_str("GICv2 logical CPU exceeds the CPU-interface range")
+            }
+            Self::InvalidCpuTarget => {
+                f.write_str("GICv2 CPU target is not one implemented CPU-interface bit")
+            }
+            Self::ConflictingCpuTarget => f.write_str("conflicting GICv2 CPU target association"),
+            Self::MissingHardwareCpuId => f.write_str("GICv2 CPU has no hardware identity"),
+            Self::BootCpuTargetDiscovery => f.write_str("failed to discover boot GICv2 CPU target"),
+            Self::CurrentCpuTargetDiscovery => {
+                f.write_str("failed to discover current GICv2 CPU target")
+            }
+            Self::CpuInterface { reason } => {
+                write!(f, "GICv3 CPU interface initialization failed: {reason}")
+            }
+        }
+    }
+}
+
 /// Validates the firmware-described layout against the current backend.
-fn validate_config(config: GicConfig) -> Result<(), &'static str> {
+fn validate_config(config: GicConfig) -> Result<(), GicInitError> {
     match config.version {
         GicVersion::V2 => {
             if config.gicr.is_some() {
-                return Err("GICv2 configuration carries a redistributor");
+                return Err(GicInitError::UnexpectedRedistributor);
             }
             Ok(())
         }
         GicVersion::V3 => {
-            let gicr = config
-                .gicr
-                .ok_or("GICv3 configuration lacks a redistributor")?;
+            let gicr = config.gicr.ok_or(GicInitError::MissingRedistributor)?;
             if gicr.count == 0 || gicr.count > MAX_GICR_REGIONS {
-                return Err("invalid GICv3 redistributor region count");
+                return Err(GicInitError::InvalidRedistributorCount);
             }
             if gicr
                 .regions
@@ -324,26 +430,26 @@ fn validate_config(config: GicConfig) -> Result<(), &'static str> {
                 .count()
                 != gicr.count
             {
-                return Err("GICv3 redistributor region count mismatch");
+                return Err(GicInitError::RedistributorCountMismatch);
             }
             if gicr.stride != 0 && gicr.stride != GICR_FRAME_SIZE {
-                return Err("unsupported GICv3 redistributor stride");
+                return Err(GicInitError::UnsupportedRedistributorStride);
             }
             let mut previous_end = None;
             for region in gicr.regions() {
                 if region.size == 0 || !region.size.is_multiple_of(GICR_FRAME_SIZE) {
-                    return Err("GICv3 redistributor region is not frame-aligned");
+                    return Err(GicInitError::UnalignedRedistributorRegion);
                 }
                 let start = region.paddr.as_usize();
                 if let Some(end) = previous_end
                     && end != start
                 {
-                    return Err("discontiguous GICv3 redistributor regions are unsupported");
+                    return Err(GicInitError::DiscontiguousRedistributorRegions);
                 }
                 previous_end = Some(
                     start
                         .checked_add(region.size)
-                        .ok_or("GICv3 redistributor region overflows")?,
+                        .ok_or(GicInitError::RedistributorRegionOverflow)?,
                 );
             }
             Ok(())
@@ -368,7 +474,7 @@ fn validate_config(config: GicConfig) -> Result<(), &'static str> {
 /// # Panics
 /// Panics on conflicting configuration, invalid MMIO configuration or a fatal
 /// controller-wide initialization failure.
-pub fn init(config: GicConfig) -> Result<(), &'static str> {
+pub fn init(config: GicConfig) -> Result<(), GicInitError> {
     validate_config(config)?;
     remember_config(config);
     if let Some(active) = ACTIVE_GIC.get() {
@@ -406,13 +512,13 @@ pub fn init(config: GicConfig) -> Result<(), &'static str> {
 ///
 /// # Panics
 /// Has the same controller-wide failure conditions as [`init`].
-pub fn init_from_fwnode(root: fwnode::FwNode<'static>) -> Result<(), &'static str> {
+pub fn init_from_fwnode(root: fwnode::FwNode<'static>) -> Result<(), GicInitError> {
     let GicSelection { config, controller } = GicConfig::from_fwnode(root)
         .map_err(|error| {
             error!("invalid GIC firmware configuration: {error:?}");
-            "invalid GIC firmware configuration"
+            GicInitError::InvalidFirmwareConfig(error)
         })?
-        .ok_or("no available supported GIC controller in firmware description")?;
+        .ok_or(GicInitError::NoController)?;
     init(config)?;
     // Boot wiring explicitly keeps the primary GIC on the legacy root. A future
     // second hardware instance must choose `IrqDomainTarget::New` on its own
@@ -424,7 +530,7 @@ pub fn init_from_fwnode(root: fwnode::FwNode<'static>) -> Result<(), &'static st
     )
     .map_err(|error| {
         error!("failed to register GIC IRQ domain: {error:?}");
-        "failed to register GIC IRQ domain"
+        GicInitError::DomainRegistration(error)
     })?;
     GIC_DOMAIN.init_once(domain);
     Ok(())
@@ -454,10 +560,10 @@ pub fn init_from_fwnode(root: fwnode::FwNode<'static>) -> Result<(), &'static st
 ///
 /// # Panics
 /// Panics if global controller initialization has not run.
-pub fn init_current_cpu() -> Result<(), &'static str> {
+pub fn init_current_cpu() -> Result<(), GicInitError> {
     let version = active_version();
     if karch::local_irq_enabled() {
-        return Err("local GIC initialization requires IRQs masked");
+        return Err(GicInitError::LocalIrqsEnabled);
     }
     // The boot caller excludes migration. Claim before any destructive MMIO;
     // an unsuccessful attempt stays claimed because hardware is not rolled back.
@@ -465,7 +571,7 @@ pub fn init_current_cpu() -> Result<(), &'static str> {
         .current_shared()
         .swap(true, Ordering::Relaxed)
     {
-        return Err("local GIC initialization already attempted");
+        return Err(GicInitError::LocalInitAlreadyAttempted);
     }
     match version {
         GicVersion::V2 => gicv2::init_current_cpu()?,

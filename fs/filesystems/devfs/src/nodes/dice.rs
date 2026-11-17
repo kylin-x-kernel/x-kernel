@@ -118,6 +118,9 @@ fn get_process_hash() -> KResult<Vec<u8>> {
     Ok(sm3_result)
 }
 
+// SAFETY: `get_rand` has one definition in kernel sources. No caller exists
+// in this repository; when DICE is linked and this export retained, its C ABI
+// must remain `fn(usize, usize) -> u32`.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn get_rand(output: usize, len: usize) -> u32 {
     if len == 0 {

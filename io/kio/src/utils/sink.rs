@@ -11,7 +11,7 @@ use crate::{IoBufMut, Result, Write};
 /// This struct is generally created by calling [`sink()`]. Please
 /// see the documentation of [`sink()`] for more details.
 #[non_exhaustive]
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Sink;
 
 /// Creates an instance of a writer which will successfully consume all data.

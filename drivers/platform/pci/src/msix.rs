@@ -31,8 +31,41 @@ const MSIX_FUNCTION_MASK: u32 = (MSG_CTRL_FUNCTION_MASK as u32) << 16;
 const MAX_MSIX_TABLE_ENTRIES: u16 = 2048;
 const STATUS_COMMAND_OFFSET: u16 = 0x04;
 
+/// A validation failure for an MSI-X table or pending-bit array layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MsixLayoutError {
+    /// The MSI-X table BAR index is outside the PCI BAR range.
+    InvalidTableBarIndex,
+    /// The PBA BAR index is outside the PCI BAR range.
+    InvalidPbaBarIndex,
+    /// The table size is outside the supported range.
+    InvalidTableSize,
+    /// The table end offset overflows its integer representation.
+    TableSizeOverflow,
+    /// The table range extends beyond its BAR.
+    TableOutsideBar,
+    /// The PBA end offset overflows its integer representation.
+    PbaSizeOverflow,
+    /// The PBA range extends beyond its BAR.
+    PbaOutsideBar,
+}
+
+impl core::fmt::Display for MsixLayoutError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidTableBarIndex => "invalid MSI-X table BAR index",
+            Self::InvalidPbaBarIndex => "invalid MSI-X PBA BAR index",
+            Self::InvalidTableSize => "invalid MSI-X table size",
+            Self::TableSizeOverflow => "MSI-X table size overflow",
+            Self::TableOutsideBar => "MSI-X table outside BAR",
+            Self::PbaSizeOverflow => "MSI-X PBA size overflow",
+            Self::PbaOutsideBar => "MSI-X PBA outside BAR",
+        })
+    }
+}
+
 /// Parsed MSI-X capability information for a PCI device.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MsixCapability {
     /// Offset of the MSI-X capability in PCI config space.
     pub cap_offset: u16,
@@ -171,35 +204,40 @@ pub fn find_msix_capability<C: ConfigurationAccess>(
 }
 
 /// Validates that the MSI-X table and PBA fit in their BARs.
+///
+/// # Errors
+///
+/// Returns the specific invalid BAR, table-size, overflow, or out-of-range
+/// condition while preserving the previous diagnostic text through `Display`.
 pub fn validate_msix_layout(
     cap: &MsixCapability,
     table_bar_size: u64,
     pba_bar_size: u64,
-) -> Result<(), &'static str> {
+) -> Result<(), MsixLayoutError> {
     if cap.table_bar >= PCI_BAR_COUNT {
-        return Err("invalid MSI-X table BAR index");
+        return Err(MsixLayoutError::InvalidTableBarIndex);
     }
     if cap.pba_bar >= PCI_BAR_COUNT {
-        return Err("invalid MSI-X PBA BAR index");
+        return Err(MsixLayoutError::InvalidPbaBarIndex);
     }
     if cap.table_size == 0 || cap.table_size > MAX_MSIX_TABLE_ENTRIES {
-        return Err("invalid MSI-X table size");
+        return Err(MsixLayoutError::InvalidTableSize);
     }
 
     let table_bytes = u64::from(cap.table_size) * core::mem::size_of::<MsixTableEntry>() as u64;
     let table_end = u64::from(cap.table_offset)
         .checked_add(table_bytes)
-        .ok_or("MSI-X table size overflow")?;
+        .ok_or(MsixLayoutError::TableSizeOverflow)?;
     if table_end > table_bar_size {
-        return Err("MSI-X table outside BAR");
+        return Err(MsixLayoutError::TableOutsideBar);
     }
 
     let pba_bytes = u64::from(cap.table_size).div_ceil(64) * 8;
     let pba_end = u64::from(cap.pba_offset)
         .checked_add(pba_bytes)
-        .ok_or("MSI-X PBA size overflow")?;
+        .ok_or(MsixLayoutError::PbaSizeOverflow)?;
     if pba_end > pba_bar_size {
-        return Err("MSI-X PBA outside BAR");
+        return Err(MsixLayoutError::PbaOutsideBar);
     }
 
     Ok(())

@@ -21,7 +21,7 @@ use crate::{MmioRegion, ResResult};
 /// A token identifies one claim exactly; it does not transfer ownership when
 /// copied. Only the original unreleased token may be passed to
 /// [`MmioClaimOp::release_mmio`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MmioClaimToken {
     region: MmioRegion,
     id: NonZeroUsize,

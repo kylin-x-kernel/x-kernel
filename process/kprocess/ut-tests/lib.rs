@@ -4141,7 +4141,9 @@ fn test_timer_rearm_and_delete_cancel_pending_without_acknowledgement() {
                 .unwrap();
             let delivery = manager
                 .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO)
-                .remove(0);
+                .into_iter()
+                .next()
+                .unwrap();
             (update, delivery)
         };
         update.finish();
@@ -4279,7 +4281,9 @@ fn test_timer_dispatch_uses_captured_target_not_numeric_envelope() {
                 .unwrap();
             let delivery = manager
                 .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO)
-                .remove(0);
+                .into_iter()
+                .next()
+                .unwrap();
             drop(manager);
             update.finish();
             delivery

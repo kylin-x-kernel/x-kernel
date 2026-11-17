@@ -119,7 +119,9 @@ an already resolved object.
 
 `ElfCacheEntry::load_file` reads up to 4096 bytes and then reads the complete,
 checked program-header range when necessary. Short reads, file-bound violations,
-and range conversion failures reject the image. `ouroboros`
+and range conversion failures reject the image. The ELF parser returns typed
+`ElfError` variants; the loader logs their preserved diagnostic text and maps
+parser failures to `KError::InvalidExecutable`. `ouroboros`
 encapsulates a self-referential header view over owned data. Under `tee_ta_sign`,
 TA verification is requested before accepting an entry; failure maps to
 `PermissionDenied`. Entries are keyed by `Path::ptr_eq`, not file content version.

@@ -88,7 +88,7 @@ const SHOOTDOWN_RESEND_INTERVAL: TimeSpan = TimeSpan::from_secs(1);
 const SHOOTDOWN_ESCALATE_TIMEOUT: TimeSpan = TimeSpan::from_secs(10);
 const SHOOTDOWN_GIVE_UP_TIMEOUT: TimeSpan = TimeSpan::from_secs(30);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RequestSeq(u64);
 
 impl RequestSeq {

@@ -116,7 +116,7 @@ pub(crate) struct LineDiscipline<W> {
     line_read: Option<usize>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) enum InputStop {
     InputEmpty,
     OutputFull,

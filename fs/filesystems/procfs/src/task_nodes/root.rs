@@ -1225,7 +1225,7 @@ fn make_thread_dir(
 /// Namespace kinds exposed through `/proc/<pid>/ns`.
 ///
 /// Ordering matches Linux's proc directory listing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProcNsKind {
     Mnt,
     Pid,

@@ -28,8 +28,8 @@ bitflags! {
 }
 
 /// Lifecycle state of a TIPC service port.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IpcPortState {
     /// The port has not been published or has been closed.
     Invalid   = 0,

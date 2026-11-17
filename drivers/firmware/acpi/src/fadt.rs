@@ -9,7 +9,7 @@ use acpi_rs::sdt::borrowed::fadt::Fadt;
 use super::{desc, table};
 
 /// PM1a control register selected for the kernel's port-I/O power path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Pm1aControlBlock {
     /// Nonzero I/O port representable by the platform.
     pub port: u16,

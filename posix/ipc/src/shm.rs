@@ -200,7 +200,7 @@ impl ShmInner {
 }
 
 /// A bidirectional one-to-one ordered map with replacement on either key.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct BiBTreeMap<K, V>
 where
     K: Ord + Clone,

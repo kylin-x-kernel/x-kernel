@@ -32,7 +32,7 @@ pub(crate) fn holder_key(task: &TaskInner) -> u64 {
 }
 
 /// Where the recorded holder of a [`LockOwner`] is, for a spinner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LockOwnerState {
     /// No holder is recorded: the lock is free, held by readers, or a writer
     /// is between acquiring and recording itself.

@@ -21,11 +21,11 @@ triggers:
   synchronization and FFI boundaries, plus reused raw output formats.
   Not this rule: [CG-025](CG-025-minimal-unsafe-scope.md) owns minimal unsafe
   block scope; [CG-019](CG-019-user-pointers-stop-at-syscall-boundary.md) owns
-  user-access placement at syscall frontends and the pending Dylint lint `unsound_user_abi_impl` ([pending](pending.md))/
-  the pending Dylint lint `user_copy_without_abi_contract` ([pending](pending.md)) own user-copy ABI contracts.
+  user-access placement at syscall frontends and the Dylint lint `unsound_user_abi_impl` ([CG-005](CG-005-user-abi-layout.md))/
+  the Dylint lint `user_copy_without_abi_contract` ([CG-006](CG-006-user-copy-abi-contract.md)) own user-copy ABI contracts.
   This rule owns matching-helper reuse, including user-memory code outside
   syscall frontends. Capacity proof remains [CG-020](CG-020-raw-output-buffer-capacity.md),
-  and foreign declaration visibility remains the pending Dylint lint `exported_foreign_item` ([pending](pending.md)).
+  and foreign declaration visibility remains the Dylint lint `exported_foreign_item` ([CG-012](CG-012-private-foreign-items.md)).
 - **Why**: Centralizing validation, ownership and unsafe invariants makes
   the boundary auditable and prevents scattered raw foreign calls. The
   [Nomicon FFI guidance](https://doc.rust-lang.org/nomicon/ffi.html) recommends

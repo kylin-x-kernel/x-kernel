@@ -17,9 +17,9 @@ triggers:
   rather than counting every failed poll.
 - **Scope**: Local acquisition-success and blocking/slow branches of instrumented
   lock implementations.
-  Not this rule: the pending Dylint lint `untracked_runtime_lock` ([pending](pending.md)) owns runtime
+  Not this rule: the Dylint lint `untracked_runtime_lock` ([CG-003](CG-003-runtime-lock-tracking.md)) owns runtime
   constructor tracking and [CG-001](CG-001-static-spinlock-registration.md)/
-  the pending Dylint lint `unregistered_static_lock` ([pending](pending.md)) own static registration.
+  the Dylint lint `unregistered_static_lock` ([CG-002](CG-002-static-mutex-registration.md)) own static registration.
   The `lock_stat_record_api_bypass` candidate in [pending.md](pending.md)
   checks field mutation outside record implementations, not branch accounting.
 - **Why**: Incorrect acquisition or contention counts misrepresent lock

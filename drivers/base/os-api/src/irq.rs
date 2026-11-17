@@ -25,7 +25,7 @@ use crate::{ResError, ResResult};
 /// which is exactly the confusion that made IRQ routing bugs invisible on
 /// identity-mapped QEMU. The newtype keeps them apart: only [`Virq::raw`]
 /// crosses into a plain number, and only at a boundary that demands one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Virq(usize);
 
 impl Virq {
@@ -48,7 +48,7 @@ impl core::fmt::Display for Virq {
 }
 
 /// Device-visible MSI message returned by the host IRQ core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 
 pub struct MsiMessage {
     /// Message address programmed into the device.
@@ -65,7 +65,7 @@ impl MsiMessage {
 }
 
 /// An interrupt resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqResource {
     /// A plain virtual irq with no retained origin.
     PlainVirq { virq: Virq, trigger: IrqTrigger },
@@ -95,7 +95,7 @@ pub enum IrqResource {
 /// must return it to the allocating provider after source/action shutdown;
 /// dropping this value alone does not free the vector. [`IrqOp::try_free_msix`]
 /// returns this same identity on rejection so the owner can retain and retry it.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct MsiResource {
     /// OS-visible IRQ used for handler registration.
     pub irq: IrqResource,
@@ -108,7 +108,7 @@ pub struct MsiResource {
 /// Firmware (device-tree / ACPI) or bus discovery produces this raw
 /// description; the provider's [`IrqOp::map_irq`] turns it into the OS-visible
 /// [`IrqResource`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct IrqRouteDesc {
     /// Hardware IRQ number as discovered (e.g. GIC SPI number, PLIC source).
     pub hwirq: usize,
@@ -125,7 +125,7 @@ pub struct IrqRouteDesc {
 /// Shared hardirq registrations are released by the provider-local action id.
 /// Non-shared regular registrations own the whole IRQ action and are released
 /// without a per-action id. Threaded registration defaults to Unsupported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqHandlerToken {
     /// One handler within a shared IRQ action list.
     SharedAction(usize),

@@ -17,7 +17,7 @@ mod impls;
 /// Enumeration of possible methods to seek within an I/O object.
 ///
 /// It is used by the [`Seek`] trait.
-#[derive(Copy, PartialEq, Eq, Clone, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SeekFrom {
     /// Sets the offset to the provided number of bytes.
     Start(u64),

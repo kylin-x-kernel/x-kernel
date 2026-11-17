@@ -32,6 +32,9 @@ fn enable_fp_simd() {
     }
 }
 
+// SAFETY: The boot image exposes this unique `_start` symbol to firmware with a0=hart id and
+// a1=DTB physical address, before a Rust stack exists; the naked body consists only of boot
+// assembly.
 /// Primary CPU early boot entry.
 ///
 /// On entry:
@@ -86,6 +89,9 @@ unsafe extern "C" fn _start() -> ! {
     )
 }
 
+// SAFETY: The secondary boot path exposes this unique C ABI symbol with a0=hart id and a1=valid
+// physical stack top; its naked assembly installs the stack and enables paging before the
+// handoff.
 /// Secondary CPU early boot entry.
 ///
 /// # Safety

@@ -45,7 +45,7 @@ const NO_OVERRIDE: IrqOverride = IrqOverride {
 };
 
 /// A legacy ISA interrupt remapped by an ACPI interrupt source override.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrqOverride {
     /// ISA interrupt line (0..=15).
     pub isa_irq: u8,
@@ -59,7 +59,7 @@ pub struct IrqOverride {
 ///
 /// Issues describe skipped or superseded declarations; they never invalidate
 /// the declarations that were retained.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum X86DiscoveryIssue {
     /// IO-APIC address is zero.
     ZeroIoApicAddress { id: u8 },
@@ -84,7 +84,7 @@ pub enum X86DiscoveryIssue {
 }
 
 /// Why firmware discovery could not produce a usable declaration set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum X86DiscoveryError {
     /// No ACPI MADT or no usable IO-APIC was reported.
     Absent,
@@ -96,7 +96,7 @@ pub enum X86DiscoveryError {
 ///
 /// The result is an unvalidated topology: addresses, GSI ranges and pin
 /// counts are not checked against hardware here.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct X86ApicDeclarations {
     io_apics: [IoApicDeclaration; MAX_IO_APICS],
     io_apic_count: usize,

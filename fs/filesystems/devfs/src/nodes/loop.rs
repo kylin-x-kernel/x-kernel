@@ -3,19 +3,20 @@
 // See LICENSES for license details.
 
 use alloc::{format, sync::Arc, vec::Vec};
-use core::{
-    mem::{MaybeUninit, size_of},
-    slice,
-};
+use core::mem::{align_of, offset_of, size_of};
 
 use kerrno::{KError, KResult, LinuxError};
 use klazy::Lazy;
 use ksync::{Mutex, static_lock};
 use kvfs::{FMode, NodeType, VfsFile, VfsResult};
-use linux_raw_sys::loop_device::{
-    LO_FLAGS_READ_ONLY, LOOP_CLR_FD, LOOP_GET_STATUS, LOOP_SET_FD, LOOP_SET_STATUS, loop_info,
+use linux_raw_sys::{
+    ctypes::{c_char, c_int, c_uchar, c_ulong},
+    loop_device::{
+        __kernel_old_dev_t, LO_FLAGS_READ_ONLY, LOOP_CLR_FD, LOOP_GET_STATUS, LOOP_SET_FD,
+        LOOP_SET_STATUS, loop_info,
+    },
 };
-use osvm::VirtMutPtr;
+use posix_types::{UserPtr, UserRead, UserWrite};
 
 static_lock! {
     static LOOP_VALIDATE_MUTEX: Mutex<()> = Mutex::new(());
@@ -28,20 +29,79 @@ pub(crate) struct LoopDevice {
     pub file: Mutex<Option<Arc<VfsFile>>>,
 }
 
-const fn empty_loop_info() -> loop_info {
-    loop_info {
-        lo_number: 0,
-        lo_device: 0,
-        lo_inode: 0,
-        lo_rdevice: 0,
-        lo_offset: 0,
-        lo_encrypt_type: 0,
-        lo_encrypt_key_size: 0,
-        lo_flags: 0,
-        lo_name: [0; 64],
-        lo_encrypt_key: [0; 32],
-        lo_init: [0; 2],
-        reserved: [0; 4],
+/// A `struct loop_info` carrier for `LOOP_GET_STATUS` and `LOOP_SET_STATUS`.
+///
+/// `linux_raw_sys::loop_device::loop_info` has four bytes of implicit padding
+/// after `lo_number` on x86_64, and before `lo_init` elsewhere, plus four
+/// trailing bytes on every target. Copying that type to user memory would expose
+/// uninitialized kernel bytes, so this carrier models the gaps as explicit
+/// fields that [`LoopInfo::zeroed`] sets to zero.
+#[repr(C)]
+#[derive(Clone, Copy, UserRead, UserWrite)]
+pub(crate) struct LoopInfo {
+    /// Loop device number.
+    pub lo_number: c_int,
+    #[cfg(target_arch = "x86_64")]
+    abi_pad: u32,
+    /// Device number of the backing file's filesystem.
+    pub lo_device: __kernel_old_dev_t,
+    /// Inode number of the backing file.
+    pub lo_inode: c_ulong,
+    /// Device number of the backing device.
+    pub lo_rdevice: __kernel_old_dev_t,
+    /// Byte offset of the data within the backing file.
+    pub lo_offset: c_int,
+    /// Encryption type; always zero here.
+    pub lo_encrypt_type: c_int,
+    /// Encryption key size; always zero here.
+    pub lo_encrypt_key_size: c_int,
+    /// `LO_FLAGS_*` bits.
+    pub lo_flags: c_int,
+    /// Backing file name.
+    pub lo_name: [c_char; 64],
+    /// Encryption key.
+    pub lo_encrypt_key: [c_uchar; 32],
+    #[cfg(not(target_arch = "x86_64"))]
+    abi_pad: u32,
+    /// Opaque initialization values.
+    pub lo_init: [c_ulong; 2],
+    /// Reserved bytes.
+    pub reserved: [c_char; 4],
+    abi_pad_tail: u32,
+}
+
+const _: () = {
+    assert!(size_of::<LoopInfo>() == size_of::<loop_info>());
+    assert!(align_of::<LoopInfo>() == align_of::<loop_info>());
+    assert!(offset_of!(LoopInfo, lo_device) == offset_of!(loop_info, lo_device));
+    assert!(offset_of!(LoopInfo, lo_flags) == offset_of!(loop_info, lo_flags));
+    assert!(offset_of!(LoopInfo, lo_encrypt_key) == offset_of!(loop_info, lo_encrypt_key));
+    assert!(offset_of!(LoopInfo, lo_init) == offset_of!(loop_info, lo_init));
+    assert!(offset_of!(LoopInfo, reserved) == offset_of!(loop_info, reserved));
+};
+
+impl LoopInfo {
+    /// Returns a value with every field, including padding, set to zero.
+    pub(crate) const fn zeroed() -> Self {
+        Self {
+            lo_number: 0,
+            #[cfg(target_arch = "x86_64")]
+            abi_pad: 0,
+            lo_device: 0,
+            lo_inode: 0,
+            lo_rdevice: 0,
+            lo_offset: 0,
+            lo_encrypt_type: 0,
+            lo_encrypt_key_size: 0,
+            lo_flags: 0,
+            lo_name: [0; 64],
+            lo_encrypt_key: [0; 32],
+            #[cfg(not(target_arch = "x86_64"))]
+            abi_pad: 0,
+            lo_init: [0; 2],
+            reserved: [0; 4],
+            abi_pad_tail: 0,
+        }
     }
 }
 
@@ -55,32 +115,20 @@ impl LoopDevice {
     }
 
     /// Returns the current loop configuration.
-    pub(crate) fn get_info(&self, block_device: &block::BlockDevice) -> KResult<loop_info> {
+    pub(crate) fn get_info(&self, block_device: &block::BlockDevice) -> KResult<LoopInfo> {
         if self.file.lock().is_none() {
             return Err(KError::from(LinuxError::ENXIO));
         }
-        Ok(loop_info {
-            lo_number: self.number as _,
-            lo_device: 0,
-            lo_inode: 0,
-            lo_rdevice: 0,
-            lo_offset: 0,
-            lo_encrypt_type: 0,
-            lo_encrypt_key_size: 0,
-            lo_flags: if block_device.is_read_only() {
-                LO_FLAGS_READ_ONLY as i32
-            } else {
-                0
-            },
-            lo_name: [0; 64],
-            lo_encrypt_key: [0; 32],
-            lo_init: [0; 2],
-            reserved: [0; 4],
-        })
+        let mut info = LoopInfo::zeroed();
+        info.lo_number = self.number as _;
+        if block_device.is_read_only() {
+            info.lo_flags = LO_FLAGS_READ_ONLY as c_int;
+        }
+        Ok(info)
     }
 
     /// Applies loop configuration fields supported by this driver.
-    pub(crate) fn set_info(&self, _src: loop_info) -> KResult<()> {
+    pub(crate) fn set_info(&self, _src: LoopInfo) -> KResult<()> {
         Ok(())
     }
 
@@ -169,23 +217,13 @@ impl LoopDevice {
                 block_device.disk().inc_diskseq();
             }
             LOOP_GET_STATUS => {
-                (arg as *mut loop_info).write_vm(self.get_info(block_device)?)?;
+                UserPtr::<LoopInfo>::from(arg).write_vm(self.get_info(block_device)?)?;
             }
             LOOP_SET_STATUS => {
                 if !mode.contains(block::BlockOpenMode::WRITE) && !has_sys_admin {
                     return Err(KError::from(LinuxError::EPERM));
                 }
-                let mut info = empty_loop_info();
-                // SAFETY: `info` is a live POD value and the byte slice covers
-                // exactly its initialized storage for a copy-from-user.
-                let info_bytes = unsafe {
-                    slice::from_raw_parts_mut(
-                        (&mut info as *mut loop_info).cast::<MaybeUninit<u8>>(),
-                        size_of::<loop_info>(),
-                    )
-                };
-                osvm::read_vm_bytes(arg as *const u8, info_bytes)?;
-                self.set_info(info)?;
+                self.set_info(UserPtr::<LoopInfo>::from(arg).read_vm()?)?;
             }
             _ => return Err(KError::NotATty),
         }

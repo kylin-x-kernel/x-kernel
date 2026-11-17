@@ -6,7 +6,7 @@
 
 //! Platform clock-source and clock-event providers for `khal::time`.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimerSource {
     PlatformStatic,
     DeviceTree,

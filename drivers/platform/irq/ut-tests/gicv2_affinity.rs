@@ -18,7 +18,7 @@ const INTID: IntId = IntId::spi(17);
 const OLD_TARGET: TargetList = TargetList::from_raw(0x40);
 const NEW_TARGET: TargetList = TargetList::from_raw(0x20);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 enum Access {
     ReadEnable,
     WriteEnable(bool),

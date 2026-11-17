@@ -122,6 +122,9 @@ fn get_cpu_id() -> RawCpuId {
     )
 }
 
+// SAFETY: The temporary x86 assembly calls this unique C ABI symbol with magic, payload
+// pointer, and handoff argument in the declared register order; its boot mappings keep them
+// live.
 #[unsafe(no_mangle)]
 /// # Safety
 ///
@@ -177,6 +180,8 @@ pub(super) unsafe extern "C" fn rust_entry(magic: usize, mbi: usize, handoff_arg
     }
 }
 
+// SAFETY: The AP assembly calls this unique C ABI symbol with one magic argument after
+// installing the temporary AP environment and stack.
 #[unsafe(no_mangle)]
 /// # Safety
 ///

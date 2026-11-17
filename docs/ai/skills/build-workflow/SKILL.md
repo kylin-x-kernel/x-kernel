@@ -73,6 +73,10 @@ exports the compiler's code facts (call graph, items, unsafe and atomic sites)
 for the review code index and packs them into `<dir>`; see
 `tools/lints/README.md`. Install the pinned tools with
 `make install-tools` after adding the nightly components and target above.
+`make dylint XKMAKE_ARGS=--fix` applies machine suggestions across local
+packages in the configured application's compilation graph, including
+dependencies of `entry`. It checks that selecting those packages for fixes
+does not change their resolved features.
 
 ## Configuration
 

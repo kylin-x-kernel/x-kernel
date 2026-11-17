@@ -60,6 +60,7 @@ None. The crate contains no `unsafe`, no FFI, and no inline assembly
 | T-02 | Host reads stale kernel data from the shadow | Medium — kernel data disclosure via the display | Shadow not zeroed, or buffer reused | Shadow is allocated fresh and zeroed before `create_scanout_resource`; retained forever, never reused. |
 | T-03 | Display driver programs the host with a wrong address/length | Medium — device DMA outside the shadow | Driver bug in `create_scanout_resource` handling | Address and length come from the validated page allocation (`PageRef::phys_addr`, separately retained requested page-aligned length); driver conformance is the residual trust. |
 | T-04 | Present racing device removal | Low — error return or stale frame | Hot-removal of the display device | No teardown exists; the cached device handle outlives everything, so the race cannot produce UAF — worst case is a failed present (`false`). |
+| T-05 | `FBIOGET_FSCREENINFO` leaks kernel memory through struct padding | High — uninitialized kernel bytes reach userspace | The ioctl copies implicit gaps in `FixScreenInfo` | The ABI gaps are explicit fields set to zero; framebuffer results copy through `UserPtr::write_vm` with `UserWrite`. |
 
 ## Failure Modes
 

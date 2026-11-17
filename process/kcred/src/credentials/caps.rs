@@ -134,7 +134,7 @@ pub const CAP_FS_MASK: CapSet = CapSet::from_bits(
 /// every input bit so the type can represent an arbitrary two-word ABI value and
 /// support set algebra. The capability syscall masks user input against
 /// [`CapSet::FULL`] before installing it in a credential.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CapSet(u64);
 
 impl CapSet {
@@ -232,7 +232,7 @@ impl core::ops::BitAnd for CapSet {
 /// the file inheritable set. The bounding set is stored separately on
 /// [`super::Cred`] because it limits file capabilities rather than the current
 /// process capability state.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CapSets {
     effective: CapSet,
     permitted: CapSet,

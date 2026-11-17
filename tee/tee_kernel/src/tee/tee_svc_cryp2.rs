@@ -58,7 +58,7 @@ use crate::tee::{
 /// * `Finalized` — digest/MAC `final` has completed; further `update` is
 ///   `TEE_ERROR_BAD_STATE` (GP DoFinal). The live ctx is kept (clone-finalize)
 ///   so DigestExtract → CopyOperation still works.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum CrypState {
     Initialized = 0,
     Uninitialized,
@@ -142,8 +142,8 @@ pub(crate) enum HmacContext {
 }
 
 /// CMAC context backed by tee_crypto streaming MAC types.
-#[derive(Clone)]
 #[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
 pub(crate) enum CmacContext {
     Aes128(tee_crypto::mac::Aes128Cmac),
     Aes192(tee_crypto::mac::Aes192Cmac),

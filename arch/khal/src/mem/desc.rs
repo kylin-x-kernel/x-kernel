@@ -14,7 +14,7 @@ pub type MemRange = (usize, usize);
 /// Legacy alias kept for older platform-local code.
 pub type RawRange = MemRange;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReservedKind {
     Firmware,
     Acpi,
@@ -27,7 +27,7 @@ pub enum ReservedKind {
     Platform,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReservedSource {
     DeviceTree,
     Acpi,
@@ -54,7 +54,7 @@ impl fmt::Display for ReservedSource {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReservedRegion {
     pub start: usize,
     pub size: usize,
@@ -153,7 +153,7 @@ pub(super) const MMIO_DEF: MemFlags = MemFlags::R
     .union(MemFlags::W)
     .union(MemFlags::DEV)
     .union(MemFlags::RSVD);
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MemoryRegion {
     /// Physical start address.
     pub paddr: PhysAddr,

@@ -538,7 +538,8 @@ Reproducible boot checks and their coverage limits are in [testing.md](testing.m
   so preparation relies on CPU IRQ masking rather than disabled SGI readback.
   The existing CPU-interface driver resets all private priorities to `0xa0`;
   that per-CPU operation runs after releasing the global GIC lock.
-- GIC initialization returns local CPU-interface errors to the platform caller.
+- GIC initialization returns local CPU-interface errors to the platform caller
+  as `GicInitError`, whose `Display` text names the failed check.
   GICv3 EOI-mode setup and PMR readiness publication occur only after successful
   local initialization. Global hardware may already be configured on failure;
   there is no rollback guarantee. Mandatory platform bring-up stops on error

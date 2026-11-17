@@ -9,7 +9,7 @@ use kspin::{SpinNoIrq, static_lock};
 use crate::{MAX_SIGNALS, SignalInfo, Signo};
 
 /// The observer's decision for a dequeued signal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SignalDequeueAction {
     /// Delivers the signal to normal signal handling.
     Deliver,

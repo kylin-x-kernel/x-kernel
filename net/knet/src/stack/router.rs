@@ -606,18 +606,16 @@ impl Router {
         for addr in addresses {
             let entry = addr.entry;
             events.push(NetworkEvent::AddrRemoved { addr });
-            let mut index = 0;
-            while index < remaining_routes.len() {
-                if Self::route_derived_from_address(remaining_routes[index], dev, entry) {
-                    let route = remaining_routes.remove(index);
-                    events.push(NetworkEvent::RouteRemoved {
+            events.extend(
+                remaining_routes
+                    .extract_if(.., |route| {
+                        Self::route_derived_from_address(*route, dev, entry)
+                    })
+                    .map(|route| NetworkEvent::RouteRemoved {
                         route,
                         provenance: RouteProvenance::Kernel,
-                    });
-                } else {
-                    index += 1;
-                }
-            }
+                    }),
+            );
         }
         // Routes configured directly on the departing device (including routes
         // whose preferred source belongs to another interface) are flushed only

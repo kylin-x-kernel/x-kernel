@@ -18,8 +18,9 @@ mod test_stubs {
 
     macro_rules! stub {
         ($name:ident) => {
-            // `no_mangle`: `dwarf.rs` references these through an `extern`
-            // block, which resolves the unmangled C symbol name.
+            // SAFETY: Each test stub has the unique linker symbol named by
+            // `dwarf.rs`'s extern declaration; only its address is used, and
+            // the one-byte static supplies that address in host tests.
             #[used]
             #[unsafe(no_mangle)]
             pub static $name: [u8; 1] = [0];

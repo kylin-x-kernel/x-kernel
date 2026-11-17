@@ -12,7 +12,6 @@ use kerrno::{KError, LinuxError};
 use kpoll::{IoEvents, PollContext, PollRegisterError};
 use ksync::static_lock;
 use memaddr::PhysAddrRange;
-use osvm::VirtPtr;
 
 use crate::{
     DeviceId, FMode, FallocateFlags, FileOperations, Mutex, NodeFlags, NodeType, VfsError, VfsFile,
@@ -739,8 +738,8 @@ impl DeviceFileOps for Arc<BlockDevice> {
             cmd,
             arg,
             cred.has_sys_admin(),
-            || Ok(i32::from_ne_bytes((arg as *const [u8; 4]).read_vm()?)),
-            |bytes| Ok(osvm::write_vm_bytes(arg as *mut u8, bytes)?),
+            || Ok(posix_types::UserConstPtr::<i32>::from(arg).read_vm()?),
+            |bytes| Ok(posix_types::UserPtr::<u8>::from(arg).write_vm_slice(bytes)?),
         )
     }
 

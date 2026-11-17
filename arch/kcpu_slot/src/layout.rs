@@ -65,8 +65,8 @@ impl fmt::Display for CpuInitError {
 // register-addressed path is instantiated. `.cpu_slot.template` owns VMA 0
 // after the migration removed the old `.percpu` section.
 #[cfg(target_arch = "x86_64")]
-#[used]
 #[unsafe(link_section = ".cpu_slot.template")]
+#[used]
 pub(crate) static CPU_SLOT_SELF_PTR: usize = 0;
 
 #[cfg(not(test))]
@@ -76,13 +76,11 @@ unsafe extern "C" {
     static _cpu_slot_area_start: u8;
 }
 
+// SAFETY: Host-side tests replace the linker-defined symbol with this unique one-byte data
+// symbol so raw-address references link without the kernel script.
 #[cfg(test)]
 #[unsafe(no_mangle)]
 static _cpu_slot_template_lma_start: u8 = 0;
-#[cfg(test)]
-#[unsafe(no_mangle)]
-static _cpu_slot_template_size: u8 = 0;
-
 pub(crate) fn template_start() -> usize {
     &raw const _cpu_slot_template_lma_start as usize
 }

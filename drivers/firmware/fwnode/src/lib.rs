@@ -36,7 +36,7 @@ pub const FW_IRQ_SPEC_MAX_PARAMS: usize = 16;
 /// The value is opaque to consumers. It is only meaningful together with the
 /// [`FwNodeOps`] instance that produced it; in particular, a device-tree
 /// offset is not a firmware-global identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FwNodeId(u32);
 
 impl FwNodeId {
@@ -55,7 +55,7 @@ impl FwNodeId {
 }
 
 /// A firmware-description access failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FwError {
     /// The handle does not identify a node in this backend.
     InvalidNode,
@@ -75,7 +75,7 @@ pub enum FwError {
 /// identified by [`FwNode`] alone. Consumers use it for diagnostics and for
 /// selecting the correct resource provenance without matching compatible
 /// strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FwSource {
     /// Flattened device tree.
     DeviceTree,
@@ -556,7 +556,7 @@ impl<'a> FwNode<'a> {
 /// Backends that can synthesize typed values use the matching variant;
 /// device-tree properties normally use [`FwPropertyValue::Bytes`] and are
 /// interpreted on demand.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FwPropertyValue<'a> {
     /// A flag property with no payload (for example `interrupt-controller`).
     Empty,
@@ -573,7 +573,7 @@ pub enum FwPropertyValue<'a> {
 }
 
 /// A named firmware property.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FwProperty<'a> {
     /// Property name.
     pub name: &'a str,
@@ -659,7 +659,7 @@ impl<'a> FwProperty<'a> {
 }
 
 /// One translated MMIO resource.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FwMmioResource<'a> {
     /// CPU physical start address.
     pub base: u64,
@@ -674,7 +674,7 @@ pub struct FwMmioResource<'a> {
 /// The address fields are firmware facts: `bus_addr` is in the child bus
 /// address space and `parent_addr` is in the immediate parent address space.
 /// Neither field is necessarily a CPU physical address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FwDmaRange {
     /// First address visible on the child bus.
     pub bus_addr: u64,
@@ -688,7 +688,7 @@ pub struct FwDmaRange {
 ///
 /// This is a declaration, not a device DMA mask or a permission to program
 /// hardware. Ancestor translation and platform policy belong to the consumer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FwDmaRanges {
     /// No local declaration.
     Absent,
@@ -703,7 +703,7 @@ pub enum FwDmaRanges {
 /// `bus_addr` is the first device-visible address and `cpu_addr` the
 /// corresponding first CPU physical address; `size` is the window length. The
 /// window is not a device mask and does not by itself authorize DMA.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FwDmaWindow {
     /// First address in the device's bus address space.
     pub bus_addr: u64,
@@ -716,7 +716,7 @@ pub struct FwDmaWindow {
 /// Why firmware's DMA description cannot be used.
 ///
 /// Absence of a declaration is not represented here; it is `Ok(None)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FwDmaError {
     /// The backend failed to read or interpret its description.
     ///
@@ -735,7 +735,7 @@ pub enum FwDmaError {
 }
 
 /// Fixed-capacity firmware parameter cells.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct FwParams {
     len: u8,
     data: [u32; FW_IRQ_SPEC_MAX_PARAMS],
@@ -794,7 +794,7 @@ impl FwParams {
 }
 
 /// One interrupt specifier as described by firmware.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FwIrqSpec<'a> {
     /// Interrupt controller node that owns the specifier.
     pub controller: FwNode<'a>,
@@ -803,7 +803,7 @@ pub struct FwIrqSpec<'a> {
 }
 
 /// One resolved firmware reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FwReference<'a> {
     /// Referenced node.
     pub node: FwNode<'a>,

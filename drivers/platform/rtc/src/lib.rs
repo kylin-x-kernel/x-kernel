@@ -56,7 +56,7 @@ fn system_time_from_unsigned_seconds(seconds: u64) -> Option<SystemTime> {
 }
 
 /// Supported persistent RTC device kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RtcKind {
     /// Goldfish virtual RTC.
     Goldfish,
@@ -69,7 +69,7 @@ pub enum RtcKind {
 }
 
 /// Transport used to access an RTC device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RtcTransport {
     /// An unmapped MMIO register range.
     Mmio {
@@ -88,7 +88,7 @@ pub enum RtcTransport {
 }
 
 /// Firmware or platform source of an RTC description.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RtcSource {
     /// Device-tree discovery.
     DeviceTree,
@@ -99,7 +99,7 @@ pub enum RtcSource {
 }
 
 /// RTC device configuration and transport description.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RtcConfig {
     /// RTC device kind.
     pub kind: RtcKind,

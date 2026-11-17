@@ -53,7 +53,7 @@ bitflags! {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum WaitPid {
     /// Wait for any child process
     Any,
@@ -121,8 +121,8 @@ fn wait_reap_mode(options: WaitOptions) -> wait_reap::WaitReapMode {
     }
 }
 
-// `siginfo_t` is registered as a `posix_types::UserWrite` type (see
-// posix-types); bit-pattern copy to userspace matches the Linux ABI.
+// Child reports are written as `posix_types::k_siginfo`, whose constructors
+// guarantee that every byte of the `siginfo_t` union is initialized.
 
 enum WaitScanResult {
     Ready(WaitedChild),
@@ -322,7 +322,7 @@ pub(crate) fn sys_waitid(
     };
     let options = WaitOptions::from_bits_truncate(options);
 
-    let mut report: Option<siginfo_t> = None;
+    let mut report: Option<posix_types::k_siginfo> = None;
     wait_on_matching_children_with(proc, selector, options, |waited| {
         // Linux reports the child-exit payload via a SIGCHLD-style `siginfo_t`.
         let cred = waited
@@ -344,16 +344,14 @@ pub(crate) fn sys_waitid(
             utime,
             stime,
         );
-        report = Some(
-            ksignal::ChildExitSignalInfo::new(ksignal::Signo::SIGCHLD, child)
-                .into_signal_info()
-                .0,
-        );
+        report = Some(posix_types::k_siginfo::from(
+            ksignal::ChildExitSignalInfo::new(ksignal::Signo::SIGCHLD, child).into_signal_info(),
+        ));
         Ok(())
     })?;
     if !siginfo.is_null() {
         match report {
-            Some(value) => siginfo.write_vm(value)?,
+            Some(value) => siginfo.cast::<posix_types::k_siginfo>().write_vm(value)?,
             None => {
                 // Linux writes a zeroed report for a `WNOHANG` poll with no
                 // waitable child (`si_pid = 0`); a `NULL` pointer is a no-op.

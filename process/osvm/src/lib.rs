@@ -23,7 +23,7 @@ use extern_trait::extern_trait;
 use kerrno::KError;
 
 /// Errors returned by virtual memory access helpers.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MemError {
     /// The address failed alignment or range checks before any copy was
     /// attempted (maps to `EFAULT`).

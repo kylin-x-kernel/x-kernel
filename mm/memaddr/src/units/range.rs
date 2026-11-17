@@ -6,7 +6,11 @@ use core::{fmt, ops::Range};
 
 use crate::{MemoryAddr, PhysAddr, VirtAddr};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// A range conversion failed because the end address precedes the start.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InvalidAddrRange;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct AddrRange<A: MemoryAddr> {
     pub start: A,
     pub end: A,
@@ -121,11 +125,11 @@ impl<A, T> TryFrom<Range<T>> for AddrRange<A>
 where
     A: MemoryAddr + From<T>,
 {
-    type Error = ();
+    type Error = InvalidAddrRange;
 
     #[inline]
     fn try_from(range: Range<T>) -> Result<Self, Self::Error> {
-        Self::try_new(range.start.into(), range.end.into()).ok_or(())
+        Self::try_new(range.start.into(), range.end.into()).ok_or(InvalidAddrRange)
     }
 }
 

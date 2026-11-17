@@ -859,8 +859,9 @@ path detaches against the thread's own blocked mask, releases queue storage and
 completes any typed timer receipt outside SigLock, then consults generic dequeue
 observers and dispatches through `handle_signal`.
 
-Handler dispatch builds a `SignalFrame { ucontext, siginfo, saved }` on the
-user stack (alternate stack when `SA_ONSTACK` and configured), rewrites
+Handler dispatch builds a Linux `rt_sigframe`-ordered frame on the
+user stack (non-x86: one `SignalFrame`; x86_64: `arch::setup_signal_frame`;
+alternate stack when `SA_ONSTACK` and configured), rewrites
 `UserContext` to enter the handler with `(signo, siginfo*, ucontext*)`
 arguments, sets the restorer return path (x86_64 pushes it on the stack,
 others use the return register), applies the handler mask plus the signal
@@ -972,6 +973,9 @@ set by `rt_sigsuspend` and consumed by the next caught-signal frame build
   signal that was already queued.
 - `SignalInfo` is `Send + Sync` through an explicit `unsafe impl` because
   the payload is treated as opaque ABI bits (see `security.md`).
+- `SignalInfo` keeps its raw union field private. Conversion to `k_siginfo`
+  uses an unsafe constructor after the zeroed-or-user-copied invariant is
+  established.
 
 ## Signal state ownership
 
@@ -1044,6 +1048,18 @@ guarantee or Linux GFP_ATOMIC equivalence.
 - Kernel-originated `sigval` reads expose `None` unless `si_code` implies a
   user or timer payload, keeping union-arm reads (see `security.md`)
   guarded by the code that selected the arm.
+- Every architecture embeds the explicit `k_sigaltstack` carrier in
+  `ucontext.uc_stack`. Its `sp, flags, padding, size` byte order matches Linux
+  `stack_t`; the kernel-only `SignalStack` keeps its own field order.
+- Every outbound frame region is a `UserWrite` carrier copied through
+  `UserPtr`. The non-x86 `SignalFrame` is repr(C) with `siginfo` first, as the
+  complete 128-byte `k_siginfo` record in bytes; each architecture context
+  models its alignment holes as zeroed fields. x86_64 writes `k_siginfo`, a
+  hole-free `UContext`, the zero-initialized FP buffer and the restorer word
+  as separate regions. Const assertions pin the Linux sizes and offsets.
+- POSIX timer notifications arrive with complete pointer-sized `sigval` bits.
+  `SignalInfo::new_timer` writes those bits through the full-width pointer
+  member of the zeroed outbound `siginfo` record.
 
 ## Resource lifecycle
 

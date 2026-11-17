@@ -28,7 +28,7 @@ use crate::dma::map_dma_direction;
 /// Allocation and mapping are legal wherever `kdma` is legal: task or ordinary
 /// IRQ context, never NMI, and not while holding a lock ordered after the kdma
 /// allocator. Streaming guard release runs the same operation as unmapping.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct XKernelDeviceDma {
     info: DmaInfo,
 }

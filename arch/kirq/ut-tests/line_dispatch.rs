@@ -52,7 +52,7 @@ fn rejected_flows_complete_under_line_lock_without_execution_admission() -> unit
         },
         retrigger: |_| panic!("rejected claim must not request another delivery"),
     };
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum Rejection {
         Empty,
         Disabled,

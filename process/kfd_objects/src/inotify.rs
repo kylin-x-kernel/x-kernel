@@ -538,15 +538,9 @@ fn register_watch(
     // their removal is deferred until the lock is released: an entry owns a
     // pin on the watched object, and dropping the last one runs the inode's
     // eviction -- filesystem work that must never happen under this lock.
-    let mut dead = Vec::new();
-    let mut index = 0;
-    while index < entries.len() {
-        if entries[index].instance.strong_count() == 0 {
-            dead.push(entries.remove(index));
-        } else {
-            index += 1;
-        }
-    }
+    let dead: Vec<RegistryEntry> = entries
+        .extract_if(.., |entry| entry.instance.strong_count() == 0)
+        .collect();
     entries.push(RegistryEntry {
         instance: Arc::downgrade(instance),
         instance_id: instance.id,
@@ -591,16 +585,9 @@ fn unregister_watch(identity: usize, watch_descriptor: i32, instance_id: usize) 
     if let Some(map) = registry.as_mut()
         && let Some(entries) = map.get_mut(&identity)
     {
-        let mut index = 0;
-        while index < entries.len() {
-            if entries[index].watch_descriptor == watch_descriptor
-                && entries[index].instance_id == instance_id
-            {
-                removed.push(entries.remove(index));
-            } else {
-                index += 1;
-            }
-        }
+        removed.extend(entries.extract_if(.., |entry| {
+            entry.watch_descriptor == watch_descriptor && entry.instance_id == instance_id
+        }));
         let mask = entries.iter().fold(0, |mask, entry| mask | entry.mask);
         if let Some(entry) = removed.first() {
             entry.object.set_notification_mask(mask);

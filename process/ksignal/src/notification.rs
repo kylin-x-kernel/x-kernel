@@ -14,7 +14,7 @@ use kspin::{SpinNoIrq, static_lock};
 use crate::{SignalDequeueAction, SignalInfo, Signo};
 
 /// Why a timer notification was not installed in a pending queue.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimerSignalRejection {
     /// Rearm or retirement invalidated this reservation's generation.
     Invalidated,
@@ -267,12 +267,12 @@ impl SignalNotification {
         signo: Signo,
         timer_id: i32,
         overrun: i32,
-        value: posix_types::k_sigval,
+        value_bits: usize,
         signal_seq: u64,
         origin: Weak<dyn TimerSignalOrigin>,
     ) -> Self {
         Self {
-            info: SignalInfo::new_timer(signo, timer_id, overrun, value, signal_seq as u32),
+            info: SignalInfo::new_timer(signo, timer_id, overrun, value_bits, signal_seq as u32),
             receipt: Some(TimerSignalReceipt {
                 timer_id,
                 signal_seq,
@@ -497,7 +497,7 @@ impl PreparedTimerRecord {
         signo: Signo,
         timer_id: i32,
         overrun: i32,
-        value: posix_types::k_sigval,
+        value_bits: usize,
         signal_seq: u64,
         is_periodic: bool,
     ) -> Option<SignalNotification> {
@@ -512,7 +512,7 @@ impl PreparedTimerRecord {
         }
         state.is_occupied = true;
         Some(SignalNotification {
-            info: SignalInfo::new_timer(signo, timer_id, overrun, value, signal_seq as u32),
+            info: SignalInfo::new_timer(signo, timer_id, overrun, value_bits, signal_seq as u32),
             receipt: Some(TimerSignalReceipt {
                 timer_id,
                 signal_seq,

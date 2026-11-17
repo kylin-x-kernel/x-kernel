@@ -10,7 +10,7 @@
 #![no_std]
 
 /// Interrupt trigger mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqTrigger {
     /// Interrupt asserted on a rising edge.
     EdgeRising,
@@ -25,7 +25,7 @@ pub enum IrqTrigger {
 }
 
 /// Interrupt controller family, not the identity of a controller instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqController {
     /// ARM Generic Interrupt Controller.
     Gic,
@@ -45,7 +45,7 @@ pub enum IrqController {
 ///
 /// Constructing a value does not register a domain or establish its validity.
 /// Numeric equality is meaningful only within the same host domain namespace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct IrqDomainId(u32);
 
 impl IrqDomainId {

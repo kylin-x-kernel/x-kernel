@@ -4,7 +4,7 @@
 
 //! ABI-facing socket address structures.
 
-use linux_raw_sys::net::{__kernel_sa_family_t, sockaddr_in, sockaddr_in6};
+use linux_raw_sys::net::{__kernel_sa_family_t, sockaddr_in, sockaddr_in6, sockaddr_un};
 
 use crate::UserRead;
 
@@ -14,6 +14,9 @@ unsafe impl UserRead for sockaddr_in {}
 // SAFETY: these socket-address structs are POD syscall carriers with no extra
 // validity invariants beyond their raw bytes.
 unsafe impl UserRead for sockaddr_in6 {}
+// SAFETY: `sockaddr_un` is a padding-free family word followed by a byte path;
+// every bit pattern is a valid value.
+unsafe impl UserRead for sockaddr_un {}
 
 /// Linux netlink socket address; semantic validation belongs to the network adapter.
 #[repr(C)]

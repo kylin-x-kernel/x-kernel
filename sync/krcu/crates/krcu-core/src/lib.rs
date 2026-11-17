@@ -12,6 +12,12 @@
 //! admission/execution; it does not start a task or publish runtime readiness.
 
 #![no_std]
+#![allow(
+    unknown_lints,
+    unitless_time_integer,
+    reason = "CG-011-time-unit-names: case (a): `period` names an RCU grace-period sequence \
+              number, not a time quantity"
+)]
 
 #[cfg(any(test, unittest))]
 extern crate alloc;

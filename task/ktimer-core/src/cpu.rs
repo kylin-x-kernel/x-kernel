@@ -57,19 +57,19 @@ impl CpuTimers {
 
     pub(super) fn service_deadline_ns(&self) -> Option<u64> {
         self.earliest_deadline_ns()
-            .map(|deadline| deadline.max(self.dispatch_after_ns.unwrap_or(0)))
+            .map(|deadline_ns| deadline_ns.max(self.dispatch_after_ns.unwrap_or(0)))
     }
 
     pub(super) fn can_dispatch(&mut self, now_ns: u64) -> bool {
         if self
             .dispatch_after_ns
-            .is_some_and(|deadline| now_ns < deadline)
+            .is_some_and(|deadline_ns| now_ns < deadline_ns)
         {
             return false;
         }
         self.dispatch_after_ns = None;
         self.earliest_deadline_ns()
-            .is_some_and(|deadline| deadline <= now_ns)
+            .is_some_and(|deadline_ns| deadline_ns <= now_ns)
     }
 
     pub(super) fn defer_dispatch_until(&mut self, deadline_ns: u64) {

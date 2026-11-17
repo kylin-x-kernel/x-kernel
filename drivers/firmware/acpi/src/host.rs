@@ -10,7 +10,7 @@
 //! state.
 
 /// The host operation that recorded a [`HostFailure`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostAccessKind {
     /// Mapping ACPI table memory.
     TableMap,
@@ -34,7 +34,7 @@ pub enum HostAccessKind {
 }
 
 /// Why a host access was rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostFailureReason {
     /// The operation or region space is not supported by this host.
     Unsupported,
@@ -61,7 +61,7 @@ pub enum HostFailureReason {
 /// here, blocks all later hardware access, and the ACPI context rejects the
 /// evaluation result. Failures are not rolled back: writes that completed
 /// before the failure remain in effect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostFailure {
     /// The operation that failed.
     pub access: HostAccessKind,

@@ -273,7 +273,7 @@ pub(crate) fn tee_curve_to_ecc_curve(curve: u32) -> TeeResult<EccCurve> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 /// GP: `struct ecc_public_key`
 pub(crate) struct EccPublicKey {
     pub x: BigNum,

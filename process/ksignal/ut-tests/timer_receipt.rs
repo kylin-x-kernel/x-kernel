@@ -63,7 +63,7 @@ fn prepare_record(
         signo,
         17,
         0,
-        posix_types::k_sigval { sival_int: 0 },
+        0,
         sequence,
         false,
     )
@@ -132,7 +132,7 @@ fn standard_fallback_never_creates_timer_authority_or_an_extra_occurrence() {
     let signo = Signo::SIGUSR1;
     let mut mask = SignalSet::default();
     mask.add(signo);
-    let forged = SignalInfo::new_timer(signo, 17, 99, posix_types::k_sigval { sival_int: 42 }, 23);
+    let forged = SignalInfo::new_timer(signo, 17, 99, 42, 23);
     assert!(
         pending
             .put_notification_with_allocator(forged.into(), |_| None)
@@ -187,7 +187,7 @@ fn cancelling_ignored_timer_keeps_an_unrelated_bit_only_signal() {
                 signo,
                 17,
                 0,
-                posix_types::k_sigval { sival_int: 0 },
+                0,
                 23,
                 true,
             )
@@ -244,7 +244,7 @@ fn ignored_periodic_records_replay_but_one_shots_do_not() {
                 signo,
                 17,
                 0,
-                posix_types::k_sigval { sival_int: 0 },
+                0,
                 23,
                 true,
             )
@@ -289,7 +289,7 @@ fn ignored_periodic_records_replay_but_one_shots_do_not() {
                 signo,
                 17,
                 0,
-                posix_types::k_sigval { sival_int: 0 },
+                0,
                 25,
                 true,
             )
@@ -327,7 +327,7 @@ fn ignore_flushes_blocked_owners_and_same_value_reinstallation() {
                 signo,
                 17,
                 0,
-                posix_types::k_sigval { sival_int: 0 },
+                0,
                 23,
                 true,
             )
@@ -393,7 +393,7 @@ fn ignored_periodic_mask_replay_does_not_acknowledge_handler_discard() {
                 signo,
                 17,
                 0,
-                posix_types::k_sigval { sival_int: 0 },
+                0,
                 23,
                 true,
             )
@@ -445,7 +445,7 @@ fn ignored_cancellation_preserves_a_later_generation() {
                     signo,
                     17,
                     0,
-                    posix_types::k_sigval { sival_int: 0 },
+                    0,
                     23,
                     true,
                 )
@@ -459,7 +459,7 @@ fn ignored_cancellation_preserves_a_later_generation() {
                     signo,
                     17,
                     0,
-                    posix_types::k_sigval { sival_int: 0 },
+                    0,
                     24,
                     true,
                 )
@@ -494,7 +494,7 @@ fn shared_actions_flush_only_the_calling_group() {
             signo,
             17,
             0,
-            posix_types::k_sigval { sival_int: 0 },
+            0,
             23,
             true,
         )
@@ -553,7 +553,7 @@ fn ignored_replay_discards_exited_targets_without_completion() {
                 signo,
                 17,
                 0,
-                posix_types::k_sigval { sival_int: 0 },
+                0,
                 23,
                 true,
             )
@@ -589,7 +589,7 @@ fn prepared_standard_timers_share_fifo_without_granting_abi_timer_authority() {
         let second = record_origin();
         assert!(matches!(
             target.send(
-                SignalInfo::new_timer(signo, 101, 0, posix_types::k_sigval { sival_int: 0 }, 0)
+                SignalInfo::new_timer(signo, 101, 0, 0, 0)
                     .into()
             ),
             TimerSignalSendOutcome::Queued { .. }
@@ -604,7 +604,7 @@ fn prepared_standard_timers_share_fifo_without_granting_abi_timer_authority() {
         ));
         assert!(prepare_record(&first, signo, 25).is_none());
         let forged =
-            SignalInfo::new_timer(signo, 999, 0, posix_types::k_sigval { sival_int: 0 }, 23);
+            SignalInfo::new_timer(signo, 999, 0, 0, 23);
         drop(returned_notification(
             target.send(forged.into()),
             TimerSignalRejection::Coalesced,
@@ -697,7 +697,7 @@ fn cancellation_preserves_mixed_fifo_and_checks_captured_queue() {
             Signo::SIGRTMIN,
             101,
             0,
-            posix_types::k_sigval { sival_int: 0 },
+            0,
             0,
         ))
         .unwrap();
@@ -710,7 +710,7 @@ fn cancellation_preserves_mixed_fifo_and_checks_captured_queue() {
             Signo::SIGRTMIN,
             102,
             0,
-            posix_types::k_sigval { sival_int: 0 },
+            0,
             0,
         ))
         .unwrap();
@@ -814,7 +814,7 @@ fn prepared_record_mixed_fifo_keeps_lease_until_receipt_completion() {
                 signo,
                 1,
                 0,
-                posix_types::k_sigval { sival_int: 0 },
+                0,
                 1
             ))
             .unwrap()
@@ -831,7 +831,7 @@ fn prepared_record_mixed_fifo_keeps_lease_until_receipt_completion() {
                 signo,
                 2,
                 0,
-                posix_types::k_sigval { sival_int: 0 },
+                0,
                 2
             ))
             .unwrap()
@@ -978,7 +978,7 @@ fn notification(signo: Signo, rejected: bool) -> SignalNotification {
         signo,
         17,
         0,
-        posix_types::k_sigval { sival_int: 0 },
+        0,
         23,
         origin,
     )
@@ -1134,7 +1134,7 @@ fn timer_receipt_preserves_generation_above_abi_width() {
         Signo::SIGUSR1,
         17,
         0,
-        posix_types::k_sigval { sival_int: 0 },
+        0,
         sequence,
         weak,
     );
@@ -1179,7 +1179,7 @@ fn ordinary_timer_siginfo_has_no_completion_authority() {
                 Signo::SIGUSR1,
                 17,
                 0,
-                posix_types::k_sigval { sival_int: 0 },
+                0,
                 23
             ))
             .unwrap()

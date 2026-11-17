@@ -49,8 +49,8 @@ use rand_chacha::{
 
 const SEED_SIZE: usize = 32;
 const HW_RESEED_BYTES: usize = 64;
-const HW_RESEED_INTERVAL: u64 = 4096;
-const UNREADY_HW_RETRY_INTERVAL: u32 = 64;
+const HW_RESEED_BYTE_COUNT: u64 = 4096;
+const UNREADY_HW_RETRY_DELAY_COUNT: u32 = 64;
 
 static POOL: Lazy<Mutex<EntropyPool>> = Lazy::new(|| Mutex::new(EntropyPool::bootstrap()));
 static HW_READY: AtomicBool = AtomicBool::new(false);
@@ -277,7 +277,7 @@ fn schedule_unready_hardware_retry() {
     if !should_retry_unready_hardware() {
         return;
     }
-    UNREADY_HW_RETRY_DELAY.store(UNREADY_HW_RETRY_INTERVAL, Ordering::Release);
+    UNREADY_HW_RETRY_DELAY.store(UNREADY_HW_RETRY_DELAY_COUNT, Ordering::Release);
 }
 
 fn maybe_allow_unready_hardware_retry() {
@@ -315,7 +315,7 @@ fn maybe_reseed_from_hardware(request_len: usize) {
     let claimed = {
         let mut pool = POOL.lock();
         pool.bytes_since_reseed = pool.bytes_since_reseed.saturating_add(request_len as u64);
-        if pool.bytes_since_reseed >= HW_RESEED_INTERVAL {
+        if pool.bytes_since_reseed >= HW_RESEED_BYTE_COUNT {
             pool.bytes_since_reseed = 0;
             true
         } else {

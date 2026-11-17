@@ -11,7 +11,7 @@ use driver_base::DeviceKind;
 use crate::DeviceId;
 
 /// A device lifecycle event emitted by the device management layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceEvent {
     /// A live device object was published into the device index.
     Published {
@@ -56,7 +56,7 @@ pub enum DeviceEvent {
 }
 
 /// Stable discriminator for lifecycle event subscriptions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceEventKind {
     /// Subscription bucket for [`DeviceEvent::Published`].
     Published,

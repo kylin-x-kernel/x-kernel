@@ -21,9 +21,12 @@
 //!
 //! ## Mutex
 //! ```no_run
-//! use ksync::Mutex;
-//!
-//! static DATA: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+//! # use ksync::{Mutex, static_lock};
+//! # #[cfg(feature = "stats")] use ksync::{linkme, LOCK_CLASSES, LockClassStats};
+//! # fn main() {}
+//! static_lock! {
+//!     static DATA: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+//! }
 //!
 //! fn task() {
 //!     let mut data = DATA.lock();
@@ -50,9 +53,12 @@
 //!
 //! ## RwLock
 //! ```no_run
-//! use ksync::RwLock;
-//!
-//! static CONFIG: RwLock<u32> = RwLock::new(0);
+//! # use ksync::{RwLock, static_lock};
+//! # #[cfg(feature = "stats")] use ksync::{linkme, LOCK_CLASSES, LockClassStats};
+//! # fn main() {}
+//! static_lock! {
+//!     static CONFIG: RwLock<u32> = RwLock::new(0);
+//! }
 //!
 //! fn reader() {
 //!     let config = CONFIG.read();

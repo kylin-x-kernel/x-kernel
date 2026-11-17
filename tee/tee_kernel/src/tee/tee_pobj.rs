@@ -151,7 +151,7 @@ impl TeePobjs {
 }
 
 /// GP: `tee_pobj_usage`
-#[derive(PartialEq, Debug)]
+#[derive(Debug, PartialEq)]
 pub(super) enum TeePobjUsage {
     /// GP: `TEE_POBJ_USAGE_OPEN`
     Open      = 0,

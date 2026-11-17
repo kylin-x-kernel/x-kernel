@@ -7,7 +7,7 @@
 use super::BaseGuard;
 
 /// No-op guard (does nothing).
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct NoOp;
 
 impl BaseGuard for NoOp {

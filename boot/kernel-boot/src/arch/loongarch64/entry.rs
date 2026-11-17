@@ -28,6 +28,9 @@ fn enable_fp_simd() {
     }
 }
 
+// SAFETY: The boot image header exposes the unique `_start` symbol to firmware with its a1/a2
+// boot pointers and no Rust stack; the naked body consists only of direct-map and boot handoff
+// assembly.
 /// # Safety
 ///
 /// This is the raw firmware entry point for the boot CPU. The caller must
@@ -116,6 +119,9 @@ unsafe extern "C" fn _start() -> ! {
     )
 }
 
+// SAFETY: Firmware reaches this unique secondary C ABI symbol before a Rust stack exists; the
+// naked assembly obtains the prepared stack from IOCSR and enables the direct map before
+// transfer.
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.boot")]

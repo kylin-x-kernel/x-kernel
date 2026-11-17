@@ -32,7 +32,7 @@ fn public_chip_operations_reject_non_spi_bindings_before_register_access() {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 enum Access {
     Enable(u32, bool),
     WaitDisable,

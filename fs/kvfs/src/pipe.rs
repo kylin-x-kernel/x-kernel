@@ -14,7 +14,6 @@ use ksignal::{Signo, send_sig_current};
 use ktask::future::{block_on, poll_io};
 use linux_raw_sys::ioctl::FIONREAD;
 use memaddr::PAGE_SIZE_4K;
-use osvm::VirtMutPtr;
 
 use crate::{
     FMode, FileOperations, Kiocb, VfsFile, VfsFileBuilder, VfsInode, VfsResult, poll_file_io,
@@ -740,8 +739,8 @@ fn pipe_ioctl(file: &VfsFile, cmd: u32, arg: usize) -> VfsResult<usize> {
     let pipe = PipeObject::from_file(file)?;
     match cmd {
         FIONREAD => {
-            // `write_vm` validates typed user-pointer alignment before writing.
-            (arg as *mut i32).write_vm(pipe.readable_len() as i32)?;
+            // The ABI-bounded byte copy accepts misaligned user addresses.
+            posix_types::UserPtr::<i32>::from(arg).write_vm(pipe.readable_len() as i32)?;
             Ok(0)
         }
         _ => Err(KError::NotATty),

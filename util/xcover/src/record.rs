@@ -10,7 +10,7 @@
 use crate::abi::layout::IPVK_NUM_KINDS;
 
 /// Function name reference token. Not a bare `u64`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct NameRef(pub u64);
 
 impl NameRef {
@@ -20,7 +20,7 @@ impl NameRef {
 }
 
 /// Function hash. Not interchangeable with plain integers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct FunctionHash(pub u64);
 
 impl FunctionHash {

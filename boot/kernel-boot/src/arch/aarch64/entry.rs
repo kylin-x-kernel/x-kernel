@@ -47,8 +47,8 @@ static mut AARCH64_BOOT_INFO: BootInfo = BootInfo::new(BootProtocol::DeviceTree)
 #[unsafe(link_section = ".data")]
 static mut SECONDARY_BOOT_CONTEXT: SecondaryBootContext = SecondaryBootContext::new();
 
-#[derive(Clone, Copy)]
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct SecondaryBootContext {
     target_raw_cpu_id: usize,
     stack_top_paddr: usize,
@@ -96,6 +96,9 @@ pub fn set_secondary_boot_context(logical_cpu_id: LogicalCpuId, stack_top_paddr:
     );
 }
 
+// SAFETY: Firmware and the ARM64 image header require the unique `_start` symbol at the image
+// head; x0 holds the DTB and early execution is physical. The body is solely naked assembly
+// that branches to `primary_entry`.
 /// Linux ARM64 Boot Protocol header followed by a branch to `primary_entry`.
 ///
 /// # Safety
@@ -123,6 +126,8 @@ pub(super) unsafe extern "C" fn _start() -> ! {
     )
 }
 
+// SAFETY: The image-header branch enters this unique C ABI symbol with firmware x0 and no Rust
+// stack; its naked assembly builds the stack and MMU mapping before the Rust handoff.
 /// Primary CPU early boot entry (runs before MMU is enabled).
 ///
 /// All code here is position-independent – only PC-relative addressing is
@@ -205,6 +210,9 @@ pub(super) unsafe extern "C" fn primary_entry() -> ! {
     )
 }
 
+// SAFETY: The early boot assembly calls this unique C ABI symbol while x0-x3 still hold
+// firmware arguments and physical PC-relative addressing works; the naked body only stores
+// those registers.
 /// Save x0-x3 (firmware boot arguments) to [`SAVED_BOOT_ARGS`].
 ///
 /// Uses PC-relative addressing so this can run before the MMU is on.
@@ -231,6 +239,9 @@ pub(super) unsafe extern "C" fn preserve_boot_args() {
     )
 }
 
+// SAFETY: PSCI releases one secondary CPU into this unique C ABI symbol with a prepared
+// physical boot context and no Rust stack; the naked body validates its MPIDR, installs the
+// stack, and transfers control.
 /// Secondary CPU boot entry.
 ///
 /// Called from firmware on a secondary CPU.

@@ -13,7 +13,7 @@ use crate::{PageMetaError, PageMetaTable};
 
 /// Geometry of one allocation, not a page hold or content-access capability.
 /// The snapshot is valid for lifetime operations only while a hold is retained.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AllocationInfo {
     head_pfn: usize,
     order: u8,

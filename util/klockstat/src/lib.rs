@@ -25,7 +25,7 @@ pub use linkme;
 pub use runtime::class_for_init_site;
 
 /// A static label or an unformatted runtime constructor location.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum LockLocation {
     /// A label supplied by static lock registration.
     Label(&'static str),

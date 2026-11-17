@@ -496,13 +496,13 @@ fn keepalive_records_probe_interval_and_count_without_changing_transport() {
         Some(Duration::from_secs(30))
     );
 
-    let mut interval = 0_u32;
+    let mut interval_secs = 0_u32;
     let mut count = 0_u32;
     socket
-        .get_option(GetSocketOption::KeepInterval(&mut interval))
+        .get_option(GetSocketOption::KeepInterval(&mut interval_secs))
         .unwrap();
     socket
         .get_option(GetSocketOption::KeepCount(&mut count))
         .unwrap();
-    assert_eq!((interval, count), (10, 4));
+    assert_eq!((interval_secs, count), (10, 4));
 }

@@ -24,7 +24,6 @@ use kvfs::{
     DirMapping, FileSystemType, Mount, NodeFlags, NodePermission, Path, SimpleDir, SimpleFile,
     SimpleFs, VfsInode,
 };
-use osvm::{VirtMutPtr, VirtPtr};
 use unittest::{TestResult, def_test};
 use unittest_support::TestUserValue;
 
@@ -330,7 +329,12 @@ impl ExecProbe {
             );
             assert!(mm.find_vma(sp.into()).is_some());
         }
-        assert_eq!((sp as *const usize).read_vm().unwrap(), 1);
+        assert_eq!(
+            posix_types::UserConstPtr::<usize>::from(sp)
+                .read_vm()
+                .unwrap(),
+            1
+        );
         check_current_root(None);
     }
 
@@ -572,8 +576,15 @@ fn run_child(
         tee_session: has_tee_session.then(tee_kernel::tee::ExecSessionFixture::provision),
     };
     if case.is_early() {
-        assert_eq!((sentinel_addr as *const u64).read_vm().unwrap(), 0x1234);
-        (sentinel_addr as *mut u64).write_vm(0x5678).unwrap();
+        assert_eq!(
+            posix_types::UserConstPtr::<u64>::from(sentinel_addr)
+                .read_vm()
+                .unwrap(),
+            0x1234
+        );
+        posix_types::UserPtr::<u64>::from(sentinel_addr)
+            .write_vm(0x5678)
+            .unwrap();
     }
     // Early errors preserve these; activated targets must reset before fatal cleanup.
     thread.set_clear_child_tid(0x4000);
@@ -670,7 +681,12 @@ fn run_child(
             );
             assert_eq!(check_current_root(None), old_root);
             assert_eq!(process.heap_top().unwrap(), old_heap);
-            assert_eq!((sentinel_addr as *const u64).read_vm().unwrap(), 0x5678);
+            assert_eq!(
+                posix_types::UserConstPtr::<u64>::from(sentinel_addr)
+                    .read_vm()
+                    .unwrap(),
+                0x5678
+            );
             assert_eq!(thread.clear_child_tid(), 0x4000);
             assert_eq!(thread.robust_list_head(), 0x5000);
             let stack = signal.stack();
@@ -713,7 +729,12 @@ fn run_child(
                 );
             }
             // The stack is populated; reading argc does not fault an ELF segment.
-            assert_eq!((uctx.sp() as *const usize).read_vm().unwrap(), 1);
+            assert_eq!(
+                posix_types::UserConstPtr::<usize>::from(uctx.sp())
+                    .read_vm()
+                    .unwrap(),
+                1
+            );
             if let Some(retained) = retained {
                 retained.verify_and_release(process, uctx.ip());
             }

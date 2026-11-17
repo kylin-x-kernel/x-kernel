@@ -24,9 +24,9 @@ triggers:
   existing wrappers for bulk buffers. Direct dereference and ad hoc
   `from_raw_parts` over user addresses in syscall logic violate this rule;
   the checked access implementations themselves own the raw access boundary.
-  Not this rule: the pending Dylint lint `unsound_user_abi_impl` ([pending](pending.md)) owns validity,
+  Not this rule: the Dylint lint `unsound_user_abi_impl` ([CG-005](CG-005-user-abi-layout.md)) owns validity,
   layout and initialized-byte obligations of `UserRead`/`UserWrite` types,
-  and the pending Dylint lint `user_copy_without_abi_contract` ([pending](pending.md)) owns whether a typed copy
+  and the Dylint lint `user_copy_without_abi_contract` ([CG-006](CG-006-user-copy-abi-contract.md)) owns whether a typed copy
   uses the required ABI contract; this rule owns where user access and
   validation occur and whether deeper logic receives kernel values.
   Report a non-ABI initialization-state defect under

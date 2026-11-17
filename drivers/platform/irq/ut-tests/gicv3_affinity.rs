@@ -20,7 +20,7 @@ const TARGET: Affinity = Affinity {
     aff3: 4,
 };
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 enum Access {
     ReadEnable(u32),
     WriteEnable(u32, bool),

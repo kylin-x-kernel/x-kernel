@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kernel_elf_parser::ElfHeadersBuilder;
+use kernel_elf_parser::{ElfError, ElfHeadersBuilder};
 
 const ELF_HEADER_SIZE: usize = 64;
 const PROGRAM_HEADER_SIZE: u16 = 56;
@@ -39,7 +39,7 @@ fn program_header_range_rejects_end_overflow() {
 
     assert_eq!(
         builder.ph_range(),
-        Err("Program-header table range overflows")
+        Err(ElfError::ProgramHeaderTableRangeOverflow)
     );
 }
 
@@ -48,7 +48,10 @@ fn program_header_range_rejects_wrong_entry_size() {
     let data = elf_header(ELF_HEADER_SIZE as u64, PROGRAM_HEADER_SIZE - 1, 1);
     let builder = ElfHeadersBuilder::new(&data).expect("ELF header must parse");
 
-    assert_eq!(builder.ph_range(), Err("Invalid program-header entry size"));
+    assert_eq!(
+        builder.ph_range(),
+        Err(ElfError::InvalidProgramHeaderEntrySize)
+    );
 }
 
 #[test]
@@ -62,13 +65,12 @@ fn build_rejects_incomplete_program_header_table() {
 /// Parses the header and builds the program headers from a sub-slice of the
 /// file head, the way `kexec` does when the table lies in the bytes it has
 /// already read.
-fn build_from_file_head(
-    data: &[u8],
-) -> Result<Vec<xmas_elf::program::ProgramHeader64>, &'static str> {
+fn build_from_file_head(data: &[u8]) -> Result<Vec<xmas_elf::program::ProgramHeader64>, ElfError> {
     let builder = ElfHeadersBuilder::new(data)?;
     let range = builder.ph_range()?;
-    let start = usize::try_from(range.start).map_err(|_| "table start overflows usize")?;
-    let end = usize::try_from(range.end).map_err(|_| "table end overflows usize")?;
+    let start =
+        usize::try_from(range.start).map_err(|_| ElfError::ProgramHeaderTableRangeOverflow)?;
+    let end = usize::try_from(range.end).map_err(|_| ElfError::ProgramHeaderTableRangeOverflow)?;
     builder.build(&data[start..end]).map(|headers| headers.ph)
 }
 

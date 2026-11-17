@@ -50,7 +50,7 @@ bitflags! {
 }
 
 /// Interest trigger mode.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum TriggerMode {
     /// Level-triggered: until the condition is cleared.
     Level,

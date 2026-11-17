@@ -34,29 +34,29 @@ pub struct TEE_UUID {
     pub clockSeqAndNode: [u8; 8],
 }
 
-#[derive(Copy, Clone, posix_types::UserWrite)]
 #[repr(C)]
+#[derive(Copy, Clone, posix_types::UserWrite)]
 pub struct TEE_Identity {
     pub login: u32,
     pub uuid: TEE_UUID,
 }
 
-#[derive(Copy, Clone, Default)]
 #[repr(C)]
+#[derive(Clone, Copy, Default)]
 pub struct Memref {
     pub buffer: *mut c_void,
     pub size: usize,
 }
 
-#[derive(Copy, Clone)]
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Value {
     pub a: u32,
     pub b: u32,
 }
 
-#[derive(Copy, Clone)]
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub union TEE_Param {
     pub memref: Memref,
     pub value: Value,
@@ -134,8 +134,8 @@ pub enum TEE_Whence {
     TEE_DATA_SEEK_END,
 }
 
-#[derive(Copy, Clone)]
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub union content {
     pub memref: Memref,
     pub value: Value,
@@ -149,8 +149,8 @@ impl Default for content {
     }
 }
 
-#[derive(Copy, Clone, Default)]
 #[repr(C)]
+#[derive(Clone, Copy, Default)]
 pub struct TEE_Attribute {
     pub attributeID: u32,
     pub content: content,
@@ -174,7 +174,7 @@ impl Debug for TEE_Attribute {
 
 // Reserve the GP 1.1.1 type
 #[repr(C)]
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum TEE_OperationMode {
     TEE_MODE_ENCRYPT,
     TEE_MODE_DECRYPT,
@@ -218,8 +218,8 @@ pub struct TEE_OperationInfoMultiple {
 
 // Time & Date API
 
-#[derive(Copy, Clone, posix_types::UserRead, posix_types::UserWrite)]
 #[repr(C)]
+#[derive(Copy, Clone, posix_types::UserRead, posix_types::UserWrite)]
 pub struct TeeTime {
     pub seconds: u32,
     pub millis: u32,

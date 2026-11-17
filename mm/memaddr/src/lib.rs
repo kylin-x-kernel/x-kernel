@@ -8,8 +8,8 @@
 mod units;
 
 pub use self::units::{
-    AddrOps, AddrRange, DynPageIter, MemoryAddr, PageIter, PhysAddr, PhysAddrRange, VirtAddr,
-    VirtAddrRange,
+    AddrOps, AddrRange, DynPageIter, InvalidAddrRange, MemoryAddr, PageIter, PhysAddr,
+    PhysAddrRange, VirtAddr, VirtAddrRange,
 };
 
 /// 1 KiB.

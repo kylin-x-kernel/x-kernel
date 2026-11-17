@@ -233,6 +233,7 @@ impl<'tcx> LateLintPass<'tcx> for StdBoxInKernelTests {
 mod tests {
     const EXTERNAL_MACROS: crate::testing::MockCrate = crate::testing::MockCrate {
         name: "external_macros",
+        proc_macro: false,
         source: r#"#[macro_export]
 macro_rules! boxed { () => { Box::new(1) }; }
 "#,

@@ -86,7 +86,7 @@ pub fn looks_like_ta(path: &str) -> bool {
 /// The map key is the **process-local session handle** returned to the caller
 /// (plan 004 §6.2): the manager's global session id never crosses the kernel
 /// boundary, so a caller cannot guess or probe another process's sessions.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct SessionIdentity {
     /// Target TA UUID (hyphenated lowercase form, as routed on the wire).
     pub target_uuid: String,

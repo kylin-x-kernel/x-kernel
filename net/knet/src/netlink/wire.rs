@@ -146,8 +146,8 @@ pub(crate) mod neigh {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct NlMsgHeader {
     pub(super) len: u32,
     pub(super) msg_type: u16,
@@ -195,8 +195,8 @@ impl NlMsgHeader {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct IfInfoMsg {
     pub(super) family: u8,
     pub(super) pad: u8,
@@ -233,8 +233,8 @@ impl IfInfoMsg {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct IfAddrMsg {
     pub(super) family: u8,
     pub(super) prefix_len: u8,
@@ -268,8 +268,8 @@ impl IfAddrMsg {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct RtMsg {
     pub(super) family: u8,
     pub(super) dst_len: u8,
@@ -315,8 +315,8 @@ impl RtMsg {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
 #[repr(C, packed)]
+#[derive(Clone, Copy, Debug)]
 pub(super) struct NdMsg {
     pub(super) family: u8,
     pub(super) pad1: u8,

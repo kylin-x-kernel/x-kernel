@@ -6,8 +6,8 @@
 
 use crate::parsing::{BigEndianU32, FdtData};
 
-#[derive(Debug, Clone, Copy)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct FdtHeader {
     /// FDT header magic
     magic: BigEndianU32,

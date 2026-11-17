@@ -15,7 +15,7 @@ mod node;
 use node::{LockList, OwnedLock, Waiter, WakeQueue};
 
 /// Linux files-owner or open-file-owner identity, without retaining that owner.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum FileLockOwner {
     /// Traditional record locks owned by a shared descriptor table.
     Posix(usize),
@@ -52,7 +52,7 @@ impl FileLockOwner {
 }
 
 /// Advisory lock mode. Unlock requests are never installed in the inode list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileLockType {
     /// Shared read lock.
     Read,

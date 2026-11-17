@@ -46,6 +46,8 @@ fn handle_page_fault(tf: &mut ExceptionContext, access_flags: PageFaultFlags) {
     );
 }
 
+// SAFETY: LoongArch trap assembly resolves this unique Rust ABI symbol and passes a live
+// ExceptionContext reference after saving the trap frame.
 /// Architecture-specific trap entry point.
 #[unsafe(no_mangle)]
 fn loongarch64_trap_handler(tf: &mut ExceptionContext) {

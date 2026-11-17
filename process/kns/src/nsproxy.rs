@@ -47,7 +47,7 @@ pub struct NsProxy {
 }
 
 /// Errors reported by [`NsProxy::prepare_unshare`] and [`NsProxy::with_namespace`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnshareError {
     /// A namespace creation flag was requested without the required
     /// capability (`CAP_SYS_ADMIN` in the absence of user namespaces).

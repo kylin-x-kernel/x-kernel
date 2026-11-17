@@ -24,6 +24,7 @@ ktask.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
 osvm.workspace = true
+posix-types.workspace = true
 unittest.workspace = true
 
 [lints]

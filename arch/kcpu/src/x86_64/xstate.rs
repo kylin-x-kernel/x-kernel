@@ -127,7 +127,7 @@ pub(super) fn mxcsr_mask() -> u32 {
 /// unvalidated user data from reaching XRSTOR. Fixed capacity is sufficient
 /// because initialization enables only x87/SSE and the checked YMM component.
 #[repr(C, align(64))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ExtendedState {
     pub(super) fx: FxStateBlock,
     xstate_bv: u64,

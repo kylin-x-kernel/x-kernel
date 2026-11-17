@@ -21,8 +21,8 @@ use crate::{
     IpcUuid, MemRef, UEvent, ipc_port_connect_async, ipc_port_create, ipc_port_publish,
 };
 
-#[derive(Clone, Copy, posix_types::UserRead)]
 #[repr(C)]
+#[derive(Clone, Copy, posix_types::UserRead)]
 pub(crate) struct IpcMsg {
     num_iov: u32,
     iov: usize,
@@ -30,16 +30,16 @@ pub(crate) struct IpcMsg {
     handles: usize,
 }
 
-#[derive(Clone, Copy, posix_types::UserWrite)]
 #[repr(C)]
+#[derive(Clone, Copy, posix_types::UserWrite)]
 pub(crate) struct IpcMsgInfo {
     len: usize,
     id: u32,
     num_handles: u32,
 }
 
-#[derive(Debug, Clone, Copy, posix_types::UserRead, posix_types::UserWrite)]
 #[repr(C)]
+#[derive(Debug, Clone, Copy, posix_types::UserRead, posix_types::UserWrite)]
 pub(crate) struct UserEvent {
     handle: i32,
     event: u32,
@@ -66,8 +66,8 @@ impl From<UEvent> for UserEvent {
 /// The field is private because `IpcUuid` is the kernel semantic type. Syscall
 /// code should cross the ABI boundary through `From<IpcUuid>` instead of
 /// constructing raw ABI carriers directly.
-#[derive(Clone, Copy, posix_types::UserWrite)]
 #[repr(transparent)]
+#[derive(Clone, Copy, posix_types::UserWrite)]
 pub(crate) struct TipcUuid(Uuid);
 
 const _: () = assert!(core::mem::size_of::<TipcUuid>() == 16);

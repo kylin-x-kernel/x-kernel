@@ -14,7 +14,7 @@ use kspin::SpinNoPreempt;
 use lazyinit::LazyInit;
 
 /// A point where a test can pause the class-retirement path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClassPause {
     /// A caller claimed the same-ID retirement reservation and is about to
     /// unpublish the removed class entries.

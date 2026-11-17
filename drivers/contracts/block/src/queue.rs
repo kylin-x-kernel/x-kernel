@@ -25,7 +25,7 @@ const MAX_BLOCK_SIZE: u32 = 4096;
 /// This is the currently used subset of Linux `struct queue_limits`. All sizes
 /// and offsets are expressed in bytes. A logical block is never smaller than a
 /// sector and is always a power of two.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct QueueLimits {
     logical_block_size: u32,
     physical_block_size: u32,

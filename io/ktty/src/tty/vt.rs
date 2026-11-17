@@ -74,15 +74,15 @@ impl VtMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DisplayMode {
     Text     = 0,
     Graphics = 1,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum KeyboardMode {
     Unicode = 3,
     Off     = 4,

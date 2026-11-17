@@ -9,10 +9,10 @@ use kuaccess::check_access;
 use memspace::{FutexBacking, MmSpace, VmObjectId};
 
 /// Stable identity of one Linux futex word.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FutexKey(FutexKeyKind);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum FutexKeyKind {
     Private {
         mm_id: u64,

@@ -77,7 +77,7 @@ impl NameTable {
 }
 
 /// Value profiling kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ValueKind {
     IndirectCallTarget,
     MemOpSize,
@@ -85,7 +85,7 @@ pub(crate) enum ValueKind {
 }
 
 /// A single observed value and its count.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ValueCount {
     pub value: u64,
     pub count: u64,

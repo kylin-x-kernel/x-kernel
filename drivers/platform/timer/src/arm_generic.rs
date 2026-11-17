@@ -56,8 +56,8 @@ static NANOS_TO_CNTPCT_RATIO: Once<Ratio> = Once::new();
 // countdown value. Values above i32::MAX therefore describe an expired timer.
 const MAX_TIMER_INTERVAL_TICKS: u64 = i32::MAX as u64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimerMode {
     Physical = 0,
     Virtual  = 1,
@@ -106,7 +106,7 @@ impl TimerMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerConfig {
     pub irq: usize,
     pub frequency: Option<Frequency>,
@@ -421,7 +421,7 @@ fn deadline_to_interval_ticks(deadline_ns: u64, now_ns: u64, frequency_hz: u64) 
 }
 
 fn arm_timer_after(interval: ktime_types::TimeSpan) {
-    let interval =
+    let interval_ticks =
         deadline_to_interval_ticks(interval.as_nanos_u64_saturating(), 0, frequency().as_hz());
     match mode() {
         TimerMode::Physical => {
@@ -429,11 +429,11 @@ fn arm_timer_after(interval: ktime_types::TimeSpan) {
             // Enabling first would assert ISTATUS immediately. Linux
             // `arch_timer` `set_next_event` writes TVAL, then CTRL.ENABLE.
             // Physical writes go through the VMM-aware helpers (EL2 CNTHP_*).
-            write_physical_timer_tval(interval);
+            write_physical_timer_tval(interval_ticks);
             write_physical_timer_ctl(1);
         }
         TimerMode::Virtual => {
-            CNTV_TVAL_EL0.set(interval);
+            CNTV_TVAL_EL0.set(interval_ticks);
             CNTV_CTL_EL0.write(CNTV_CTL_EL0::ENABLE::SET);
         }
     }

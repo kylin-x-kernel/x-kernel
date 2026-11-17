@@ -5,7 +5,8 @@
 This crate provides ELF header parsing, the auxiliary vector representation, and the byte layout of the initial user stack.
 It does not own the process address space, and it is not responsible for mapping or loading ELF segments.
 `src/info.rs` manages the parse results, `src/auxv.rs` represents the auxiliary vector,
-and `src/user_stack.rs` generates the stack contents; see the rustdoc for the parameters and error contracts of the public API.
+and `src/user_stack.rs` generates the stack contents; `src/error.rs` defines the `ElfError`
+shared by parsing and stack construction, keeping each failure condition a distinct variant. See the rustdoc for the parameters and error contracts of the public API.
 
 ## Architecture and Algorithm Flow
 
@@ -13,7 +14,9 @@ and `src/user_stack.rs` generates the stack contents; see the rustdoc for the pa
 and then copies the full program header table passed in into a uniform `ProgramHeader64` array.
 `ElfParser` borrows these headers and chooses the load offset according to the ELF type.
 During construction, it looks for the segment that covers the file offset of the program header table, and computes
-the virtual address of the program header table using checked addition and integer conversion. A missing covering segment or an address overflow is returned through the existing `Result`.
+the virtual address of the program header table using checked addition and integer conversion. A missing covering segment and an address overflow return
+`ElfError::ProgramHeaderTableUnmapped` and `ElfError::ProgramHeaderAddressOverflow` respectively;
+the diagnostic text matches the former string errors.
 
 After successful construction, the `phdr` field retains this address; `phdr()` and `aux_vector()`
 no longer search the headers again and no longer panic because of a missing covering segment. The headers are borrowed through a shared reference,

@@ -18,7 +18,7 @@ use crate::{
 const INLINE_REGISTRATIONS: usize = 8;
 
 /// An error raised while registering a poll waiter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PollRegisterError {
     /// Memory required for a registration could not be allocated.
     NoMemory,

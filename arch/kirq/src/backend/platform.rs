@@ -71,7 +71,7 @@ pub struct LevelChip {
 }
 
 /// CPU-local guest completion delegation, independent of source enablement.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PerCpuForwardingState {
     /// Producer stopped and delivery masked; revoke delegation and clear active.
     Host,
@@ -99,7 +99,7 @@ pub struct PerCpuForwardingChip {
 /// Firmware-described hardware virtualization interfaces owned by an irqchip.
 /// Physical ranges are validated by the provider; consumers must still map
 /// them as device memory and validate controller-specific register capacity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GuestIrqInterface {
     /// GICv2 virtual interface control (GICH) and guest CPU interface (GICV).
     GicV2 {

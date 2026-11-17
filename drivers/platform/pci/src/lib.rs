@@ -32,14 +32,14 @@ pub mod msix;
 static PCI_CONFIG_BASE_OVERRIDE: AtomicU64 = AtomicU64::new(0);
 static PCI_BUS_END_OVERRIDE: AtomicU32 = AtomicU32::new(u32::MAX);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PciConfigSource {
     Static,
     Firmware,
     RuntimeOverride,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PciInitError {
     NoMemory,
     InvalidRange,
@@ -53,7 +53,7 @@ pub enum PciInitError {
 /// The variant records what kind of number firmware produced. ACPI names a
 /// platform-wide GSI that only the x86 IRQ integration can resolve; device
 /// tree compatibility routes name a controller-local hardware IRQ.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LegacyInterruptRoute {
     /// ACPI GSI. The x86 platform IRQ integration resolves it.
     Gsi {
@@ -316,7 +316,7 @@ pub fn legacy_interrupt_route(
 }
 
 /// Why a checked PCI configuration access was rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PciConfigError {
     /// Device or function number is outside the PCI encoding.
     InvalidBdf,

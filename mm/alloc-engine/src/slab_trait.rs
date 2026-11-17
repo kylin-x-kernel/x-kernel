@@ -25,8 +25,8 @@ pub const SLAB_MAX_SIZE: usize = 2048;
 const CLASS_SIZES: [usize; SIZE_CLASS_COUNT] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
 /// Fixed set of object sizes served by the slab allocator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SizeClass {
     /// 8-byte objects.
     Bytes8    = 0,

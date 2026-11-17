@@ -9,8 +9,8 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use ktime_types::{MonotonicInstant, TimeSpan};
 
 /// Represents the current CPU-accounting mode of a thread.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CpuTimeState {
     /// The thread is off CPU or has finished CPU accounting.
     Inactive = 0,

@@ -31,7 +31,7 @@ pub(super) fn is_gicv3_compatible(compatible: &str) -> bool {
 /// The node is retained so the caller can associate the exact controller
 /// instance with its IRQ domain after initialization. Discovery must not drop
 /// the node and let the IRQ core guess the controller from a compatible string.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct GicSelection<'a> {
     /// Controller configuration decoded from the node.
     pub config: GicConfig,
@@ -40,7 +40,7 @@ pub struct GicSelection<'a> {
 }
 
 /// A rejection while translating a firmware node into [`GicConfig`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GicConfigError {
     /// The node's interrupt-controller declaration is malformed.
     Controller {

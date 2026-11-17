@@ -23,14 +23,29 @@ make install-tools
 
 ```bash
 make dylint          # scan the kernel selected by .config
+make dylint XKMAKE_ARGS=--fix  # apply machine suggestions in configured local packages
 make dylint_test     # run every lint's UI test
 make dylint XKMAKE_ARGS="-- --message-format=json"
 make dylint FACTS_OUT=<dir>   # also export code facts (see below)
 ```
 
+The fix mode selects local packages from Cargo's application compilation unit
+graph, so Cargo applies suggestions in dependencies of `entry` without
+selecting inactive platform or development packages. It checks that the fix
+build resolves the same package features as the scan. Dry-run reports how
+package selection will be resolved at run time without starting Cargo.
+Re-run fix mode after moving derives, because that can expose a derive list or
+attribute group that still needs sorting.
+
 A scan only sees code that the configuration compiles; CI scans the
 aarch64 and x86_64 `qemu_defconfig` configurations. Add the platform's
 kernel target to the toolchain before scanning another configuration.
+
+No lint checks a vendored crate, one whose manifest sits directly under
+`vendor/` (see `docs/code-guidelines/README.md`, "Vendored code").
+`register_lints` registers only the facts export for it, so the dependency
+facts scan and `--fix`, which both reach these path dependencies, report and
+rewrite nothing there.
 
 `xkmake` builds this library once into `<target>/tools/lints` and passes
 it to `cargo dylint --lib-path`. The build ignores the rustflags of the
@@ -237,7 +252,8 @@ version they do not know. Each line is one JSON object; `t` is its kind.
    the expected compiler output, run through `crate::testing::run_ui` with
    the mock crates the source uses (for example `testing::MOCK_KSPIN`).
 3. In `src/lib.rs`, add `mod <lint>;` and register the lint and its pass in
-   `register_lints`.
+   `register_lints`, after the vendored-crate return so the pass inherits
+   that exclusion.
 4. Add the rule file `docs/code-guidelines/CG-<nnn>-<descriptive>.md`.
 
 `dylint_testing` runs UI tests under one lock. When a test fails, the lock is

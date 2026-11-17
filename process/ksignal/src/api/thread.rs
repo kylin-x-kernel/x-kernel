@@ -14,7 +14,7 @@ use kspin::SpinNoIrq;
 use {
     core::{alloc::Layout, mem::offset_of},
     kcpu::userspace::UserRestorableContext,
-    osvm::VirtMutPtr,
+    posix_types::{UserPtr, UserWrite, k_siginfo},
 };
 
 use super::ProcessSignalManager;
@@ -26,12 +26,27 @@ use crate::{
     TimerSignalRejection, TimerSignalSendOutcome, arch,
 };
 
+/// Outbound non-x86 signal frame in Linux `rt_sigframe` order (info, then uc).
+///
+/// x86_64 builds its frame region by region in `arch::setup_signal_frame`.
 #[cfg(not(target_arch = "x86_64"))]
+#[repr(C)]
 struct SignalFrame {
+    /// Complete initialized 128-byte `siginfo_t` record.
+    siginfo: [u8; 128],
     ucontext: UContext,
-    siginfo: SignalInfo,
     saved: UserRestorableContext,
+    /// Zeroed tail that rounds the aarch64 frame to its 16-byte alignment.
+    #[cfg(target_arch = "aarch64")]
+    abi_pad: [u8; 8],
 }
+
+// SAFETY: SignalFrame is repr(C). The siginfo bytes come from an initialized
+// k_siginfo; every UContext/MContext alignment hole is an explicit zeroed
+// field; UserRestorableContext is a u64 (aarch64) or zero-sized; the aarch64
+// tail is the explicit abi_pad. The const assertions below pin these layouts.
+#[cfg(not(target_arch = "x86_64"))]
+unsafe impl UserWrite for SignalFrame {}
 
 unittest::path_mod_test!(receipt_tests, "../../ut-tests/timer_receipt.rs");
 
@@ -42,6 +57,32 @@ const _: () = assert!(
     core::mem::offset_of!(SignalFrame, saved) % core::mem::align_of::<UserRestorableContext>() == 0,
     "signal-frame restorable state must be naturally aligned"
 );
+
+// These frame sizes and offsets pin the user-visible ABI while every gap is
+// represented by an initialized field in UContext, MContext, or SignalFrame.
+#[cfg(target_arch = "aarch64")]
+const _: () = {
+    assert!(core::mem::size_of::<UserRestorableContext>() == 8);
+    assert!(core::mem::size_of::<SignalFrame>() == 4704);
+    assert!(core::mem::offset_of!(SignalFrame, siginfo) == 0);
+    assert!(core::mem::offset_of!(SignalFrame, ucontext) == 128);
+    assert!(core::mem::offset_of!(SignalFrame, saved) == 4688);
+    assert!(core::mem::offset_of!(SignalFrame, abi_pad) == 4696);
+};
+#[cfg(target_arch = "riscv64")]
+const _: () = {
+    assert!(core::mem::size_of::<UserRestorableContext>() == 0);
+    assert!(core::mem::size_of::<SignalFrame>() == 1088);
+    assert!(core::mem::offset_of!(SignalFrame, siginfo) == 0);
+    assert!(core::mem::offset_of!(SignalFrame, ucontext) == 128);
+};
+#[cfg(target_arch = "loongarch64")]
+const _: () = {
+    assert!(core::mem::size_of::<UserRestorableContext>() == 0);
+    assert!(core::mem::size_of::<SignalFrame>() == 576);
+    assert!(core::mem::offset_of!(SignalFrame, siginfo) == 0);
+    assert!(core::mem::offset_of!(SignalFrame, ucontext) == 128);
+};
 
 /// Thread-level signal manager.
 ///
@@ -242,8 +283,9 @@ impl ThreadSignalManager {
     ///
     /// Default and ignored dispositions only report the OS action; a caught
     /// signal rewrites `uctx` to enter the user handler on a freshly built
-    /// signal frame (`ucontext` + `siginfo` + restorable state) written to
-    /// user memory, applies the handler mask and
+    /// signal frame in Linux `rt_sigframe` order (`siginfo`, `ucontext`, then
+    /// restorable state on non-x86; x86_64 delegates to the arch module)
+    /// written to user memory, applies the handler mask and
     /// `SA_RESETHAND`, and returns [`SignalOsAction::Handler`].
     ///
     /// # Returns
@@ -305,12 +347,13 @@ impl ThreadSignalManager {
                         return Some(SignalOsAction::CoreDump);
                     };
                     let aligned_sp = frame_sp & !(frame_align - 1);
-                    let frame_ptr = aligned_sp as *mut SignalFrame;
-                    if frame_ptr
+                    if UserPtr::<SignalFrame>::from(aligned_sp)
                         .write_vm(SignalFrame {
+                            siginfo: k_siginfo::from(sig.clone()).into_bytes(),
                             ucontext: UContext::new(uctx, restore_blocked),
-                            siginfo: sig.clone(),
                             saved: uctx.save_user_restorable(),
+                            #[cfg(target_arch = "aarch64")]
+                            abi_pad: [0; 8],
                         })
                         .is_err()
                     {

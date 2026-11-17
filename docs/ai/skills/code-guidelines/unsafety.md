@@ -78,8 +78,8 @@ The review should name the scenario explicitly.
 For syscall access placement and validation, read
 [CG-019](../../../code-guidelines/CG-019-user-pointers-stop-at-syscall-boundary.md);
 for the type and copy contracts, read
-the pending Dylint lint `unsound_user_abi_impl` ([pending](../../../code-guidelines/pending.md)) and
-the pending Dylint lint `user_copy_without_abi_contract` ([pending](../../../code-guidelines/pending.md)).
+the Dylint lint `unsound_user_abi_impl` ([CG-005](../../../code-guidelines/CG-005-user-abi-layout.md)) and
+the Dylint lint `user_copy_without_abi_contract` ([CG-006](../../../code-guidelines/CG-006-user-copy-abi-contract.md)).
 Repository examples: [typed pointers](../../../../posix/types/src/ptr.rs)
 and [checked access](../../../../core/kuaccess/src/lib.rs).
 

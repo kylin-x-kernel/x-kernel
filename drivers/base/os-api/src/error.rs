@@ -3,7 +3,7 @@
 // See LICENSES for license details.
 
 /// Error returned by resource acquisition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResError {
     /// The resource descriptor was invalid (e.g. zero-sized region).
     InvalidResource,

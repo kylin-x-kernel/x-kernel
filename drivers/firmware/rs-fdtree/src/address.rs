@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use crate::{FdtNode, PropertyError};
 
 /// One complete reg interval translated into CPU physical address space.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MmioResource<'a> {
     /// CPU physical start address in bytes, independent of host pointer width.
     pub base: u64,
@@ -20,7 +20,7 @@ pub struct MmioResource<'a> {
 }
 
 /// Why a numeric address declaration could not be interpreted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AddressErrorReason {
     /// Missing, malformed or duplicated property.
     Property(PropertyError),
@@ -41,7 +41,7 @@ pub enum AddressErrorReason {
 }
 
 /// An address interpretation error referring only to the input tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AddressError {
     /// Structure-block offset of the offending device or ancestor node.
     pub node_offset: u32,

@@ -148,8 +148,8 @@ impl PinnedFolio {
 /// Clones retain the same content object and its lock for private-file COW.
 /// The PTE independently owns its physical hold. Removing this token never
 /// waits for TLB retirement and cannot release a page still held by a PTE.
-#[derive(Clone, Debug)]
 #[must_use = "retain the content token while private COW may read this page"]
+#[derive(Clone, Debug)]
 pub struct MappedFolio {
     pin: PinnedFolio,
 }

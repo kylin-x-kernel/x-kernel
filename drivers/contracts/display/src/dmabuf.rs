@@ -33,7 +33,7 @@ use crate::DriverError;
 /// engine, a display controller) uses this directly. An export with no
 /// guest-visible memory behind it returns [`DriverError::Unsupported`] from
 /// its map operation instead of reporting a window it cannot guarantee.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MappedMemory {
     /// Physical start address of the attachment's window.
     pub start: u64,

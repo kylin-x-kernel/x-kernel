@@ -11,7 +11,7 @@ use kiface_task_api::TaskExecutionIf;
 /// Prefer `max_spins` in 1..=100 and `spin_before_yield` no greater than
 /// `max_spins`, typically at most 10. Backoff uses `1 << count`; callers must
 /// keep the reached spin count below the shift operand's bit width.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct SpinConfig {
     /// Maximum number of spin iterations before blocking.
     pub max_spins: u32,

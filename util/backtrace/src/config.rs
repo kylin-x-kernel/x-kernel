@@ -10,7 +10,7 @@ use core::{
 };
 
 /// Configuration for backtrace capturing and unwinding.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct BacktraceConfig {
     /// Valid instruction pointer range.
     pub ip_range: Range<usize>,

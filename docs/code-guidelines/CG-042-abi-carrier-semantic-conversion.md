@@ -17,8 +17,8 @@ triggers:
 - **Scope**: External value layout, flags and encoding carriers at kernel
   boundaries and the first subsystem helper that consumes them.
   Not this rule: [CG-019](CG-019-user-pointers-stop-at-syscall-boundary.md)
-  owns user addresses and syscall access placement; the pending Dylint lint `unsound_user_abi_impl` ([pending](pending.md))
-  and the pending Dylint lint `user_copy_without_abi_contract` ([pending](pending.md)) own user-copy layout and
+  owns user addresses and syscall access placement; the Dylint lint `unsound_user_abi_impl` ([CG-005](CG-005-user-abi-layout.md))
+  and the Dylint lint `user_copy_without_abi_contract` ([CG-006](CG-006-user-copy-abi-contract.md)) own user-copy layout and
   typed-copy validity. This rule owns value-carrier versus semantic-type
   separation beyond those pointer/copy contracts.
 - **Why**: External encoding conventions should not become implicit kernel

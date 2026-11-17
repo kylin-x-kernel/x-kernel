@@ -90,7 +90,7 @@ pub type TeeResult<T = ()> = Result<T, u32>;
 
 /// Error adapter for common allocation and user-memory operations.
 /// Existing TEE entry points retain their `u32` ABI error representation.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(super) struct TeeError(u32);
 
 impl From<kerrno::KError> for TeeError {

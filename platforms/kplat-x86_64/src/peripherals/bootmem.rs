@@ -9,7 +9,7 @@ use khal::mem::ReservedKind;
 use klazy::Once;
 use multiboot2::{BootInformation, BootInformationHeader, MemoryAreaType};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BootMemoryKind {
     Ram,
     Reserved {

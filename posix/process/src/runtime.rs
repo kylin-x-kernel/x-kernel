@@ -26,7 +26,7 @@ use linux_raw_sys::general::{
 };
 use linux_sysno::Sysno;
 use memspace::PageFaultOutcome;
-use osvm::{VirtMutPtr, VirtPtr};
+use osvm::VirtPtr;
 use posix_ipc::SHM_MANAGER;
 
 /// Prepares a consuming user entry before process/thread creation starts.
@@ -86,7 +86,7 @@ pub(crate) fn run_user_thread_loop(
 
     if let Some(tid) = (set_child_tid as *mut Pid).check_non_null() {
         // The child is already published; a failed TID writeback must not prevent it running.
-        let _ = tid.write_vm(thr.tid());
+        let _ = posix_types::UserPtr::from(tid).write_vm(thr.tid());
     }
 
     info!("Enter user space: ip={:#x}, sp={:#x}", uctx.ip(), uctx.sp());
@@ -249,14 +249,14 @@ fn syscall_return_has_work(
 
 /// Robust futex list node for robust mutexes.
 #[repr(C)]
-#[derive(Debug, Copy, Clone, AnyBitPattern)]
+#[derive(Debug, Copy, Clone, AnyBitPattern, posix_types::UserRead)]
 struct RobustList {
     next: *mut RobustList,
 }
 
 /// Head of a robust futex list with pending operation state.
 #[repr(C)]
-#[derive(Debug, Copy, Clone, AnyBitPattern)]
+#[derive(Debug, Copy, Clone, AnyBitPattern, posix_types::UserRead)]
 struct RobustListHead {
     list: RobustList,
     futex_offset: c_long,
@@ -277,8 +277,8 @@ fn decode_robust_pointer(pointer: *mut RobustList) -> (*mut RobustList, bool) {
 ///
 /// Layout matches the Linux robust-futex ABI: TID in the low bits, plus
 /// `FUTEX_OWNER_DIED` / `FUTEX_WAITERS` in the high bits.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RobustFutexWord(u32);
 
 impl RobustFutexWord {
@@ -349,7 +349,7 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
     // SAFETY: `head` comes from the task's registered robust-list head, and we
     // only take the address of its embedded sentinel field for list termination checks.
     let end_ptr = unsafe { &raw const (*head).list };
-    let Some(head) = head.read_vm().ok() else {
+    let Some(head) = posix_types::UserConstPtr::from(head).read_vm().ok() else {
         return;
     };
     let mut entry = head.list.next;
@@ -362,7 +362,11 @@ fn exit_robust_list(head: *const RobustListHead, tid: Tid) {
         if core::ptr::eq(entry_address, end_ptr.cast_mut()) {
             break;
         }
-        let Some(next_entry) = entry_address.read_vm().map(|node| node.next).ok() else {
+        let Some(next_entry) = posix_types::UserConstPtr::from(entry_address.cast_const())
+            .read_vm()
+            .map(|node| node.next)
+            .ok()
+        else {
             break;
         };
         if entry_address != pending_address
@@ -559,7 +563,10 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     kfutex::global_table().exit_pi(&curr.clone());
 
     let clear_child_tid = thr.clear_child_tid() as *mut u32;
-    if clear_child_tid.write_vm(0).is_ok() {
+    if posix_types::UserPtr::from(clear_child_tid)
+        .write_vm(0)
+        .is_ok()
+    {
         let key = process.address_space().and_then(|address_space| {
             let address_space = address_space.lock();
             kfutex::FutexKey::resolve(&address_space, clear_child_tid as usize, false)

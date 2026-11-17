@@ -165,7 +165,7 @@ impl RecvFlags {
 pub type AncillaryData = Arc<dyn Any + Send + Sync>;
 
 /// Options for initiating a socket connection.
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ConnectOptions {
     /// Return the protocol-specific nonblocking result when the connection
     /// cannot complete immediately.
@@ -173,13 +173,13 @@ pub struct ConnectOptions {
 }
 
 /// Options for accepting a connection from a listening socket.
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct AcceptOptions {
     /// Return [`KError::WouldBlock`] when no connection is ready.
     pub nonblocking: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum SocketErrorOrigin {
     Local,
     Icmp,
@@ -188,7 +188,7 @@ pub enum SocketErrorOrigin {
 }
 
 /// A protocol error stored in a socket error queue.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct SocketErrorInfo {
     pub errno: LinuxError,
     pub origin: SocketErrorOrigin,
@@ -204,7 +204,7 @@ pub struct SocketErrorInfo {
 /// Both fields are byte counts, not message counts: `outq` is the data queued
 /// for the peer that it has not consumed yet, `inq` the data the caller can
 /// read next.
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct QueueLengths {
     /// Bytes queued towards the peer (Linux `sk_wmem_alloc` /
     /// `unix_outq_len`; the unsent transmit buffer for TCP).
@@ -364,7 +364,7 @@ impl Debug for RecvOptions<'_> {
 }
 
 /// Kind of shutdown operation to perform on a socket.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shutdown {
     Read,
     Write,

@@ -49,6 +49,8 @@ fn handle_page_fault(tf: &mut ExceptionContext) {
     );
 }
 
+// SAFETY: x86 trap assembly resolves this unique Rust ABI symbol and passes a live
+// ExceptionContext reference after saving the trap frame.
 /// Architecture-specific trap entry point.
 #[unsafe(no_mangle)]
 fn x86_trap_handler(tf: &mut ExceptionContext) {

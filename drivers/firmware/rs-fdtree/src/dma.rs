@@ -7,7 +7,7 @@
 use crate::{FdtNode, PropertyError};
 
 /// One DMA window between a bus and its immediate parent address space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DmaRange {
     /// First address visible on the child bus.
     pub bus_addr: u64,
@@ -18,7 +18,7 @@ pub struct DmaRange {
 }
 
 /// Invalid or unsupported local DMA property encoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DmaRangeError {
     /// A local property is malformed or duplicated.
     Property(PropertyError),
@@ -133,7 +133,7 @@ pub fn parse_dma_ranges(
 /// `bus_addr` is the first address in the device's bus address space and
 /// `cpu_addr` the corresponding CPU physical address. The window is a
 /// translation fact, not a device mask.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DeviceDmaWindow {
     /// First address visible on the device's bus.
     pub bus_addr: u64,
@@ -144,7 +144,7 @@ pub struct DeviceDmaWindow {
 }
 
 /// Why DT cannot produce a usable device DMA window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceDmaError {
     /// A local `dma-ranges` declaration is malformed or unsupported.
     Declaration(DmaRangeError),

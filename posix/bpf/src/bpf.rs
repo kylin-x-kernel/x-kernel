@@ -47,7 +47,7 @@ use kerrno::{KError, KResult};
 use klogger::debug;
 use kuaccess::vm_load_string;
 use kvfs::{Filename, LookupFlags, LookupIntent};
-use posix_types::{UserConstPtr, UserPtr, UserRead};
+use posix_types::{UserConstPtr, UserPtr, UserRead, UserWrite};
 
 /// `lddw` opcode (`BPF_LD | BPF_DW | BPF_IMM`).
 const BPF_LD_DW_IMM: u8 = (BPF_LD | BPF_DW | BPF_IMM) as u8;
@@ -115,7 +115,7 @@ const _: () = assert!(size_of::<BpfMapFreezeAttrPrefix>() == 4);
 const BPF_PROG_LOAD_MIN_ATTR_SIZE: usize = size_of::<BpfProgLoadAttrPrefix>();
 
 #[repr(C)]
-#[derive(Clone, Copy, UserRead)]
+#[derive(Clone, Copy, UserRead, UserWrite)]
 struct BpfProgLoadAttrPrefix {
     prog_type: u32,
     insn_cnt: u32,
@@ -157,6 +157,16 @@ struct BpfProgTestRunAttrPrefix {
     data_in: u64,
     data_out: u64,
     repeat: u32,
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        unitless_time_integer,
+        reason = "CG-011-time-unit-names: Linux UAPI name `union bpf_attr` test-run field \
+                  `duration` from `include/uapi/linux/bpf.h`"
+    )]
     duration: u32,
 }
 

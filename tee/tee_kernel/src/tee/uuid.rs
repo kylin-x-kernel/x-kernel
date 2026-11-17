@@ -13,7 +13,7 @@ use crate::tee::TeeResult;
 
 /// A Universally Unique Resource Identifier (UUID) type as defined in RFC4122.
 /// The value is used to identify a trusted application.
-#[derive(Copy, Clone, Default)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct Uuid {
     raw: raw::TEE_UUID,
 }

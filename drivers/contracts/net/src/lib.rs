@@ -24,7 +24,7 @@ mod net_buf;
 pub use self::net_buf::{NetBuf, NetBufBox, NetBufHandle, NetBufPool};
 
 /// The hardware (MAC) address of a NIC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MacAddress(pub [u8; 6]);
 
 /// IRQ-safe receive scheduling hook provided by the network subsystem.

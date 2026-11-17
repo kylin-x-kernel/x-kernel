@@ -10,7 +10,7 @@ use core::{any::Any, ops::Range, ptr::NonNull};
 use crate::{BlockDevice, DriverError, DriverResult, SECTOR_SIZE};
 
 /// Operation performed by a bio or request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BioOperation {
     /// Read storage into memory.
     Read,

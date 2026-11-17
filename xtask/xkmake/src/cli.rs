@@ -156,7 +156,7 @@ pub(crate) struct DylintArgs {
 
     /// Also export code facts and pack them into this directory (manifest,
     /// status and one compressed file per crate; see `tools/lints/README.md`).
-    #[arg(long, value_name = "DIR", conflicts_with = "self_test")]
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["self_test", "fix"])]
     pub(crate) facts_out: Option<PathBuf>,
 
     /// Commit recorded in the facts manifest (default: `git rev-parse HEAD`).
@@ -171,6 +171,10 @@ pub(crate) struct DylintArgs {
     /// enabled by `XKERNEL_FACTS_DEPS=1`).
     #[arg(long, requires = "facts_out")]
     pub(crate) facts_deps: bool,
+
+    /// Apply machine-applicable lint suggestions in configured local packages.
+    #[arg(long, conflicts_with = "self_test")]
+    pub(crate) fix: bool,
 
     /// Additional Cargo arguments passed after `cargo dylint --`.
     #[arg(last = true)]

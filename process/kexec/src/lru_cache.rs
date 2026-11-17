@@ -11,7 +11,7 @@ use core::mem::replace;
 ///
 /// It maintains a fixed-capacity storage and uses doubly-linked list indices
 /// to track the usage order from MRU to LRU.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct LruCache<V, const CAP: usize> {
     storage: Vec<CacheNode<V>>,
     mru_idx: u16,
@@ -19,7 +19,7 @@ pub(super) struct LruCache<V, const CAP: usize> {
 }
 
 /// Internal node for the LRU cache linked list.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 struct CacheNode<V> {
     payload: V,
     prev: u16,

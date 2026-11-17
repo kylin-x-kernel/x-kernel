@@ -392,14 +392,14 @@ fn wait_timeout(wait: &DrmSyncobjWait) -> DrmResult<WaitTimeout> {
         };
     }
     let now = khal::time::monotonic_time();
-    let timeout = wait.timeout_nsec as u64;
-    if timeout == 0 {
+    let timeout_ns = wait.timeout_nsec as u64;
+    if timeout_ns == 0 {
         // A poll that cannot be satisfied by a value already available.
         return Ok(WaitTimeout::Until(now));
     }
     // Absolute nanoseconds since CLOCK_MONOTONIC's origin.
     Ok(WaitTimeout::Until(
-        MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(timeout)),
+        MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(timeout_ns)),
     ))
 }
 

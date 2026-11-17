@@ -14,7 +14,7 @@ use lazyinit::LazyInit;
 ///
 /// All later table lookups walk from this root. Stored once by
 /// [`init`] and read back through [`desc`] / [`rsdp_addr`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AcpiDesc {
     rsdp_addr: usize,
 }
@@ -32,7 +32,7 @@ impl AcpiDesc {
 }
 
 /// Failure to initialize the ACPI subsystem.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AcpiInitError {
     /// `init` was called with a zero RSDP address.
     MissingRsdp,

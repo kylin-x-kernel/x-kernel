@@ -15,7 +15,7 @@ use memaddr::VirtAddr;
 
 /// Saved registers when a trap (exception) occurs.
 #[repr(C)]
-#[derive(Default, Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct ExceptionContext {
     /// General-purpose registers (X0..X30).
     pub x: [u64; 31],
@@ -295,6 +295,8 @@ impl TaskContext {
 /// resume address established by `TaskContext::init` or an earlier switch.
 /// Keep both contexts and stacks live until their saved continuations finish;
 /// FP state and address-space state must already match the next task.
+// SAFETY: The scheduler passes valid current and next TaskContext pointers in x0/x1; the naked
+// body only saves/restores the AArch64 callee-saved registers and stack pointer.
 #[unsafe(naked)]
 unsafe extern "C" fn context_switch(_current_task: &mut TaskContext, _next_task: &TaskContext) {
     naked_asm!(
@@ -328,6 +330,8 @@ unsafe extern "C" fn context_switch(_current_task: &mut TaskContext, _next_task:
 /// FP/SIMD access must be enabled on this CPU. Prevent task switches while
 /// saving so all registers belong to the same task; `state` is exclusively
 /// borrowed for the assembly writes.
+// SAFETY: The caller passes a writable FpState in x0 with FP/SIMD enabled; the naked body only
+// saves q0-q31, FPCR, and FPSR before returning.
 #[unsafe(naked)]
 #[cfg(feature = "fp-simd")]
 unsafe extern "C" fn fpstate_save(state: &mut FpState) {
@@ -352,8 +356,8 @@ unsafe extern "C" fn fpstate_save(state: &mut FpState) {
         stp     q26, q27, [x0, 26 * 16]
         stp     q28, q29, [x0, 28 * 16]
         stp     q30, q31, [x0, 30 * 16]
-        str     x9, [x0, 64 *  8]
-        str     x10, [x0, 65 * 8]
+        str     w9, [x0, 64 * 8]
+        str     w10, [x0, 64 * 8 + 4]
 
         isb
         ret"
@@ -365,6 +369,8 @@ unsafe extern "C" fn fpstate_save(state: &mut FpState) {
 /// FP/SIMD access must be enabled on this CPU, and `state` must contain
 /// valid saved or initial FP register values. Prevent task switches and
 /// ensure no live kernel FP/SIMD values depend on the registers replaced.
+// SAFETY: The caller passes a populated FpState in x0 with FP/SIMD enabled; the naked body only
+// restores q0-q31, FPCR, and FPSR before returning.
 #[unsafe(naked)]
 #[cfg(feature = "fp-simd")]
 unsafe extern "C" fn fpstate_restore(state: &FpState) {
@@ -387,8 +393,8 @@ unsafe extern "C" fn fpstate_restore(state: &FpState) {
         ldp     q26, q27, [x0, 26 * 16]
         ldp     q28, q29, [x0, 28 * 16]
         ldp     q30, q31, [x0, 30 * 16]
-        ldr     x9, [x0, 64 * 8]
-        ldr     x10, [x0, 65 * 8]
+        ldr     w9, [x0, 64 * 8]
+        ldr     w10, [x0, 64 * 8 + 4]
         msr     fpcr, x9
         msr     fpsr, x10
 

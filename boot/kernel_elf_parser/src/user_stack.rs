@@ -35,7 +35,10 @@ use alloc::{collections::VecDeque, string::String, vec::Vec};
 
 use zerocopy::IntoBytes;
 
-use crate::auxv::{AuxEntry, AuxType};
+use crate::{
+    ElfError,
+    auxv::{AuxEntry, AuxType},
+};
 
 /// Generate initial stack frame for user stack
 ///
@@ -50,11 +53,15 @@ use crate::auxv::{AuxEntry, AuxType};
 ///
 /// # Return
 ///
-/// * [`Result<Vec<u8>, &'static str>`] - Initial stack frame of the application
+/// * [`Result<Vec<u8>, ElfError>`] - Initial stack frame of the application
 ///
 /// # Notes
 ///
 /// The detailed format is described in <https://articles.manugarg.com/aboutelfauxiliaryvectors.html>
+///
+/// # Errors
+///
+/// Returns [`ElfError::UserStackOverflow`] if the stack data exceeds `sp`.
 pub fn app_stack_region(
     args: &[String],
     envs: &[String],
@@ -62,7 +69,7 @@ pub fn app_stack_region(
     sp: usize,
     random_bytes: &[u8; 16],
     execfn: &str,
-) -> Result<Vec<u8>, &'static str> {
+) -> Result<Vec<u8>, ElfError> {
     app_stack_region_with_auxv(args, envs, auxv, sp, random_bytes, execfn)
         .map(|(stack, _auxv)| stack)
 }
@@ -80,7 +87,7 @@ pub fn app_stack_region_with_auxv(
     sp: usize,
     random_bytes: &[u8; 16],
     execfn: &str,
-) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
+) -> Result<(Vec<u8>, Vec<u8>), ElfError> {
     // Accept callers that already terminate their input, but rebuild the
     // terminal entry after helper-owned entries so none are hidden behind it.
     let auxv = &auxv[..auxv
@@ -88,10 +95,11 @@ pub fn app_stack_region_with_auxv(
         .position(|entry| entry.get_type() == AuxType::NULL)
         .unwrap_or(auxv.len())];
     let mut data = VecDeque::new();
-    let mut push = |src: &[u8]| -> Result<usize, &'static str> {
+    let mut push = |src: &[u8]| -> Result<usize, ElfError> {
         data.extend(src.iter().cloned());
         data.rotate_right(src.len());
-        sp.checked_sub(data.len()).ok_or("user stack overflow")
+        sp.checked_sub(data.len())
+            .ok_or(ElfError::UserStackOverflow)
     };
 
     let random_bytes_pos = push(random_bytes)?;

@@ -16,7 +16,7 @@ use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange, va};
 use crate::kernel_layout;
 
 /// Error returned by runtime device IO mapping helpers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IoMapError {
     InvalidRange,
     MappingFailed,
@@ -34,7 +34,7 @@ impl From<IoMapError> for kerrno::KError {
 }
 
 /// A registered device MMIO region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DeviceRegion {
     pub paddr: PhysAddr,
     pub size: usize,
@@ -46,7 +46,7 @@ pub struct DeviceRegion {
 pub type DeviceRegionIter = alloc::vec::IntoIter<DeviceRegion>;
 
 /// Lifetime policy of a registered MMIO region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RegionRefs {
     /// Statically owned region (fixed/boot mapping). Never auto-unmapped.
     Pinned,
@@ -55,7 +55,7 @@ enum RegionRefs {
 }
 
 /// Internal registry entry pairing a region with its lifetime policy.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct RegionEntry {
     region: DeviceRegion,
     refs: RegionRefs,

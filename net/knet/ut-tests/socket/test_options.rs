@@ -295,18 +295,18 @@ fn test_tcp_keepalive_options_defaults_and_ranges() {
 
     let socket = TcpSocket::new();
     let mut idle = 0u32;
-    let mut interval = 0u32;
+    let mut interval_secs = 0u32;
     let mut count = 0u32;
     socket
         .get_option(GetSocketOption::KeepIdle(&mut idle))
         .unwrap();
     socket
-        .get_option(GetSocketOption::KeepInterval(&mut interval))
+        .get_option(GetSocketOption::KeepInterval(&mut interval_secs))
         .unwrap();
     socket
         .get_option(GetSocketOption::KeepCount(&mut count))
         .unwrap();
-    assert_eq!((idle, interval, count), (7200, 75, 9));
+    assert_eq!((idle, interval_secs, count), (7200, 75, 9));
 
     // Lower and upper bounds are accepted and read back.
     socket.set_option(SetSocketOption::KeepIdle(&1)).unwrap();
@@ -318,12 +318,12 @@ fn test_tcp_keepalive_options_defaults_and_ranges() {
         .get_option(GetSocketOption::KeepIdle(&mut idle))
         .unwrap();
     socket
-        .get_option(GetSocketOption::KeepInterval(&mut interval))
+        .get_option(GetSocketOption::KeepInterval(&mut interval_secs))
         .unwrap();
     socket
         .get_option(GetSocketOption::KeepCount(&mut count))
         .unwrap();
-    assert_eq!((idle, interval, count), (1, 1, 1));
+    assert_eq!((idle, interval_secs, count), (1, 1, 1));
 
     socket
         .set_option(SetSocketOption::KeepIdle(&32767))
@@ -363,10 +363,10 @@ fn test_tcp_keepalive_options_defaults_and_ranges() {
         .get_option(GetSocketOption::KeepIdle(&mut idle))
         .unwrap();
     socket
-        .get_option(GetSocketOption::KeepInterval(&mut interval))
+        .get_option(GetSocketOption::KeepInterval(&mut interval_secs))
         .unwrap();
     socket
         .get_option(GetSocketOption::KeepCount(&mut count))
         .unwrap();
-    assert_eq!((idle, interval, count), (32767, 32767, 127));
+    assert_eq!((idle, interval_secs, count), (32767, 32767, 127));
 }

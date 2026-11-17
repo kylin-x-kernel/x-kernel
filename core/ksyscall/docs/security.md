@@ -78,7 +78,7 @@ resource owners
 
 ## Unsafe inventory
 
-The production code contains four audited unsafe sites; all carry inline `SAFETY:`
+The production code contains five audited unsafe sites; all carry inline `SAFETY:`
 notes. There are no hand-written unsafe traits, FFI, or inline assembly.
 
 | Site | Operation | Invariant |
@@ -86,6 +86,7 @@ notes. There are no hand-written unsafe traits, FFI, or inline assembly.
 | `sys.rs` (`sethostname`) | stack `[u8; N]` reborrowed as `MaybeUninit<u8>` for copy-from-user | the array is live with trivially initializable bytes; only `buf[..len]` is read after the copy (same pattern as `devfs/nodes/loop.rs`) |
 | `task/clone3.rs` | fully initialized `#[repr(C)]` integer struct viewed as `MaybeUninit<u8>` for a versioned in-place user copy | `kargs` is zero-initialized first, so bytes beyond the caller's struct version stay zero; the reinterpretation is size-preserving |
 | `time/posix_timer.rs` | read of `sigevent._sigev_un._tid` | guarded by `sigev_notify == SIGEV_THREAD_ID`, the ABI-defined selector for that union arm; the tid is validated positive and owned by the process before use |
+| `time/posix_timer.rs` | read of `sigevent.sigev_value.sival_ptr` | `UserRead` copied every `sigevent` byte; this full-width union member is converted to opaque bits and never dereferenced |
 | `task/execve.rs` | replace current MM and activate its page table | candidate comes from `new_user_empty`, all old-user inputs are owned, no old-MM lock or user-copy window crosses activation; post-exchange errors are fatal and user entry requires complete image/context setup |
 
 The unittest exit-tail fixture additionally calls the replacement helper with

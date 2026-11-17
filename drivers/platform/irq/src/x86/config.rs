@@ -29,7 +29,7 @@ pub const MAX_LEGACY_IRQS: usize = 16;
 /// `id` is the firmware identity and is not used for routing yet. `gsi_base`
 /// is the controller's first GSI; a GSI is translated to a local pin with
 /// `gsi - gsi_base` after hardware probe.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IoApicDeclaration {
     pub id: u8,
     pub address: u32,
@@ -37,7 +37,7 @@ pub struct IoApicDeclaration {
 }
 
 /// Where an effective legacy route came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LegacyRouteOrigin {
     /// Platform identity default: `ISA n -> GSI n`, edge/high.
     Identity,
@@ -46,7 +46,7 @@ pub enum LegacyRouteOrigin {
 }
 
 /// Effective routing for one legacy ISA interrupt line.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LegacyRoute {
     /// ISA line this route starts from (`0..=15`).
     pub isa_irq: u8,
@@ -63,7 +63,7 @@ pub struct LegacyRoute {
 /// The first instance reuses [`IO_APIC_DOMAIN`]. Every additional instance
 /// has a distinct, non-identity domain, so equal local pin numbers on two
 /// controllers never denote the same source.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IoApicInstanceConfig {
     pub declaration: IoApicDeclaration,
     pub domain: kirq::IrqDomainId,
@@ -75,7 +75,7 @@ pub struct IoApicInstanceConfig {
 /// not the firmware-discovery container. `routes` is the effective ISA ->
 /// GSI table shared by every controller instance. Controller order is
 /// installation order, which is also the backend instance identifier order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct X86IrqInitConfig {
     pub policy: x86_apic::IoApicInitPolicy,
     pub source: FwSource,
@@ -413,7 +413,7 @@ pub(crate) fn validate_legacy_routes(
 /// `gsi_base` and `pin_count` describe the half-open GSI range
 /// `[gsi_base, gsi_base + pin_count)` resolved by [`gsi_desc`]. `pin_count`
 /// is the probed hardware size, not the backend's addressable pin bound.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct IoApicTopologyEntry {
     pub(crate) domain: kirq::IrqDomainId,
     pub(crate) gsi_base: u32,

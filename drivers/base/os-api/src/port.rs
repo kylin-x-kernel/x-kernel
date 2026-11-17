@@ -7,7 +7,7 @@
 use crate::ResResult;
 
 /// Access width of one port-I/O operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PortWidth {
     /// One byte (`inb`/`outb`).
     U8,

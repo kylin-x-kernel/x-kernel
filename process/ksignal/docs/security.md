@@ -160,7 +160,7 @@ holding signal frames, and the return address of the handler trampoline.
 
 | Boundary | Direction | Content |
 |---|---|---|
-| User memory (via `osvm` `write_vm`) | kernel writes | handler frame (`ucontext`, `siginfo`, restorer push) |
+| User memory (via `UserPtr::write_vm`/`write_vm_slice`) | kernel writes | handler frame (`siginfo`, `ucontext`, saved state; x86_64 also the FP/XSAVE region and restorer word) |
 | User memory (direct deref) | kernel reads | `sigreturn` frame at user `sp` |
 | User ABI payloads via `ksyscall` | inbound | sigaction structs, siginfo (rt_sigqueueinfo), sigset words, sigaltstack |
 | Raw signal numbers via `Signo::from_raw` | inbound | checked numeric carrier conversion and signal validity; syscall-specific zero handling remains in `ksyscall` |
@@ -174,16 +174,21 @@ lock. Scheduler wakeup must remain outside that lock to avoid inversion with
 the waiter's post-Blocked recheck. Signal consumption and disposition handling
 remain owned by normal delivery, not by the wait predicate.
 
-All unsafe blocks are in `types.rs` plus one in `api/thread.rs`; each carries
+Signal-frame and `siginfo` unsafe code is in `types.rs`, `arch/x86_64.rs`,
+and `api/thread.rs`; the intrusive-list adapter in `notification.rs` is covered
+under "Timer Provenance Boundary". Each unsafe block or impl carries
 an inline `SAFETY:` justification.
 
 | Location | Operation | Invariant |
 |---|---|---|
+| `types.rs` `From<SignalInfo> for k_siginfo` | unsafe wrapping of a raw union record | `SignalInfo` seals its raw field; all construction starts from a zeroed record or a complete `k_siginfo` user copy |
 | `types.rs` `header`/`header_mut`/`sifields`/`sifields_mut` | union arm access | bindgen preserves ABI offsets; readers only touch the arm selected by `si_code` or by the constructor that populated it |
 | `types.rs` `ChildExitSignalInfo::new` | `_sigchld` arm write | `CLD_*` codes select the arm and every exposed field is initialized |
 | `types.rs` `timer_id`/`timer_overrun`/`timer_signal_seq`/`sigval` | arm reads | guarded by `SI_TIMER` or negative `si_code` checks |
 | `types.rs` `unsafe impl Send/Sync for SignalInfo` | auto-trait override | payload is opaque ABI bits, not dereferenceable aliases; mutation requires `&mut` |
-| `api/thread.rs` `restore` | `&*(sp as *const SignalFrame)` | trusts that user `sp` maps the frame previously written by `handle_signal` |
+| `arch/x86_64.rs` `UserRead`/`UserWrite for UContext` | inbound and outbound ucontext byte contract | repr(C) integer-only fields; the `stack_t` hole is the explicit zeroed `SignalStackAbi::padding`; offsets and the 304-byte size are asserted. Restored registers and xstate are validated separately |
+| `api/thread.rs` `UserWrite for SignalFrame` (non-x86) | outbound frame byte contract | repr(C) frame; nested contexts model every alignment hole as an explicit zeroed field; `siginfo` is the complete 128-byte `k_siginfo` record as bytes; sizes and offsets are asserted per architecture |
+| `api/thread.rs` `restore` (non-x86) | direct frame dereference at `sp` | trusts that user `sp` maps the frame previously written by `handle_signal` |
 
 `SignalInfo::empty` safely initializes the full 128-byte `_si_pad` union arm
 with zeros; constructors then set the header and exposed payload fields.
@@ -191,6 +196,8 @@ with zeros; constructors then set the header and exposed payload fields.
 The union-arm reads are the `k_sigval`/`siginfo_t` ABI boundary: the kernel
 treats payload fields as raw bits and never dereferences pointer-like values
 (`sival_ptr`) stored by userspace.
+`set_timer_fields` constructs the outbound timer `sigval` through its
+full-width pointer arm, so an integer-width member cannot leave bytes unset.
 
 ## Threat analysis
 
@@ -203,6 +210,22 @@ treats payload fields as raw bits and never dereferences pointer-like values
 | T-05 | Signal flood exhausting kernel memory | Medium | unbounded `rt_sigqueueinfo`/timer expirations | Ordinary standard sends coalesce while any record is pending; each prepared timer can hold one record even for a standard signo. Queued timer storage is reserved at creation. Ordinary realtime growth remains unbounded; Linux resource-limit parity is not claimed |
 | T-06 | Observer table races | Low | re-registering an observer while signals dequeue | Table access is `SpinNoIrq`-serialized; overwrite is documented last-wins |
 | T-07 | `SignalInfo` auto-trait unsoundness | High (if violated) | storing a `sival_ptr` that becomes a dereferenceable alias | `unsafe impl` is justified by opaque-bits treatment; all reads return raw values, no dereference of payload pointers exists in this crate |
+| T-08 | Signal-frame output exposes kernel padding bytes | High (fixed) | a frame struct with implicit alignment holes, or a compiler-ordered layout, is copied to the user stack as raw bytes | Every outbound frame region is a `UserWrite` carrier copied through `UserPtr`. Non-x86 `SignalFrame` is repr(C) in Linux `rt_sigframe` order with explicit zeroed padding in the nested contexts and frame tail; x86_64 copies `k_siginfo`, a hole-free `UContext`, a zero-initialized FP byte buffer and the restorer word separately. CG-005 checks the compiled layouts and CG-006 checks the copy path |
+
+Compile-time size and offset assertions pin the 64-bit frame layouts. The
+holes listed below were implicit before the fix and are now explicit zeroed
+fields; the non-x86 frame also had compiler-chosen (`repr(Rust)`) field order.
+
+| Architecture | Explicit zeroed padding | Outbound layout |
+|---|---|---|
+| aarch64 | `ucontext` 168–176 (before 16-aligned `uc_mcontext`); `sigcontext` 280–288 (before `__reserved`); frame tail 4696–4704 | `siginfo` 0–128, `ucontext` 128–4688, saved `tpidr` 4688–4696, pad 4696–4704 (4704 bytes) |
+| riscv64 | `ucontext` 168–176 | `siginfo` 0–128, `ucontext` 128–1088 (1088 bytes); `uc_mcontext` holds PC, x1..x31, then the 528-byte FP union |
+| loongarch64 | `ucontext` 168–176; `sigcontext` 268–272 (after `sc_flags`) | `siginfo` 0–128, `ucontext` 128–576 (576 bytes) |
+| x86_64 | none needed: `UContext` has no implicit holes (`stack_t` padding was already explicit) | From handler SP: `pretcode` 0–8, `ucontext` 8–312, `siginfo` 312–440, FP/XSAVE region at 440 (64-byte aligned), matching Linux `rt_sigframe`. The regions are contiguous; at least 128 bytes below the original SP are skipped, not written |
+
+The signal-frame order follows Linux `rt_sigframe`: info precedes ucontext on
+arm64, RISC-V and LoongArch. `k_sigaltstack` matches Linux `stack_t` offsets
+on all four targets.
 
 ## FMEA
 
@@ -303,8 +326,9 @@ data is processed or logged.
 
 - New `si_code` producers must populate the union arm they advertise before
   the `SignalInfo` can be observed.
-- Every new user-memory access in the dispatch path must use checked `osvm`
-  access; never raw deref on the write side.
+- Every new user-memory write in the dispatch path must go through `UserPtr`
+  with a `UserWrite` carrier whose layout has no implicit padding and is
+  pinned by const assertions; never raw deref or raw-pointer `write_vm`.
 - `SigTxn::set_blocked`/`add_blocked` are the only blocked-mask writers and
   always drop `SIGKILL`/`SIGSTOP`; new writers must go through them instead of
   re-deriving the rule.

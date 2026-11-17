@@ -396,12 +396,12 @@ fn test_legacy_pi_commands_reject_explicit_realtime_flag() {
     }
 }
 
-fn pi_command(address: usize, command: u32, timeout: usize) -> kerrno::KResult<isize> {
+fn pi_command(address: usize, command: u32, timeout_address: usize) -> kerrno::KResult<isize> {
     sys_futex(
         UserPtr::from(address),
         command | FUTEX_PRIVATE_FLAG,
         0,
-        timeout,
+        timeout_address,
         UserPtr::from(0usize),
         0,
     )

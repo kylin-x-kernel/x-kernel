@@ -84,7 +84,7 @@ impl TaskIdentity {
 
 /// The possible states of a task.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskState {
     /// Task is running on some CPU.
     Running              = 1,

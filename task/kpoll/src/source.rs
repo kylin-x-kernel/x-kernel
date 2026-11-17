@@ -15,7 +15,7 @@ use crate::{PollRegisterError, registration::PollRegistration};
 
 const INLINE_WAITER_SLOTS: usize = 4;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RegistrationToken {
     slot: usize,
     id: u64,
@@ -289,7 +289,7 @@ impl Wake for PollSet {
 
 #[cfg(feature = "stats")]
 /// Statistics about a [`PollSet`]'s registration lifecycle.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct WakerStats {
     /// Total successful registrations.
     pub register_count: usize,

@@ -174,7 +174,7 @@ impl core::fmt::Debug for BindingRef {
 }
 
 /// Why this binding's runtime exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BindingSource {
     /// Explicit probe; an installed Data value is expected.
     Probe,
@@ -203,7 +203,7 @@ enum DataSlot {
     Taken,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DataInstallFailureKind {
     Occupied,
     WrongSource,
@@ -238,7 +238,7 @@ impl DataInstallError {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DataTakeError {
     NotInstalled,
     AlreadyTaken,

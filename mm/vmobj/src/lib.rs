@@ -25,7 +25,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use memaddr::PAGE_SIZE_4K;
 
 /// Stable identity for one file-backed VM object family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FileObjectId(u64);
 
 impl FileObjectId {
@@ -41,7 +41,7 @@ impl FileObjectId {
 }
 
 /// Stable identity for one anonymous VM object family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AnonObjectId(u64);
 
 impl AnonObjectId {
@@ -57,7 +57,7 @@ impl AnonObjectId {
 }
 
 /// Stable identifier for one backing object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum VmObjectId {
     /// File-backed object owner, analogous to `address_space`.
     File(FileObjectId),
@@ -66,7 +66,7 @@ pub enum VmObjectId {
 }
 
 /// Stable identity for one object-side mapped view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MappingViewId(u64);
 
 impl MappingViewId {
@@ -89,7 +89,7 @@ pub fn next_mapping_view_id() -> MappingViewId {
 }
 
 /// High-level mapping mode registered against a backing object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MappingViewKind {
     /// `MAP_SHARED` or equivalent shared file-backed mapping.
     Shared,
@@ -98,7 +98,7 @@ pub enum MappingViewKind {
 }
 
 /// One mapped VMA range as seen from a backing object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MappingViewRange {
     /// VMA start address.
     pub vma_start: u64,
@@ -139,7 +139,7 @@ impl MappingViewRange {
 }
 
 /// Formal object-side record of one mapped VMA view.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MappingView {
     id: MappingViewId,
     mm_id: u64,
@@ -299,7 +299,7 @@ pub struct MappingViewSpec {
 }
 
 /// One object-side invalidation hit against a registered view.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectViewHit {
     view: MappingView,
     object_start: u64,
@@ -408,7 +408,7 @@ impl ObjectViewHit {
 }
 
 /// Object-side invalidation work emitted by one backing object operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectInvalidateWork {
     object: VmObjectId,
     object_start: u64,
@@ -524,7 +524,7 @@ impl ObjectInvalidateWork {
 
 /// Neutral request sent from object-side rmap infrastructure to one address
 /// space consumer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectInvalidateRequest {
     object: VmObjectId,
     hit: ObjectViewHit,

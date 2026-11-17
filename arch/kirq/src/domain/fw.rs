@@ -32,7 +32,7 @@ use kspin::{SpinNoIrq, static_lock};
 use crate::{Hwirq, IrqController, IrqDomainId, IrqTrigger};
 
 /// Hardware identity produced by one controller's binding translation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrqHwSpec {
     /// Controller-local hardware interrupt number.
     pub hwirq: Hwirq,
@@ -41,7 +41,7 @@ pub struct IrqHwSpec {
 }
 
 /// A controller binding rejected the firmware cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqXlateError {
     /// The cell list does not match the binding's required shape or values.
     Malformed,
@@ -70,7 +70,7 @@ pub trait IrqDomainXlate: Send + Sync {
 }
 
 /// Failure to associate a firmware controller node with an IRQ domain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqDomainRegisterError {
     /// The selected existing domain is not a kernel IRQ domain.
     UnknownDomain { domain: IrqDomainId },
@@ -111,7 +111,7 @@ static_lock! {
 /// The wiring chooses this explicitly. The generic registration path does not
 /// infer root reuse from controller family, identity policy or registration
 /// order; those are compatibility decisions of the platform bring-up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqDomainTarget {
     /// Associate with this existing well-known domain.
     ///

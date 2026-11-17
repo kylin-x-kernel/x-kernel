@@ -370,7 +370,7 @@ impl PtyPair {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum PtyEndpointKind {
     Master,
     Slave,

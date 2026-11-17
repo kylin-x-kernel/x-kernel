@@ -39,7 +39,7 @@ use super::*;
 /// A1 and A2 both feed their probed node through [`consume`], so the two
 /// cases prove the same consumer code works for a real DT backend and an
 /// unrelated source-neutral backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Consumed {
     node: FwNode<'static>,
     value: Result<Option<&'static str>, FwError>,
@@ -714,7 +714,7 @@ fn failed_probe_retry_and_removal_keep_the_original_node() {
 
 // -- A5: absence, malformation and unknown handles stay distinct -------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Classification {
     missing: Result<Option<u32>, FwError>,
     malformed: Result<Option<u32>, FwError>,

@@ -42,7 +42,7 @@ pub(crate) fn with_graph<R>(body: impl FnOnce(&GraphToken) -> R) -> R {
     body(&GraphToken(()))
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 struct WaitKey {
     /// Higher priority sorts first. `RBTree::front` is the minimum key.
     rank: Reverse<u8>,

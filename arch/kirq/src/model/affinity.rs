@@ -11,7 +11,7 @@ use crate::IrqDescError;
 /// One locked observation of routing policy and confirmed controller state.
 /// None means no route has been established by this API, or confirmation was
 /// lost after a programming failure. It never means all present CPUs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IrqAffinitySnapshot {
     /// Last successfully applied policy, including requested CPUs not yet ready.
     pub requested: Option<KCpuMask>,
@@ -26,7 +26,7 @@ pub struct IrqAffinitySnapshot {
 }
 
 /// Failure of a lookup-only ordinary IRQ routing operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqAffinityError {
     /// Context, identity or lifecycle validation failed before routing changes.
     Management(IrqDescError),

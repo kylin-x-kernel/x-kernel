@@ -84,6 +84,9 @@ pub(crate) fn provide(implementation: ItemImpl, args: ProvideArgs) -> Result<Tok
             #(#attrs)*
             #[doc(hidden)]
             #[allow(non_snake_case)]
+            // SAFETY: The namespace, interface, and method form a unique
+            // `__kiface_*` symbol shared with the interface declaration; the
+            // generated extern "Rust" signature is checked against that method.
             #[unsafe(export_name = #symbol)]
             #exported_sig #body
         });

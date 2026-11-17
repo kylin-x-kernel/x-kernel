@@ -154,8 +154,8 @@ pub(crate) fn publish_network_events(events: Vec<NetworkEvent>) {
     rtnetlink::publish_network_events(events);
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NetlinkAddr {
     pub pid: u32,
     pub groups: u32,

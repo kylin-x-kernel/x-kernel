@@ -54,7 +54,7 @@ fn release_owner_timeout() -> TimeSpan {
 ///
 /// 全部变体统一映射 `TEE_ERROR_COMMUNICATION + TEE_ORIGIN_COMMS`(§6.3/
 /// §6.7);变体区分只服务诊断与测试断言。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ControlClientError {
     /// socket 超时选项设置失败(内核资源不足)。
     SetOption,
@@ -155,7 +155,7 @@ pub(super) fn control_exchange_at(
 /// 单一枚举同时服务两个方向的映射:请求侧返回类别本身,响应侧返回
 /// `Option<ControlOp>`(`Error` 变体 → `None`,对任何请求合法)。
 /// 编译器强制两个 match 穷尽全部变体,类型化相等比较杜绝两表漂移。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControlOp {
     OpenSession,
     CloseSession,

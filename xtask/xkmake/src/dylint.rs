@@ -5,6 +5,7 @@
 //! Build and run the repository's pinned Dylint lint library.
 
 use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -49,6 +50,42 @@ struct ToolchainFile {
 #[derive(Deserialize)]
 struct Toolchain {
     channel: String,
+}
+
+#[derive(Deserialize)]
+struct CargoMetadata {
+    packages: Vec<CargoPackage>,
+}
+
+#[derive(Deserialize)]
+struct CargoPackage {
+    id: String,
+    name: String,
+    source: Option<String>,
+    manifest_path: PathBuf,
+}
+
+#[derive(Clone, Deserialize)]
+struct UnitGraph {
+    roots: Vec<usize>,
+    units: Vec<CargoUnit>,
+}
+
+#[derive(Clone, Deserialize)]
+struct CargoUnit {
+    pkg_id: String,
+    features: Vec<String>,
+    dependencies: Vec<CargoUnitDependency>,
+}
+
+#[derive(Clone, Deserialize)]
+struct CargoUnitDependency {
+    index: usize,
+}
+
+struct FixSelection {
+    packages: Vec<String>,
+    features: Vec<String>,
 }
 
 pub(crate) fn run(args: &DylintArgs) -> Result<()> {
@@ -197,22 +234,40 @@ fn build_and_scan(
     generate_build_configuration(context).map_err(ScanError::Setup)?;
 
     let mut scan = Process::new("cargo", context.dry_run, context.verbosity);
-    scan.current_dir(&context.workspace_root)
-        .arg(format!("+{toolchain}"))
-        .args(["dylint", "--no-metadata", "--lib-path"])
-        .arg(&library)
-        .arg("--manifest-path")
-        .arg(&context.app_manifest)
-        .arg("--")
-        .arg("--target")
-        .arg(context.config.target());
-    if context.config.profile() == BuildProfile::Release {
-        scan.arg("--release");
-    }
     let features = kernel_feature_flags(context);
-    if !features.is_empty() {
-        scan.arg("--features").arg(features.join(","));
+    let selection = if args.fix && !context.dry_run {
+        Some(configured_fix_selection(context, toolchain, &features).map_err(ScanError::Setup)?)
+    } else {
+        None
+    };
+    if args.fix && context.dry_run {
+        println!(
+            "Fix package selection is resolved at run time from Cargo's configured-target \
+             application unit graph; fix features are checked against the normal scan."
+        );
     }
+    let dry_run_packages = ["<configured-local-packages>".to_owned()];
+    let packages = if let Some(selection) = &selection {
+        &selection.packages[..]
+    } else if args.fix && context.dry_run {
+        &dry_run_packages[..]
+    } else {
+        &[][..]
+    };
+    let scan_features = selection
+        .as_ref()
+        .map_or(&features, |selected| &selected.features);
+    scan.current_dir(&context.workspace_root)
+        .args(scan_args(ScanOptions {
+            toolchain,
+            library: &library,
+            manifest: &context.app_manifest,
+            target: context.config.target(),
+            release: context.config.profile() == BuildProfile::Release,
+            features: scan_features,
+            fix: args.fix,
+            packages,
+        }));
     if args.facts_out.is_some() {
         scan.arg(MESSAGE_FORMAT_ARG);
     }
@@ -273,6 +328,245 @@ fn probe_host(is_dry_run: bool, probe: impl FnOnce() -> Result<String>) -> Resul
     } else {
         probe()
     }
+}
+
+struct ScanOptions<'a> {
+    toolchain: &'a str,
+    library: &'a Path,
+    manifest: &'a Path,
+    target: &'a str,
+    release: bool,
+    features: &'a [String],
+    fix: bool,
+    packages: &'a [String],
+}
+
+fn scan_args(options: ScanOptions<'_>) -> Vec<String> {
+    let mut args = vec![
+        format!("+{}", options.toolchain),
+        "dylint".into(),
+        "--no-metadata".into(),
+        "--lib-path".into(),
+        options.library.display().to_string(),
+        "--manifest-path".into(),
+        options.manifest.display().to_string(),
+    ];
+    if options.fix {
+        args.push("--fix".into());
+    }
+    args.extend(["--".into(), "--target".into(), options.target.into()]);
+    if options.fix {
+        // Selecting dependency crates as Cargo roots must not enable their
+        // default features unless the application graph already did so.
+        args.push("--no-default-features".into());
+    }
+    if options.release {
+        args.push("--release".into());
+    }
+    if !options.features.is_empty() {
+        args.extend(["--features".into(), options.features.join(",")]);
+    }
+    if options.fix {
+        for package in options.packages {
+            args.extend(["-p".into(), package.clone()]);
+        }
+        args.push("--allow-dirty".into());
+    }
+    args
+}
+
+/// Cargo fix only edits selected packages. Cargo metadata's `resolve` graph
+/// includes inactive optional workspace dependencies, so use Cargo's actual
+/// compilation unit graph and compare the fix feature resolution before
+/// allowing a source edit.
+fn configured_fix_selection(
+    context: &BuildContext,
+    toolchain: &str,
+    features: &[String],
+) -> Result<FixSelection> {
+    let mut command = Command::new("cargo");
+    command
+        .current_dir(&context.workspace_root)
+        .arg(format!("+{toolchain}"))
+        .args(["metadata", "--format-version", "1", "--filter-platform"])
+        .arg(context.config.target())
+        .arg("--manifest-path")
+        .arg(&context.app_manifest);
+    if !features.is_empty() {
+        command.arg("--features").arg(features.join(","));
+    }
+    for name in SANITIZED_ENV {
+        command.env_remove(name);
+    }
+    let output = command.output().map_err(|source| Error::Spawn {
+        program: "cargo metadata".into(),
+        source,
+    })?;
+    if !output.status.success() {
+        return Err(Error::Message(format!(
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let metadata: CargoMetadata = serde_json::from_slice(&output.stdout)
+        .map_err(|error| Error::Message(format!("invalid cargo metadata: {error}")))?;
+    let root = application_package(&metadata, &context.app_manifest)?;
+    let graph = cargo_unit_graph(context, toolchain, features, None)?;
+    let selection = select_fix_packages(&metadata, &graph, &root.id, &context.workspace_root)?;
+    let fix_features = fix_feature_flags(features, &root.name, selection.has_root_default);
+    let fix_graph = cargo_unit_graph(context, toolchain, &fix_features, Some(&selection.packages))?;
+    if package_features(&graph) != package_features(&fix_graph) {
+        return Err(Error::Message(
+            "dylint --fix would resolve different package features than the configured scan".into(),
+        ));
+    }
+    Ok(FixSelection {
+        packages: selection.packages,
+        features: fix_features,
+    })
+}
+
+fn application_package<'a>(
+    metadata: &'a CargoMetadata,
+    manifest: &Path,
+) -> Result<&'a CargoPackage> {
+    let canonical_manifest = manifest.canonicalize().with_path(manifest)?;
+    metadata
+        .packages
+        .iter()
+        .find(|package| package.manifest_path == canonical_manifest)
+        .ok_or_else(|| Error::Message("configured application missing from cargo metadata".into()))
+}
+
+fn fix_feature_flags(base: &[String], root_name: &str, has_root_default: bool) -> Vec<String> {
+    let mut features = base.to_vec();
+    if has_root_default {
+        features.push(format!("{root_name}/default"));
+    }
+    features.sort();
+    features.dedup();
+    features
+}
+
+struct SelectedPackages {
+    packages: Vec<String>,
+    has_root_default: bool,
+}
+
+fn select_fix_packages(
+    metadata: &CargoMetadata,
+    graph: &UnitGraph,
+    root_id: &str,
+    workspace_root: &Path,
+) -> Result<SelectedPackages> {
+    // Select by package id: a local package may share its name with a
+    // registry dependency (for example `acpi`), which makes `-p <name>`
+    // ambiguous for Cargo.
+    let local: HashSet<_> = metadata
+        .packages
+        .iter()
+        .filter(|package| {
+            package.source.is_none() && package.manifest_path.starts_with(workspace_root)
+        })
+        .map(|package| package.id.as_str())
+        .collect();
+    let mut stack: Vec<_> = graph
+        .roots
+        .iter()
+        .copied()
+        .filter(|&index| {
+            graph
+                .units
+                .get(index)
+                .is_some_and(|unit| unit.pkg_id == root_id)
+        })
+        .collect();
+    if stack.is_empty() {
+        return Err(Error::Message(
+            "configured application missing from Cargo unit graph".into(),
+        ));
+    }
+    let has_root_default = stack
+        .iter()
+        .any(|&index| graph.units[index].features.iter().any(|f| f == "default"));
+    let mut visited = HashSet::new();
+    let mut selected = Vec::new();
+    while let Some(index) = stack.pop() {
+        if !visited.insert(index) {
+            continue;
+        }
+        let unit = graph.units.get(index).ok_or_else(|| {
+            Error::Message(format!("invalid Cargo unit graph dependency index {index}"))
+        })?;
+        if local.contains(unit.pkg_id.as_str()) {
+            selected.push(unit.pkg_id.clone());
+        }
+        stack.extend(unit.dependencies.iter().map(|dependency| dependency.index));
+    }
+    selected.sort();
+    selected.dedup();
+    Ok(SelectedPackages {
+        packages: selected,
+        has_root_default,
+    })
+}
+
+fn package_features(graph: &UnitGraph) -> BTreeMap<&str, BTreeSet<&str>> {
+    let mut features = BTreeMap::<_, BTreeSet<_>>::new();
+    for unit in &graph.units {
+        features
+            .entry(unit.pkg_id.as_str())
+            .or_default()
+            .extend(unit.features.iter().map(String::as_str));
+    }
+    features
+}
+
+fn cargo_unit_graph(
+    context: &BuildContext,
+    toolchain: &str,
+    features: &[String],
+    packages: Option<&[String]>,
+) -> Result<UnitGraph> {
+    let mut command = Command::new("cargo");
+    command.current_dir(&context.workspace_root).args([
+        format!("+{toolchain}"),
+        "check".into(),
+        "-Z".into(),
+        "unstable-options".into(),
+        "--unit-graph".into(),
+        "--manifest-path".into(),
+        context.app_manifest.display().to_string(),
+        "--target".into(),
+        context.config.target().into(),
+    ]);
+    if context.config.profile() == BuildProfile::Release {
+        command.arg("--release");
+    }
+    if let Some(packages) = packages {
+        command.arg("--no-default-features");
+        for package in packages {
+            command.arg("-p").arg(package);
+        }
+    }
+    if !features.is_empty() {
+        command.arg("--features").arg(features.join(","));
+    }
+    for name in SANITIZED_ENV {
+        command.env_remove(name);
+    }
+    let output = command.output().map_err(|source| Error::Spawn {
+        program: "cargo unit graph".into(),
+        source,
+    })?;
+    if !output.status.success() {
+        return Err(Error::Message(format!(
+            "cargo unit graph failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| Error::Message(format!("invalid Cargo unit graph: {error}")))
 }
 
 /// Resolves `DYLINT_DRIVER_PATH` against the workspace root and creates it.
@@ -428,9 +722,160 @@ fn set_host_tools(process: &mut Process, host: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use super::{DRY_RUN_HOST, lint_library_path, parse_host, parse_toolchain, probe_host};
+    use super::{
+        DRY_RUN_HOST,
+        CargoMetadata, CargoPackage, CargoUnit, CargoUnitDependency, ScanOptions, UnitGraph,
+        application_package, fix_feature_flags, lint_library_path, package_features, parse_host,
+        parse_toolchain, probe_host, scan_args, select_fix_packages,
+    };
+
+    fn unit(id: &str, features: &[&str], dependencies: &[usize]) -> CargoUnit {
+        CargoUnit {
+            pkg_id: id.into(),
+            features: features.iter().map(|feature| (*feature).into()).collect(),
+            dependencies: dependencies
+                .iter()
+                .map(|&index| CargoUnitDependency { index })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn selects_only_compiled_local_packages_and_build_dependencies() {
+        let workspace = Path::new("/workspace");
+        let package = |id: &str, name: &str| CargoPackage {
+            id: id.into(),
+            name: name.into(),
+            source: None,
+            manifest_path: PathBuf::from(format!("/workspace/{name}/Cargo.toml")),
+        };
+        let metadata = CargoMetadata {
+            packages: vec![
+                package("entry", "entry"),
+                package("kernel", "kernel"),
+                package("build", "build-helper"),
+                package("other-platform", "kplat-x86_64"),
+                package("dev", "dev-helper"),
+                CargoPackage {
+                    id: "external".into(),
+                    name: "external".into(),
+                    source: Some("registry".into()),
+                    manifest_path: PathBuf::from("/registry/external/Cargo.toml"),
+                },
+            ],
+        };
+        // The inactive platform and dev units exist in metadata but are not
+        // reachable from the application compilation roots.
+        let graph = UnitGraph {
+            roots: vec![0],
+            units: vec![
+                unit("entry", &["default"], &[1, 2, 5]),
+                unit("kernel", &["console"], &[]),
+                unit("build", &[], &[]),
+                unit("other-platform", &[], &[]),
+                unit("dev", &[], &[]),
+                unit("external", &[], &[]),
+            ],
+        };
+        let selection = select_fix_packages(&metadata, &graph, "entry", workspace).unwrap();
+        assert_eq!(selection.packages, ["build", "entry", "kernel"]);
+        assert!(selection.has_root_default);
+        assert_eq!(
+            fix_feature_flags(
+                &["kfeat/console".into()],
+                "entry",
+                selection.has_root_default
+            ),
+            ["entry/default", "kfeat/console"]
+        );
+        let mut changed_features = graph.clone();
+        changed_features.units[1].features.push("x86".into());
+        assert_ne!(
+            package_features(&graph),
+            package_features(&changed_features)
+        );
+    }
+
+    #[test]
+    fn resolves_dot_prefixed_application_manifest() {
+        let directory = tempfile::tempdir().unwrap();
+        let entry = directory.path().join("entry");
+        std::fs::create_dir(&entry).unwrap();
+        std::fs::write(entry.join("Cargo.toml"), "[package]\nname = \"entry\"\n").unwrap();
+        let manifest = entry.join("Cargo.toml").canonicalize().unwrap();
+        let metadata = CargoMetadata {
+            packages: vec![CargoPackage {
+                id: "entry-id".into(),
+                name: "entry".into(),
+                source: None,
+                manifest_path: manifest,
+            }],
+        };
+        let supplied = directory.path().join("./entry/Cargo.toml");
+        assert_eq!(
+            application_package(&metadata, &supplied).unwrap().id,
+            "entry-id"
+        );
+    }
+
+    #[test]
+    fn fix_selects_local_packages_with_kernel_configuration() {
+        let args = scan_args(ScanOptions {
+            toolchain: "nightly-2026-03-08",
+            library: Path::new("liblints.so"),
+            manifest: Path::new("entry/Cargo.toml"),
+            target: "aarch64-unknown-none-softfloat",
+            release: true,
+            features: &["foo/bar".into()],
+            fix: true,
+            packages: &["entry".into(), "kfs".into()],
+        });
+        assert_eq!(
+            args,
+            [
+                "+nightly-2026-03-08",
+                "dylint",
+                "--no-metadata",
+                "--lib-path",
+                "liblints.so",
+                "--manifest-path",
+                "entry/Cargo.toml",
+                "--fix",
+                "--",
+                "--target",
+                "aarch64-unknown-none-softfloat",
+                "--no-default-features",
+                "--release",
+                "--features",
+                "foo/bar",
+                "-p",
+                "entry",
+                "-p",
+                "kfs",
+                "--allow-dirty"
+            ]
+        );
+    }
+
+    #[test]
+    fn scan_keeps_entry_as_implicit_package() {
+        let args = scan_args(ScanOptions {
+            toolchain: "nightly-2026-03-08",
+            library: Path::new("liblints.so"),
+            manifest: Path::new("entry/Cargo.toml"),
+            target: "x86_64-unknown-none",
+            release: false,
+            features: &[],
+            fix: false,
+            packages: &[],
+        });
+        assert!(!args.contains(&"--fix".into()));
+        assert!(!args.contains(&"-p".into()));
+        assert!(!args.contains(&"--allow-dirty".into()));
+        assert_eq!(args.last().unwrap(), "x86_64-unknown-none");
+    }
 
     #[test]
     fn reads_pinned_toolchain_channel() {

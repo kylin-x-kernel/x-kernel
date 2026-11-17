@@ -66,7 +66,7 @@ unsafe fn page_table_user_cpu_mask(ctx: NonNull<()>) -> kcpu_id_map::KCpuMask {
     residency.snapshot()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct PendingInvalidateId(u64);
 
 #[derive(Default)]
@@ -83,7 +83,7 @@ static NEXT_MM_ID: AtomicU64 = AtomicU64::new(1);
 /// Private words are scoped by address-space identity and virtual address.
 /// Shared words are scoped by backing object, page index, and byte offset
 /// within that page.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FutexBacking {
     /// A word whose identity is local to one address space.
     Private {

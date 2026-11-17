@@ -7,10 +7,15 @@
 //!
 //! Rule: `docs/code-guidelines/CG-001-static-spinlock-registration.md`.
 
-use rustc_hir::{Expr, ExprKind, Item, ItemKind, Mutability, QPath, TyKind, def_id::DefId};
+use rustc_hir::{Item, ItemKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeckResults};
-use rustc_span::{ExpnId, Span};
+use rustc_middle::ty::{self, Ty, TyCtxt};
+
+use crate::static_lock_helpers::{
+    defined_by_static_lock, direct_call_to_type, is_type, macro_rewrites, peel_blocks,
+};
+
+const RULE_FILE: &str = "docs/code-guidelines/CG-001-static-spinlock-registration.md";
 
 rustc_session::declare_lint! {
     /// ### What it does
@@ -65,69 +70,6 @@ rustc_session::declare_lint! {
 
 rustc_session::declare_lint_pass!(UnregisteredStaticSpinlock => [UNREGISTERED_STATIC_SPINLOCK]);
 
-/// Returns whether `ty` is `kspin::SpinLock<G, T>`, however it was spelled.
-fn is_kspin_spinlock(tcx: TyCtxt<'_>, ty: Ty<'_>) -> bool {
-    let ty::Adt(definition, _) = ty.kind() else {
-        return false;
-    };
-    let definition = definition.did();
-    tcx.crate_name(definition.krate).as_str() == "kspin"
-        && tcx.item_name(definition).as_str() == "SpinLock"
-}
-
-/// Returns whether `definition` was produced by the real `static_lock!`.
-fn defined_by_static_lock(tcx: TyCtxt<'_>, definition: DefId) -> bool {
-    // Passthrough `$item` macros retain source spans; resolver provenance still
-    // records the expansion that defined the item, including macro aliases.
-    let mut expansion = tcx.expn_that_defined(definition);
-    while expansion != ExpnId::root() {
-        let data = expansion.expn_data();
-        if data.macro_def_id.is_some_and(|definition| {
-            matches!(
-                tcx.crate_name(definition.krate).as_str(),
-                "ksync" | "kspin" | "klockstat_macros"
-            ) && tcx.item_name(definition).as_str() == "static_lock"
-        }) {
-            return true;
-        }
-        expansion = data.parent;
-    }
-    false
-}
-
-/// Strips statement-free `{ .. }` and `unsafe { .. }` blocks.
-fn peel_blocks<'tcx>(mut expression: &'tcx Expr<'tcx>) -> &'tcx Expr<'tcx> {
-    while let ExprKind::Block(block, _) = expression.kind
-        && block.stmts.is_empty()
-        && let Some(inner) = block.expr
-    {
-        expression = inner;
-    }
-    expression
-}
-
-/// Returns the callee span when `expression` calls `SpinLock::new` directly.
-fn direct_spinlock_new<'tcx>(
-    tcx: TyCtxt<'tcx>,
-    types: &TypeckResults<'tcx>,
-    expression: &Expr<'tcx>,
-) -> Option<Span> {
-    let ExprKind::Call(callee, _) = expression.kind else {
-        return None;
-    };
-    let ty::FnDef(function, _) = *types.expr_ty(callee).kind() else {
-        return None;
-    };
-    if tcx.item_name(function).as_str() != "new" {
-        return None;
-    }
-    let implementation = tcx.impl_of_assoc(function)?;
-    // An inherent impl's self type is always a nominal type (aliases are
-    // expanded, projections are rejected), so it needs no normalization.
-    is_kspin_spinlock(tcx, tcx.type_of(implementation).instantiate_identity())
-        .then_some(callee.span)
-}
-
 impl<'tcx> LateLintPass<'tcx> for UnregisteredStaticSpinlock {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
         let ItemKind::Static(mutability, _, written_ty, body_id) = item.kind else {
@@ -140,7 +82,7 @@ impl<'tcx> LateLintPass<'tcx> for UnregisteredStaticSpinlock {
         let item_ty = tcx
             .try_normalize_erasing_regions(cx.typing_env(), declared)
             .unwrap_or(declared);
-        if !is_kspin_spinlock(tcx, item_ty) {
+        if !is_type(tcx, item_ty, "kspin", "SpinLock") {
             return;
         }
         if defined_by_static_lock(tcx, owner.to_def_id()) {
@@ -149,15 +91,16 @@ impl<'tcx> LateLintPass<'tcx> for UnregisteredStaticSpinlock {
         let types = tcx.typeck(owner.def_id);
         let body = tcx.hir_body(body_id);
         let initializer = peel_blocks(body.value);
-        let Some(call) = direct_spinlock_new(tcx, types, initializer) else {
+        let Some(call) = direct_call_to_type(tcx, types, initializer, "kspin", "SpinLock", "new")
+        else {
             return;
         };
         let rewrites = macro_rewrites(
-            tcx,
-            item_ty,
             mutability,
             written_ty,
+            spin_alias(tcx, item_ty),
             !std::ptr::eq(initializer, body.value),
+            RULE_FILE,
         );
         tcx.node_span_lint(
             UNREGISTERED_STATIC_SPINLOCK,
@@ -183,49 +126,6 @@ impl<'tcx> LateLintPass<'tcx> for UnregisteredStaticSpinlock {
     }
 }
 
-/// `static_lock!` names the lock kind after the written type and rewrites a
-/// bare `X::new(arg)` initializer, so wrapping does not compile for every
-/// reported spelling. Returns the rewrites this item needs first.
-fn macro_rewrites(
-    tcx: TyCtxt<'_>,
-    item_ty: Ty<'_>,
-    mutability: Mutability,
-    written_ty: &rustc_hir::Ty<'_>,
-    is_initializer_wrapped: bool,
-) -> Vec<String> {
-    let mut rewrites = Vec::new();
-    if mutability == Mutability::Mut {
-        rewrites.push(
-            "drop `mut`: `static_lock!` does not accept `static mut`, and the lock already \
-             provides interior mutability"
-                .to_owned(),
-        );
-    }
-    match spin_alias(tcx, item_ty) {
-        Some(alias) if written_type_name(written_ty).as_deref() != Some(alias) => {
-            rewrites.push(format!(
-                "spell the type as `{alias}<..>`: `static_lock!` identifies the lock by its \
-                 written type name, so renamed imports, type aliases and projections do not \
-                 compile under `stats`"
-            ));
-        }
-        Some(_) => {}
-        None => rewrites.push(
-            "`static_lock!` has no type name for this guard; see the exceptions in \
-             docs/code-guidelines/CG-001-static-spinlock-registration.md"
-                .to_owned(),
-        ),
-    }
-    if is_initializer_wrapped {
-        rewrites.push(
-            "write the initializer as a bare `::new(..)` call: `static_lock!` does not look \
-             inside `{ }` or `unsafe { }` blocks"
-                .to_owned(),
-        );
-    }
-    rewrites
-}
-
 /// Returns the `kspin` alias that `static_lock!` accepts for this lock's guard.
 fn spin_alias(tcx: TyCtxt<'_>, ty: Ty<'_>) -> Option<&'static str> {
     let ty::Adt(_, arguments) = ty.kind() else {
@@ -243,19 +143,6 @@ fn spin_alias(tcx: TyCtxt<'_>, ty: Ty<'_>) -> Option<&'static str> {
         "NoPreemptIrqSave" => Some("SpinNoIrq"),
         _ => None,
     }
-}
-
-/// Returns the last path segment of the type as written, which is all a
-/// procedural macro can see.
-fn written_type_name(ty: &rustc_hir::Ty<'_>) -> Option<String> {
-    let TyKind::Path(path) = ty.kind else {
-        return None;
-    };
-    let segment = match path {
-        QPath::Resolved(_, path) => path.segments.last()?,
-        QPath::TypeRelative(_, segment) => segment,
-    };
-    Some(segment.ident.name.to_string())
 }
 
 #[cfg(test)]

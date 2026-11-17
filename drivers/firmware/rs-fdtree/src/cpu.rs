@@ -12,7 +12,7 @@
 use crate::FdtNode;
 
 /// A malformed processor declaration in the validated device tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CpuNodeError {
     /// The node is a processor, but its identity declaration is malformed.
     InvalidValue,

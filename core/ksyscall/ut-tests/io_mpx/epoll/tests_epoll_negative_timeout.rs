@@ -10,13 +10,13 @@ use super::sys_epoll_pwait;
 
 #[def_test(user)]
 fn test_negative_timeouts_reach_descriptor_validation() {
-    for timeout in [i32::MIN, -65536, -2, -1] {
+    for timeout_ms in [i32::MIN, -65536, -2, -1] {
         assert_eq!(
             sys_epoll_pwait(
                 -1,
                 UserPtr::default(),
                 1,
-                timeout,
+                timeout_ms,
                 UserConstPtr::default(),
                 0,
             ),

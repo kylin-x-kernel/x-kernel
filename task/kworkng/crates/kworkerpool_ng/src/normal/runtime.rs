@@ -18,7 +18,7 @@ use super::{
 };
 
 /// Preparation failures before starting or requesting termination of a service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeError {
     /// The caller cannot block for startup or joined termination.
     InvalidContext,

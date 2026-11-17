@@ -284,7 +284,7 @@ pub fn set_pin_enabled(instance: IoApicInstanceId, pin: IoApicPin, enabled: bool
 }
 
 /// Result of a level retarget after EOI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IoApicRetargetResult {
     /// Destination was written and verified; delivery restoration followed the
     /// caller's logical/mask constraint.

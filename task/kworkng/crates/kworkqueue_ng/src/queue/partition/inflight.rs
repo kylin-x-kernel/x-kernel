@@ -16,6 +16,11 @@ struct ColorCount {
     observers: CompletionObservers,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum InFlightAddError {
+    CountOverflow,
+}
+
 /// Retains one partition's cleanup obligations for each reusable flush color.
 ///
 /// The retained partition keeps this control alive after semantic Queue resources
@@ -47,10 +52,13 @@ impl QueueInFlight {
     ///
     /// # Panics
     /// Panics if the internal color is outside the prepared array.
-    pub(super) fn add(&self, color: usize) -> Result<(), ()> {
+    pub(super) fn add(&self, color: usize) -> Result<(), InFlightAddError> {
         let mut in_flight = self.in_flight.lock();
         let slot = &mut in_flight[color];
-        slot.outstanding = slot.outstanding.checked_add(1).ok_or(())?;
+        slot.outstanding = slot
+            .outstanding
+            .checked_add(1)
+            .ok_or(InFlightAddError::CountOverflow)?;
         Ok(())
     }
 

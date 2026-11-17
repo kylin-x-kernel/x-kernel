@@ -88,7 +88,7 @@ impl<V: Copy> RqCell<V> {
 /// [`SchedClass::as_u8`] as a seat byte; convert with
 /// [`QueueSeat::from_sched_class`].
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum QueueSeat {
     Detached = 0,
     Stop     = 1,
@@ -237,7 +237,7 @@ impl FairEntity {
 }
 
 /// Kernel-only class used at task construction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KernelClass {
     /// Per-CPU stop / migration helper. `ktask` activates one `migration/%u`.
     Stop,

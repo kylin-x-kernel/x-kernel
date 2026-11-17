@@ -27,7 +27,7 @@ triggers:
   "pointer is valid", "caller guarantees safety", "safe because checked above",
   "FFI call", or "this is safe by construction" violate this rule.
   Not this rule: unsafe-attribute ABI/linker justifications belong to
-  the pending Dylint lint `undocumented_unsafe_attribute` ([pending](pending.md)), and Send/Sync ownership or
+  the Dylint lint `undocumented_unsafe_attribute` ([CG-008](CG-008-unsafe-attribute-safety.md)), and Send/Sync ownership or
   concurrency arguments to [CG-017](CG-017-unsafe-impl-send-sync-argument.md);
   report those argument defects there rather than repeat them here.
   [CG-025](CG-025-minimal-unsafe-scope.md) owns unsafe-block size and

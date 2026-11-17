@@ -4,6 +4,7 @@
 
 //! RISC-V signal frame layout and trampoline.
 use kcpu::{GeneralRegisters, userspace::UserContext};
+use posix_types::k_sigaltstack;
 
 use crate::{SignalSet, SignalStack};
 
@@ -27,11 +28,21 @@ signal_trampoline:
 #[derive(Clone)]
 /// Machine context in the Linux RISC-V `mcontext_t` ABI.
 pub struct MContext {
-    /// Program counter (`pc`).
+    /// Program counter (`pc`), the first word of Linux `user_regs_struct`.
     pub pc: usize,
+    /// x1..x31 in Linux `user_regs_struct` order (x0 is not stored).
     regs: GeneralRegisters,
     fpstate: [usize; 66],
 }
+
+// Linux RISC-V sigcontext: 32-word user_regs_struct (PC, x1..x31) followed by
+// the 528-byte FP union; no implicit padding between or after them.
+const _: () = {
+    assert!(size_of::<GeneralRegisters>() == 31 * size_of::<usize>());
+    assert!(core::mem::offset_of!(MContext, regs) == size_of::<usize>());
+    assert!(core::mem::offset_of!(MContext, fpstate) == 256);
+    assert!(size_of::<MContext>() == 784);
+};
 
 impl MContext {
     /// Build machine context from a user context snapshot.
@@ -59,13 +70,20 @@ pub struct UContext {
     /// `uc_link`; not used by signal frames and written as zero.
     pub link: usize,
     /// `uc_stack` snapshot of the alternate stack state.
-    pub stack: SignalStack,
+    pub stack: k_sigaltstack,
     /// `uc_sigmask` restored into the thread blocked set at `sigreturn`.
     pub sigmask: SignalSet,
     __unused: [u8; 1024 / 8 - size_of::<SignalSet>()],
+    /// Zeroed hole before the 16-byte-aligned `uc_mcontext`.
+    abi_pad: [u8; 8],
     /// `uc_mcontext` general-purpose register snapshot.
     pub mcontext: MContext,
 }
+
+const _: () = {
+    assert!(core::mem::offset_of!(UContext, mcontext) == 176);
+    assert!(size_of::<UContext>() == 960);
+};
 
 impl UContext {
     /// Build a user context frame for signal handling.
@@ -73,9 +91,10 @@ impl UContext {
         Self {
             flags: 0,
             link: 0,
-            stack: SignalStack::default(),
+            stack: SignalStack::default().into(),
             sigmask,
             __unused: [0; 1024 / 8 - size_of::<SignalSet>()],
+            abi_pad: [0; 8],
             mcontext: MContext::new(uctx),
         }
     }

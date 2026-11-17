@@ -73,7 +73,7 @@ pub use slab_trait::{
 pub use tlsf::TlsfByteAllocator;
 
 /// The error type used for allocation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AllocError {
     /// Invalid `size` or `align_pow2`. (e.g. unaligned)
     InvalidInput,

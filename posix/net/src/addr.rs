@@ -303,7 +303,7 @@ impl SocketAddrExt for NetlinkAddr {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Clone, Copy)]
 pub(crate) struct sockaddr_ll {
     pub sll_family: __kernel_sa_family_t,
     pub sll_protocol: u16,

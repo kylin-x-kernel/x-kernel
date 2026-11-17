@@ -25,7 +25,7 @@ use core::any::Any;
 ///
 /// Slots are declared as associated constants and are never compared by
 /// pointer identity: two crates holding the same slot name the same storage.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FileSlot(&'static str);
 
 impl FileSlot {

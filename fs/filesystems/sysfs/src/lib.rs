@@ -202,7 +202,7 @@ fn parse_uevent_action(data: &[u8]) -> VfsResult<UeventAction> {
     let text = strip_action_terminator(data);
     let text = core::str::from_utf8(text).map_err(|_| VfsError::InvalidInput)?;
     let action = text.split(' ').next().ok_or(VfsError::InvalidInput)?;
-    UeventAction::try_from(action).map_err(|()| VfsError::InvalidInput)
+    UeventAction::try_from(action).map_err(|_| VfsError::InvalidInput)
 }
 
 /// The device projection tree shared by every lookup.

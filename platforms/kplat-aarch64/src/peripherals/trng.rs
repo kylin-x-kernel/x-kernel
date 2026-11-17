@@ -23,7 +23,7 @@ const SMCCC_RET_TRNG_NO_ENTROPY: isize = -3;
 static TRNG_AVAILABLE: AtomicBool = AtomicBool::new(false);
 
 /// Error returned while reading from the SMCCC TRNG firmware service.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TrngReadError {
     /// [`init_trng`] did not find a usable TRNG service.
     Unavailable,

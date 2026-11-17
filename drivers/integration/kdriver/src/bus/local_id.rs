@@ -12,7 +12,7 @@
 
 use driver_base::{DriverError, DriverResult};
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct LocalIdAlloc {
     next: u16,
 }

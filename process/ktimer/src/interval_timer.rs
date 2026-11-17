@@ -22,7 +22,7 @@ pub(crate) fn timer_signal(timer_type: ITimerType) -> Signo {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum TimerInstant {
     Realtime(SystemTime),
     Monotonic(MonotonicInstant),

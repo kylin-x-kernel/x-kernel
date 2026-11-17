@@ -24,11 +24,11 @@ pub const MAX_SIGNALS: usize = 64;
 /// The discriminants match the Linux signal ABI: standard signals `1..=31`
 /// and real-time signals `32..=64` (`SIGRTMIN` is 32).
 #[repr(u8)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, FromRepr, EnumIter)]
 #[expect(
     clippy::upper_case_acronyms,
     reason = "CG-032-camel-case-types: signal variants use the Linux SIG* ABI names"
 )]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, FromRepr, EnumIter)]
 pub enum Signo {
     /// Hangup (`SIGHUP`, 1).
     SIGHUP    = 1,
@@ -222,8 +222,8 @@ impl Signo {
 }
 
 /// Signal set. Compatible with `struct sigset_t` in libc.
-#[derive(Default, Clone, Copy, Not, BitOr, BitOrAssign, BitAnd, BitAndAssign)]
 #[repr(transparent)]
+#[derive(Default, Clone, Copy, Not, BitOr, BitOrAssign, BitAnd, BitAndAssign)]
 pub struct SignalSet(u64);
 
 impl SignalSet {
@@ -323,18 +323,18 @@ impl fmt::Debug for SignalSet {
 }
 
 /// Signal information. Compatible with `struct siginfo` in libc.
-#[derive(Clone)]
 #[repr(transparent)]
+#[derive(Clone)]
 pub struct SignalInfo(
     /// Raw Linux `siginfo_t` ABI payload.
     ///
     /// Accessing union arms directly is unsafe; use the decoding helpers on
     /// [`SignalInfo`], which select the arm implied by `si_code`.
-    pub siginfo_t,
+    siginfo_t,
 );
 
 /// Linux child-exit signal payload fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChildExitInfo {
     /// Child PID as observed by the receiving parent.
     pid: u32,
@@ -590,18 +590,18 @@ impl SignalInfo {
         result
     }
 
-    /// Construct a timer-originated signal.
+    /// Construct a timer-originated signal from complete, opaque `sigval` bits.
     pub fn new_timer(
         signo: Signo,
         timer_id: i32,
         overrun: i32,
-        value: k_sigval,
+        value_bits: usize,
         signal_seq: u32,
     ) -> Self {
         let mut result = Self::empty();
         result.set_signo(signo);
         result.set_code(SI_TIMER as _);
-        result.set_timer_fields(timer_id, overrun, value, signal_seq);
+        result.set_timer_fields(timer_id, overrun, value_bits, signal_seq);
         result
     }
 
@@ -710,10 +710,20 @@ impl SignalInfo {
         })
     }
 
-    fn set_timer_fields(&mut self, timer_id: i32, overrun: i32, value: k_sigval, signal_seq: u32) {
+    fn set_timer_fields(
+        &mut self,
+        timer_id: i32,
+        overrun: i32,
+        value_bits: usize,
+        signal_seq: u32,
+    ) {
         self.sifields_mut()._timer._tid = timer_id;
         self.sifields_mut()._timer._overrun = overrun;
-        self.sifields_mut()._timer._sigval = value;
+        // The pointer arm covers the whole union; no bytes are left unset by
+        // a shorter integer arm when siginfo is later copied to userspace.
+        self.sifields_mut()._timer._sigval = k_sigval {
+            sival_ptr: value_bits as *mut _,
+        };
         self.sifields_mut()._timer._sys_private = signal_seq as _;
     }
 }
@@ -739,13 +749,15 @@ impl fmt::Debug for SignalInfo {
 
 impl From<SignalInfo> for k_siginfo {
     fn from(value: SignalInfo) -> Self {
-        Self(value.0)
+        // SAFETY: SignalInfo's raw field is private. Its constructors start
+        // from a fully zeroed record or an initialized k_siginfo user copy.
+        unsafe { Self::from_initialized_raw(value.0) }
     }
 }
 
 impl From<k_siginfo> for SignalInfo {
     fn from(value: k_siginfo) -> Self {
-        Self(value.0)
+        Self(value.into_raw())
     }
 }
 

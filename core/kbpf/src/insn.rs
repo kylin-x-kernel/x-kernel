@@ -25,7 +25,7 @@
 pub const SLOT_SIZE: usize = 8;
 
 /// A decoded eBPF instruction slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Insn {
     /// Opcode byte.
     pub opc: u8,

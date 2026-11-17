@@ -140,7 +140,7 @@ fn capture_into(fp: usize, out: &mut [Frame]) -> usize {
     reason = "CG-024-lint-exceptions: clippy::large_enum_variant: The captured backtrace \
               deliberately embeds its fixed frame buffer to avoid allocation"
 )]
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
 enum Inner {
     /// Architecture does not support unwinding.
     #[expect(
@@ -162,7 +162,7 @@ enum Inner {
 ///
 /// This type represents a captured stack trace of a running program,
 /// which can be printed or inspected for debugging purposes.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Backtrace {
     inner: Inner,
 }

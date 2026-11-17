@@ -36,7 +36,7 @@ pub use of::{
 /// Kept as a flat enum here (rather than borrowing `kdriver`'s
 /// `DiscoveryOrigin`) so this layer stays free of driver-framework deps.
 /// Callers that need to record the origin can map this 1:1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FirmwareSource {
     /// Flattened Device Tree.
     DeviceTree,
@@ -57,7 +57,7 @@ pub enum FirmwareSource {
 /// Resources are normalized here; firmware-specific interpretation stays
 /// behind the neutral `node` handle. Ancestor translation, the device DMA
 /// mask, coherency defaults and IOMMU routing remain integration policy.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct FirmwareDevice {
     pub firmware_id: &'static str,
     pub source: FirmwareSource,
@@ -81,7 +81,7 @@ pub struct FirmwareDevice {
     pub irq: Result<Option<FwIrqSpec<'static>>, FwError>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MmioResource {
     pub base: usize,
     pub size: usize,

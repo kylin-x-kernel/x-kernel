@@ -22,7 +22,7 @@ pub trait ControllingTerminal: Any + Send + Sync {
 }
 
 /// Result of installing a controlling terminal in a [`Session`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetTerminalResult {
     /// The terminal was installed into an empty session slot.
     Installed,

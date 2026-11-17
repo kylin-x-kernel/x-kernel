@@ -43,7 +43,7 @@ impl TestResult {
 }
 
 // Test statistics
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct TestStats {
     pub total: usize,
     pub passed: usize,
@@ -147,8 +147,8 @@ fn unittest_printer() -> Option<UnittestPrintFn> {
     Some(unsafe { core::mem::transmute::<usize, UnittestPrintFn>(printer_addr) })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TestExecutionMode {
     Standard = 0,
     User     = 1,
@@ -175,8 +175,8 @@ pub trait Testable {
 }
 
 // Test descriptor structure
-#[derive(Clone, Copy)]
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct TestDescriptor {
     pub magic: u64,
     pub name: &'static str,

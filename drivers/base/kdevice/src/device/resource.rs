@@ -7,7 +7,7 @@
 pub use driver_os_api::{DmaSpec, IoPortRange, IrqResource, IrqTrigger, MmioRegion};
 
 /// A single resource associated with a device.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum ResourceDesc {
     /// Memory-mapped I/O region.
     Mmio(driver_os_api::MmioRegion),

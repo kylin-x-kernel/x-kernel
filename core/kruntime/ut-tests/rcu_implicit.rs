@@ -172,9 +172,9 @@ fn verify_implicit_region<G>(
             reader_handshake.has_entered.store(true, Ordering::Release);
             // An IRQ-off reader cannot depend on a timer callback to escape a
             // broken fixture. The hardware clock still advances with IRQs masked.
-            let deadline = khal::time::monotonic_time_nanos().saturating_add(5_000_000_000);
+            let deadline_ns = khal::time::monotonic_time_nanos().saturating_add(5_000_000_000);
             while !reader_handshake.can_exit.load(Ordering::Acquire) {
-                if khal::time::monotonic_time_nanos() >= deadline {
+                if khal::time::monotonic_time_nanos() >= deadline_ns {
                     reader_handshake
                         .has_timed_out
                         .store(true, Ordering::Release);

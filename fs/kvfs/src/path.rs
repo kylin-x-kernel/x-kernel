@@ -20,7 +20,7 @@ pub const PATH_MAX: usize = 4096;
 /// A borrowed pathname view.
 ///
 /// Different from `std::path::Path`, this type is always UTF-8 encoded.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Pathname<'a> {
     inner: &'a str,
 }
@@ -157,7 +157,7 @@ impl AsRef<str> for Pathname<'_> {
 ///
 /// Different from `std::path::PathBuf`, this type is always
 /// UTF-8 encoded.
-#[derive(Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PathBuf {
     inner: String,
 }

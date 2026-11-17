@@ -22,9 +22,9 @@ triggers:
   Rust code. Partially initialized arrays need an initialized-count invariant;
   whole-array `assume_init` requires proof for every element. `mem::zeroed()`
   and `assume_init()` cannot supply arbitrary `T` without a type-validity proof.
-  Not this rule: the pending Dylint lint `unsound_user_abi_impl` ([pending](pending.md)) owns
+  Not this rule: the Dylint lint `unsound_user_abi_impl` ([CG-005](CG-005-user-abi-layout.md)) owns
   `UserRead`/`UserWrite` layout and initialized-byte contracts and
-  the pending Dylint lint `user_copy_without_abi_contract` ([pending](pending.md)) owns the matching contract at
+  the Dylint lint `user_copy_without_abi_contract` ([CG-006](CG-006-user-copy-abi-contract.md)) owns the matching contract at
   typed copy sites; this rule owns initialization-state transitions outside
   those specific ABI findings. A missing safety proof for a sound transition
   belongs to [CG-016](CG-016-safety-comment-substance.md), while writing past

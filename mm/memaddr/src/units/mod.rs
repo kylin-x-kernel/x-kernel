@@ -10,7 +10,7 @@ mod range;
 pub use self::{
     addr::{AddrOps, MemoryAddr, PhysAddr, VirtAddr},
     iter::{DynPageIter, PageIter},
-    range::{AddrRange, PhysAddrRange, VirtAddrRange},
+    range::{AddrRange, InvalidAddrRange, PhysAddrRange, VirtAddrRange},
 };
 
 #[cfg(unittest)]

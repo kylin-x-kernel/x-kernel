@@ -11,7 +11,7 @@ use driver_os_api::{DeviceDma, DmaAllocation, DmaDirection, DmaSpec, ResError, S
 use kspin::SpinNoIrq;
 use virtio_drivers::{BufferDirection, DmaBackend, Error, PAGE_SIZE, PhysAddr, Result};
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 struct AllocationKey {
     bus: PhysAddr,
     cpu: usize,
@@ -20,7 +20,7 @@ struct AllocationKey {
     access_platform: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 struct MappingKey {
     bus: PhysAddr,
     cpu: usize,

@@ -13,8 +13,8 @@ use kerrno::{KError, KResult};
 use crate::{UserConstPtr, UserRead};
 
 /// An I/O vector descriptor used by `readv`/`writev`-style syscalls.
-#[derive(Debug, Copy, Clone, UserRead)]
 #[repr(C)]
+#[derive(Debug, Copy, Clone, UserRead)]
 pub struct IoVec {
     /// User virtual address of the segment; copying this descriptor does not validate it.
     pub iov_base: *mut u8,

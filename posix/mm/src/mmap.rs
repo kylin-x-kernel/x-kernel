@@ -32,7 +32,7 @@ bitflags::bitflags! {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MappingPermissions {
     pub(crate) current: MappingFlags,
     pub(crate) maximum: MappingFlags,
@@ -241,7 +241,7 @@ impl MmapFlags {
 }
 
 /// Whether the mapping is shared or private.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum MapType {
     Shared,
     Private,

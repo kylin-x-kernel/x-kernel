@@ -61,8 +61,8 @@ use strum::EnumCount;
 /// Similar to [`std::io::ErrorKind`].
 ///
 /// [`std::io::ErrorKind`]: https://doc.rust-lang.org/std/io/enum.ErrorKind.html
-#[repr(i32)]
 #[non_exhaustive]
+#[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, EnumCount)]
 pub enum KErrorKind {
     /// A socket address could not be bound because the address is already in use elsewhere.
@@ -449,7 +449,7 @@ impl TryFrom<LinuxError> for KErrorKind {
 /// carrier; formatting, canonicalization, and conversions can then panic or
 /// reinterpret it as a kernel kind. Use positive errno values at that boundary.
 #[repr(transparent)]
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct KError(i32);
 
 enum KErrorData {

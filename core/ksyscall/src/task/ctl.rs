@@ -358,7 +358,7 @@ pub(crate) fn sys_prctl(
         PR_GET_CHILD_SUBREAPER => {
             if arg2 != 0 {
                 let flag = kprocess::current_user_process().is_child_subreaper() as u32;
-                write_vm_mem(arg2 as _, &[flag])?;
+                UserPtr::<u32>::from(arg2).write_vm(flag)?;
             }
         }
         PR_SET_CHILD_SUBREAPER => {
@@ -367,7 +367,7 @@ pub(crate) fn sys_prctl(
         // We do not expose a separate tid_address; report none.
         PR_GET_TID_ADDRESS => {
             if arg2 != 0 {
-                write_vm_mem(arg2 as _, &[0usize])?;
+                UserPtr::<usize>::from(arg2).write_vm(0)?;
             }
         }
         // Transparent hugepages are not supported; report disabled.

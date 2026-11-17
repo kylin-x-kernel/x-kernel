@@ -14,8 +14,8 @@ pub(super) static CLOCK: ClockEpoch = ClockEpoch::new();
 /// Keep this credential until resume succeeds, including suspend-abort paths.
 /// Drop does not resume hardware or the clock: those require an explicit PM
 /// decision after counter access is restored. Losing it leaves the clock frozen.
-#[derive(Debug)]
 #[must_use = "retain the token and explicitly resume the clock, even when PM aborts"]
+#[derive(Debug)]
 pub struct MonotonicSuspendToken {
     identity: u64,
 }

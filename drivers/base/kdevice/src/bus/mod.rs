@@ -20,7 +20,7 @@ pub use bus_type::{
 };
 
 /// Globally unique bus instance identifier assigned at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BusId(u64);
 
 impl BusId {
@@ -36,7 +36,7 @@ impl BusId {
 }
 
 /// Persistent bus metadata.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct BusInfo {
     /// Unique bus instance ID.
     pub id: BusId,

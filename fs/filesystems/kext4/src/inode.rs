@@ -673,7 +673,7 @@ struct ExtentStatus {
     kind: ExtentStatusKind,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum ExtentStatusKind {
     /// Initialized storage, not a guarantee that dirty data is durable.
     Written,

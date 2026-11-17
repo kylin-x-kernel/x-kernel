@@ -237,15 +237,10 @@ impl Ipv4AddressSet {
             return vec![self.addresses.remove(index)];
         }
         let primary = self.addresses[index];
-        let mut removed = Vec::new();
-        let mut cursor = index + 1;
-        while cursor < self.addresses.len() {
-            if Self::same_subnet(&self.addresses[cursor], &primary) {
-                removed.push(self.addresses.remove(cursor));
-            } else {
-                cursor += 1;
-            }
-        }
+        let mut removed: Vec<_> = self
+            .addresses
+            .extract_if(index + 1.., |entry| Self::same_subnet(entry, &primary))
+            .collect();
         removed.push(self.addresses.remove(index));
         removed
     }

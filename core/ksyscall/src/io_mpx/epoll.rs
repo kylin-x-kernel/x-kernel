@@ -165,14 +165,14 @@ pub(crate) fn sys_epoll_pwait(
     epfd: i32,
     events: UserPtr<k_epoll_event>,
     maxevents: i32,
-    timeout: i32,
+    timeout_ms: i32,
     sigmask: UserConstPtr<k_sigset>,
     sigsetsize: usize,
 ) -> KResult<isize> {
-    let timeout = if timeout < 0 {
+    let timeout = if timeout_ms < 0 {
         None
     } else {
-        Some(TimeSpan::from_millis(timeout as u64))
+        Some(TimeSpan::from_millis(timeout_ms as u64))
     };
     do_epoll_wait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
 }
@@ -184,9 +184,16 @@ pub(crate) fn sys_epoll_wait(
     epfd: i32,
     events: UserPtr<k_epoll_event>,
     maxevents: i32,
-    timeout: i32,
+    timeout_ms: i32,
 ) -> KResult<isize> {
-    sys_epoll_pwait(epfd, events, maxevents, timeout, UserConstPtr::default(), 0)
+    sys_epoll_pwait(
+        epfd,
+        events,
+        maxevents,
+        timeout_ms,
+        UserConstPtr::default(),
+        0,
+    )
 }
 
 /// Waits for epoll events with a high-precision timeout.

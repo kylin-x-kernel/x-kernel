@@ -113,8 +113,8 @@ pub(crate) fn is_suspended(guard: &NoPreemptIrqSave) -> bool {
 /// leaves events suspended: automatic rearm could access lost hardware or use
 /// an unrestored time base. Never forget this token. On abort restore hardware
 /// and timekeeping as needed, then use the same explicit two-step completion.
-#[derive(Debug)]
 #[must_use = "restore hardware and explicitly resume events, including on abort"]
+#[derive(Debug)]
 pub struct LocalTimerSuspend {
     cpu: LogicalCpuId,
     generation: u64,

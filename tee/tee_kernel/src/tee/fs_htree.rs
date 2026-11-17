@@ -150,7 +150,7 @@ impl Debug for TeeFsHtreeNodeImage {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TeeFsHtreeType {
     Head,
     Node,
@@ -160,7 +160,7 @@ pub(super) enum TeeFsHtreeType {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(super) struct TeeFsHtreeData {
     pub head: TeeFsHtreeImage,
     pub fek: [u8; TEE_FS_HTREE_FEK_SIZE],
@@ -1409,14 +1409,20 @@ pub(super) fn get_node(
     Ok(HtreeGrowth::prepare_with(ht, create, node_id, reserve_htree_node)?.commit())
 }
 
+/// Counter pair that does not select a committed htree header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CounterIndexError {
+    InvalidCounterPair,
+}
+
 /// get the index from the counter
 ///
 /// # Arguments
 /// * `counter0` - the counter0
 /// * `counter1` - the counter1
 /// # Returns
-/// * `Result<u8, ()>` - the index
-fn get_idx_from_counter(counter0: u32, counter1: u32) -> Result<u8, ()> {
+/// * `Result<u8, CounterIndexError>` - the selected index or invalid counter state
+fn get_idx_from_counter(counter0: u32, counter1: u32) -> Result<u8, CounterIndexError> {
     if (counter0 & 1) == 0 {
         // Equivalent to !(counter0 & 1)
         if (counter1 & 1) == 0 {
@@ -1434,7 +1440,7 @@ fn get_idx_from_counter(counter0: u32, counter1: u32) -> Result<u8, ()> {
         // Equivalent to (counter1 & 1)
         Ok(1)
     } else {
-        Err(())
+        Err(CounterIndexError::InvalidCounterPair)
     }
 }
 

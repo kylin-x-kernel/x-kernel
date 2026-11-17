@@ -31,8 +31,8 @@ const TASK_NAME_BYTES: usize = 16;
 const _: () = assert!(mem::size_of::<ktracepoint::TraceEntry>() == 8);
 const _: () = assert!(MAX_RECORD_BYTES >= 8 + 4 * mem::size_of::<u64>());
 
-#[derive(Clone, Copy)]
 #[repr(C, align(8))]
+#[derive(Clone, Copy)]
 struct TraceRecord {
     bytes: [u8; MAX_RECORD_BYTES],
     length: usize,
@@ -41,7 +41,7 @@ struct TraceRecord {
 }
 
 /// Capture counters; the snapshot text header continues to report retained entries.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TraceCaptureStats {
     /// Records currently retained, in capture order.
     pub retained_records: usize,

@@ -89,7 +89,7 @@ pub fn current_sender_credentials() -> Option<crate::SenderCredentials> {
     })
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum UnixAddr {
     #[default]
     Unbound,

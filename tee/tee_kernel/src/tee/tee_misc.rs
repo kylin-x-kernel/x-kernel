@@ -10,18 +10,28 @@ pub(super) const fn tee_b2hs_hsbuf_size(x: usize) -> usize {
     x.saturating_mul(2).saturating_add(1)
 }
 
+/// Invalid input or output capacity while converting TEE hexadecimal buffers.
+#[cfg(unittest)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TeeHexError {
+    /// The output buffer cannot hold the encoded data and terminator.
+    ShortBuffer,
+    /// The input has invalid hexadecimal length or digits.
+    InvalidHex,
+}
+
 /// 将二进制数据 `b` 编码为十六进制字符串（写入 `hs`）
 ///
 /// 返回写入的长度（不包含末尾 0）
 #[cfg(unittest)]
-pub(super) fn tee_b2hs(b: &[u8], hs: &mut [u8]) -> Result<usize, ()> {
+pub(super) fn tee_b2hs(b: &[u8], hs: &mut [u8]) -> Result<usize, TeeHexError> {
     let expected_len = b.len() * 2;
 
     if hs.len() < expected_len + 1 {
-        return Err(()); // 模拟 TEE_ERROR_SHORT_BUFFER
+        return Err(TeeHexError::ShortBuffer); // 模拟 TEE_ERROR_SHORT_BUFFER
     }
 
-    encode_to_slice(b, &mut hs[..expected_len]).map_err(|_| ())?;
+    encode_to_slice(b, &mut hs[..expected_len]).map_err(|_| TeeHexError::InvalidHex)?;
 
     hs.iter_mut().take(expected_len).for_each(|b| {
         if b'a' <= *b && *b <= b'z' {
@@ -37,18 +47,18 @@ pub(super) fn tee_b2hs(b: &[u8], hs: &mut [u8]) -> Result<usize, ()> {
 ///
 /// 返回写入的字节数
 #[cfg(unittest)]
-pub(super) fn tee_hs2b(hs: &[u8], b: &mut [u8]) -> Result<usize, ()> {
+pub(super) fn tee_hs2b(hs: &[u8], b: &mut [u8]) -> Result<usize, TeeHexError> {
     let hslen = hs.len();
     if !hslen.is_multiple_of(2) {
-        return Err(()); // 长度必须是偶数
+        return Err(TeeHexError::InvalidHex); // 长度必须是偶数
     }
 
     let expected_len = hslen / 2;
     if b.len() < expected_len {
-        return Err(());
+        return Err(TeeHexError::ShortBuffer);
     }
 
-    decode_to_slice(hs, &mut b[..expected_len]).map_err(|_| ())?;
+    decode_to_slice(hs, &mut b[..expected_len]).map_err(|_| TeeHexError::InvalidHex)?;
     Ok(expected_len)
 }
 

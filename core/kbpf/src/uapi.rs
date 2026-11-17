@@ -505,6 +505,16 @@ pub mod bpf_anon_bpf_sock_ops_rto_cb_flag {
 /// C enum `bpf_anon_bpf_sock_ops_void` (`include/uapi/linux/bpf.h`).
 pub mod bpf_anon_bpf_sock_ops_void {
     pub const BPF_SOCK_OPS_VOID: u32 = 0;
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        unitless_time_integer,
+        reason = "CG-011-time-unit-names: Linux UAPI name `BPF_SOCK_OPS_TIMEOUT_INIT` from \
+                  `include/uapi/linux/bpf.h`"
+    )]
     pub const BPF_SOCK_OPS_TIMEOUT_INIT: u32 = 1;
     pub const BPF_SOCK_OPS_RWND_INIT: u32 = 2;
     pub const BPF_SOCK_OPS_TCP_CONNECT_CB: u32 = 3;

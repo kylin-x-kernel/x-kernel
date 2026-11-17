@@ -90,7 +90,7 @@ pub struct Tty<R, W> {
     pty_pair: Option<Weak<PtyPair>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum TtyKind {
     Terminal,
     PtyMaster,

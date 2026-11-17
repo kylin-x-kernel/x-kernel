@@ -378,7 +378,7 @@ fn repeated_local_initialization_is_rejected_before_hardware_setup() {
     let saved_pmr = karch::pmr::is_ready().then(karch::pmr::read);
 
     let result = super::init_current_cpu();
-    assert_eq!(result, Err("local GIC initialization already attempted"));
+    assert_eq!(result, Err(super::GicInitError::LocalInitAlreadyAttempted));
     assert_eq!(karch::local_irq_enabled(), false);
     #[cfg(feature = "nmi-pseudo")]
     if let Some(saved) = saved_pmr {

@@ -258,7 +258,7 @@ pub(crate) fn resolve(id: IrqDomainId, hwirq: Hwirq) -> Option<Virq> {
 }
 
 /// The namespace of a controller claim; completion always uses its original cookie.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqRef {
     /// Domain-local hardware number, resolved through an RCU-protected Line index.
     Domain(IrqDomainId, Hwirq),

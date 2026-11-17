@@ -13,8 +13,8 @@ const PSCI_0_2_64BIT: u32 = 0x40000000;
 const PSCI_0_2_FN_CPU_OFF: u32 = PSCI_0_2_FN_BASE + 2;
 const PSCI_0_2_FN_SYSTEM_OFF: u32 = PSCI_0_2_FN_BASE + 8;
 const PSCI_0_2_FN64_CPU_ON: u32 = PSCI_0_2_FN_BASE + PSCI_0_2_64BIT + 3;
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(i32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PsciError {
     NotSupported    = -1,
     InvalidParams   = -2,

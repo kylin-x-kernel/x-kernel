@@ -125,11 +125,11 @@ fn do_sys_poll(
 
 /// Poll file descriptors with millisecond timeout
 #[cfg(target_arch = "x86_64")]
-pub(crate) fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout: i32) -> KResult<isize> {
-    let timeout = if timeout < 0 {
+pub(crate) fn sys_poll(fds: UserPtr<pollfd>, nfds: u32, timeout_ms: i32) -> KResult<isize> {
+    let timeout = if timeout_ms < 0 {
         None
     } else {
-        Some(TimeSpan::from_millis(timeout as u64))
+        Some(TimeSpan::from_millis(timeout_ms as u64))
     };
     do_sys_poll(fds, nfds, timeout, None)
 }

@@ -14,6 +14,11 @@ All types of instrumentation using the LLVM profiling runtime are supported:
 
 Note that to profile both C and Rust code at the same time you must use Clang with the same LLVM version as the LLVM used by rustc. You can pass these flags to C code compiled with the `cc` crate using [environment variables](https://github.com/rust-lang/cc-rs#external-configuration-via-environment-variables).
 
+The exported profiling ABI follows the pinned Rust toolchain's LLVM 22.1
+compiler-rt declarations. In particular, the data and counter size helpers
+receive Begin/End pointers, the data-count helper receives data Begin/End
+pointers, and `__llvm_profile_runtime` is a C `int` marker.
+
 ## Usage
 
 Note: This crate requires a recent nightly compiler.

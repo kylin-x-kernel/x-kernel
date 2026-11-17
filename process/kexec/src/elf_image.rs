@@ -425,24 +425,29 @@ fn validate_alignment(alignment: u64) -> KResult<usize> {
 }
 
 fn trim_overlapping_segment_pages(segments: &mut Vec<ValidatedLoadSegment>) -> KResult {
-    let mut index = 0;
-    while index + 1 < segments.len() {
+    let mut write = 0;
+    let len = segments.len();
+    for read in 0..len {
         // Page alignment may make adjacent segments share one page. A true
         // memory overlap would require splitting the earlier mapping around a
         // later MAP_FIXED replacement, so reject it instead of dropping data.
-        if segments[index].memory_end > segments[index + 1].memory_start {
-            return Err(KError::InvalidExecutable);
+        if read + 1 < len {
+            if segments[read].memory_end > segments[read + 1].memory_start {
+                return Err(KError::InvalidExecutable);
+            }
+            let next_start = segments[read + 1].mapping_start;
+            if segments[read].mapping_end > next_start {
+                segments[read].mapping_end = next_start;
+            }
         }
-        let next_start = segments[index + 1].mapping_start;
-        if segments[index].mapping_end > next_start {
-            segments[index].mapping_end = next_start;
-        }
-        if segments[index].mapping_start == segments[index].mapping_end {
-            segments.remove(index);
-        } else {
-            index += 1;
+        if segments[read].mapping_start != segments[read].mapping_end {
+            if write != read {
+                segments[write] = segments[read];
+            }
+            write += 1;
         }
     }
+    segments.truncate(write);
     if segments.is_empty() {
         return Err(KError::InvalidExecutable);
     }

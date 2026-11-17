@@ -7,7 +7,7 @@
 use core::fmt;
 
 /// Errors that can occur during backtrace operations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BacktraceError {
     /// Backtrace library not initialized.
     NotInitialized,
@@ -33,7 +33,7 @@ pub enum BacktraceError {
 }
 
 /// Reasons why a frame pointer might be invalid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvalidReason {
     /// Frame pointer is null.
     Null,

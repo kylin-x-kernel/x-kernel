@@ -24,7 +24,7 @@ triggers:
   `trace!` is only for very frequent or highly detailed diagnostics such as
   per-packet, per-event, per-iteration, or tight-loop instrumentation.
   Not this rule: [CG-021](CG-021-no-panic-on-reachable-failure.md) owns
-  panic/release-validation behavior and the pending Dylint lint `untyped_error_result` ([pending](pending.md))
+  panic/release-validation behavior and the Dylint lint `untyped_error_result` ([CG-010](CG-010-typed-error-result.md))
   owns unit/string `Result` errors; this rule owns a log event's severity, frequency
   and debugging value. Whether logging replaces a required error return
   remains error-handling guidance in

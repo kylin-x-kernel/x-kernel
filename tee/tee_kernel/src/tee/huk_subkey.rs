@@ -14,8 +14,8 @@ use super::{
 use crate::tee::TeeResult;
 
 #[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum HukSubkeyUsage {
     Rpmb     = 0,
     Ssk      = 1,

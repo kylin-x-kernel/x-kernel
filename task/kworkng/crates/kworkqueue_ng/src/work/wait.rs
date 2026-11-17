@@ -55,7 +55,7 @@ impl<T, H> Work<T, H> {
 }
 
 /// Pre-effect failures of synchronous Work or Queue completion waits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WaitError {
     /// The current context cannot block for completion.
     InvalidContext,

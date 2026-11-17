@@ -24,6 +24,11 @@ pub enum SlotInitError<E> {
     Init(E),
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum SlotReserveError {
+    NoSpace,
+}
+
 /// Caller-owned storage from which dynamically initialized per-CPU slots are carved.
 ///
 /// Allocation metadata uses a non-concurrent bump cursor, so a chunk is not
@@ -103,7 +108,7 @@ impl CpuSlotChunk {
         }
         let (offset, _end) = match self.reserve(size, align) {
             Ok(reservation) => reservation,
-            Err(()) => return Err(SlotInitError::NoSpace),
+            Err(SlotReserveError::NoSpace) => return Err(SlotInitError::NoSpace),
         };
 
         let mut initialized = 0;
@@ -135,13 +140,13 @@ impl CpuSlotChunk {
         })
     }
 
-    fn reserve(&self, size: usize, align: usize) -> Result<(usize, usize), ()> {
+    fn reserve(&self, size: usize, align: usize) -> Result<(usize, usize), SlotReserveError> {
         let cursor = self.cursor.get();
-        let offset = align_up(cursor, align).ok_or(())?;
+        let offset = align_up(cursor, align).ok_or(SlotReserveError::NoSpace)?;
         let end = offset
             .checked_add(size)
             .filter(|end| *end <= self.area_stride)
-            .ok_or(())?;
+            .ok_or(SlotReserveError::NoSpace)?;
         self.cursor.set(end);
         Ok((offset, end))
     }

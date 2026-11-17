@@ -35,6 +35,7 @@ linux_sysno.workspace = true
 memaddr.workspace = true
 memspace.workspace = true
 osvm.workspace = true
+posix-types.workspace = true
 unittest.workspace = true
 posix-fs.workspace = true
 posix-ipc.workspace = true

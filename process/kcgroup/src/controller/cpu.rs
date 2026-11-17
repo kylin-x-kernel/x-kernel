@@ -86,8 +86,8 @@ impl CpuController {
     /// # Errors
     ///
     /// Returns `EINVAL` for out-of-range values.
-    pub fn set_bandwidth(&self, quota: Option<u64>, period: u64) -> KResult<()> {
-        let is_valid = (kbandwidth::PERIOD_MIN_US..=kbandwidth::PERIOD_MAX_US).contains(&period)
+    pub fn set_bandwidth(&self, quota: Option<u64>, period_us: u64) -> KResult<()> {
+        let is_valid = (kbandwidth::PERIOD_MIN_US..=kbandwidth::PERIOD_MAX_US).contains(&period_us)
             && quota.is_none_or(|value| value >= kbandwidth::QUOTA_MIN_US);
         if !is_valid {
             return Err(KError::from(LinuxError::EINVAL));
@@ -96,7 +96,7 @@ impl CpuController {
             crate::release_bandwidth(&self.bandwidth);
             self.bandwidth.reopen();
         }
-        let _ = self.bandwidth.set(quota, period);
+        let _ = self.bandwidth.set(quota, period_us);
         Ok(())
     }
 

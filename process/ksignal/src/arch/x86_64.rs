@@ -5,8 +5,7 @@
 //! x86_64 signal frame layout and trampoline.
 use kcpu::userspace::UserContext;
 use kerrno::{KError, KResult};
-use osvm::VirtMutPtr;
-use posix_types::UserRead;
+use posix_types::{UserPtr, UserRead, UserWrite, k_siginfo};
 
 use crate::{SignalSet, SignalStack};
 
@@ -208,8 +207,19 @@ impl SignalStackAbi {
 // user registers and xstate are validated separately before hardware use.
 unsafe impl UserRead for UContext {}
 
-const _: () = assert!(core::mem::size_of::<UContext>() == 304);
-const _: () = assert!(core::mem::offset_of!(UContext, mcontext) == 40);
+// SAFETY: the same repr(C) integer-only fields leave no implicit holes: the
+// stack_t gap is the explicit zeroed `SignalStackAbi::padding`, and the
+// assertions below pin Linux ucontext offsets and the 304-byte total.
+unsafe impl UserWrite for UContext {}
+
+const _: () = {
+    assert!(core::mem::size_of::<SignalStackAbi>() == 24);
+    assert!(core::mem::size_of::<MContext>() == 256);
+    assert!(core::mem::offset_of!(UContext, stack) == 16);
+    assert!(core::mem::offset_of!(UContext, mcontext) == 40);
+    assert!(core::mem::offset_of!(UContext, sigmask) == 296);
+    assert!(core::mem::size_of::<UContext>() == 304);
+};
 
 /// Writes the Linux x86_64 rt frame at the signal-delivery user boundary.
 /// Each region is copied separately, so alignment gaps never expose kernel
@@ -242,10 +252,10 @@ pub(crate) fn setup_signal_frame(
     uc.stack = SignalStackAbi::from_stack(stack, uctx.sp());
     uc.flags = usize::from(kcpu::enabled_xstate_mask() != 0);
     uc.mcontext.fpregs = fp_addr;
-    osvm::write_vm_mem(fp_addr as *mut u8, &fp[..fp_len])?;
-    (info_addr as *mut crate::SignalInfo).write_vm(sig.clone())?;
-    (uc_addr as *mut UContext).write_vm(uc)?;
-    (handler_sp as *mut usize).write_vm(restorer)?;
+    UserPtr::<u8>::from(fp_addr).write_vm_slice(&fp[..fp_len])?;
+    UserPtr::<k_siginfo>::from(info_addr).write_vm(k_siginfo::from(sig.clone()))?;
+    UserPtr::<UContext>::from(uc_addr).write_vm(uc)?;
+    UserPtr::<usize>::from(handler_sp).write_vm(restorer)?;
     uctx.set_sp(handler_sp);
     // A handler gets clean FP state; the interrupted state lives in its frame.
     kcpu::userspace::reset_fp_state();

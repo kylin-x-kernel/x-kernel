@@ -158,14 +158,14 @@ pub const HELPER_TABLE_CAPACITY: usize = 32;
 /// ones.
 pub type HelperFn = fn(u64, u64, u64, u64, u64) -> u64;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct HelperEntry {
     id: u32,
     func: HelperFn,
 }
 
 /// Immutable memory owned by the host and visible to a BPF program.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct ReadOnlyMemory {
     id: u32,
     base: u64,
@@ -230,7 +230,7 @@ impl ReadOnlyMemory {
 /// when chained helpers want extra arguments, they live in `r2..=r5`.
 /// `r0` (return value) and `r6..=r10` (callee-saved / frame pointer)
 /// always start at zero.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct InitialRegs {
     /// Value placed in `r1` before the program starts (typically the
     /// "context" pointer).

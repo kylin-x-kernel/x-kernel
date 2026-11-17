@@ -22,7 +22,7 @@ const VIRTIO_MMIO_COMPATIBLE: &str = "virtio,mmio";
 const QEMU_VIRT_ROOTS: [&str; 2] = ["linux,dummy-virt", "riscv-virtio"];
 
 /// Why firmware and platform facts do not produce a device DMA view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DmaConfigurationError {
     /// Reading firmware itself failed; no platform fallback may erase it.
     Firmware(FwError),

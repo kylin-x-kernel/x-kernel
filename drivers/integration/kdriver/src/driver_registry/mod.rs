@@ -38,7 +38,7 @@ pub fn register_platform_drivers(registrar: &mut DriverRegistrar) {
 
 /// Lightweight summary of the current long-lived ownership graph visible at
 /// the driver orchestration boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OwnershipSummary {
     pub bus_count: usize,
     pub driver_count: usize,
@@ -46,7 +46,7 @@ pub struct OwnershipSummary {
 }
 
 /// Ownership summary for one bus visible at the driver orchestration boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BusOwnershipSummary {
     pub id: kdevice::BusId,
     pub name: &'static str,
@@ -54,7 +54,7 @@ pub struct BusOwnershipSummary {
 }
 
 /// Ownership summary for one driver visible at the driver orchestration boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DriverOwnershipSummary {
     pub id: kdevice::DriverId,
     pub name: &'static str,

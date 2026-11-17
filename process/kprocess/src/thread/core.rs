@@ -73,7 +73,7 @@ impl PreparedUserClone {
 }
 
 /// Linux nice value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct NiceValue(i32);
 
 impl NiceValue {
@@ -121,7 +121,7 @@ impl Default for NiceValue {
 }
 
 /// Consistent scheduler policy/priority snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SchedulerParameters {
     policy: Option<u32>,
     priority: i32,

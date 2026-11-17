@@ -39,7 +39,7 @@ pub const MAX_LINKS: usize = 256;
 pub const MAX_CRS_DESCRIPTORS: usize = 32;
 
 /// Trigger and polarity of a PCI interrupt route.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrtTrigger {
     /// Edge-sensitive, active-high.
     EdgeRising,
@@ -52,7 +52,7 @@ pub enum PrtTrigger {
 }
 
 /// One resolved interrupt route.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrtRoute {
     /// Global system interrupt number.
     pub gsi: u32,
@@ -61,7 +61,7 @@ pub struct PrtRoute {
 }
 
 /// Why a `_PRT` key could not produce a route.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrtLookupError {
     /// The lookup bus is not supported.
     Unsupported,
@@ -76,7 +76,7 @@ pub enum PrtLookupError {
 }
 
 /// Whether the root bridge provided `_PRT`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrtOrigin {
     /// `_PRT` was present and decoded.
     Present,
@@ -128,7 +128,7 @@ impl From<ContextError> for PrtError {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct PrtEntry {
     device: u16,
     pin: u8,
@@ -594,7 +594,7 @@ fn log_entry(device: u16, function: u16, pin: u8, route: Result<PrtRoute, PrtLoo
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LinkIrq {
     gsi: u32,
     trigger: PrtTrigger,
@@ -603,7 +603,7 @@ struct LinkIrq {
     consumer: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CrsError {
     Malformed,
     MissingEndTag,

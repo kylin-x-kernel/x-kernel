@@ -47,7 +47,7 @@ const PARAM_COUNT: usize = 4;
 ///
 /// 本地失败(参数、用户地址、本地 handle)恒 `TEE_ORIGIN_API`;传输与
 /// 协议失败恒 `TEE_ORIGIN_COMMS`;manager/TA 失败透传 wire origin。
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct TeeFailure {
     result: u32,
     origin: u32,
@@ -264,7 +264,7 @@ fn wire_params_from_user(up: &utee_params) -> InterTaResult<TEE_Parameters> {
 }
 
 /// §7.4 响应参数写回结果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ParamWriteback {
     /// TA result 成功:输出 data/值对已写回用户内存。
     OutputsApplied,

@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use core::mem::size_of;
+use core::mem::{offset_of, size_of};
 
 use linux_raw_sys::general::{
     AT_FDCWD, AT_STATX_DONT_SYNC, AT_STATX_FORCE_SYNC, S_IFDIR, S_IFMT, STATX_BASIC_STATS,
@@ -91,7 +91,9 @@ fn statx_accepts_mask_hints_and_individual_sync_modes() {
                 ),
                 Ok(0)
             );
-            assert_eq!(u32::from(output.read().stx_mode) & S_IFMT, S_IFDIR);
+            let mode_addr = output.as_user_ptr() as usize + offset_of!(statx, stx_mode);
+            let mode = UserConstPtr::<u16>::from(mode_addr).read_vm().unwrap();
+            assert_eq!(u32::from(mode) & S_IFMT, S_IFDIR);
         }
     }
 }

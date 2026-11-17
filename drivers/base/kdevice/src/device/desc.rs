@@ -13,7 +13,7 @@ use fwnode::FwNode;
 use crate::{BusId, DriverId, ResourceSet};
 
 /// Opaque descriptor identifier assigned before a runtime device object exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DeviceDescId(u64);
 
 impl DeviceDescId {
@@ -29,7 +29,7 @@ impl DeviceDescId {
 }
 
 /// Opaque, globally-unique device identifier assigned by the device manager.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DeviceId(u64);
 
 impl DeviceId {
@@ -47,7 +47,7 @@ impl DeviceId {
 /// Linux-style device number (`dev_t`) encoded from major and minor numbers.
 ///
 /// This is distinct from [`DeviceId`], which identifies a device-model object.
-#[derive(Default, Clone, PartialEq, Eq, PartialOrd, Ord, Copy, Hash)]
+#[derive(Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DeviceNumber(pub u64);
 
 impl DeviceNumber {
@@ -98,7 +98,7 @@ impl DeviceState {
 }
 
 /// Where on the bus hierarchy this device lives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceLocation {
     /// PCI Bus / Device / Function.
     Pci {
@@ -140,7 +140,7 @@ pub enum DeviceLocation {
 }
 
 /// Where the device description originally came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiscoveryOrigin {
     /// Flattened Device Tree.
     DeviceTree,
@@ -156,7 +156,7 @@ pub enum DiscoveryOrigin {
 /// Firmware-specific errors stay in that backend; consumers use this status
 /// only to choose a probe-failure policy. The status describes INTx routing,
 /// not whether the device has any usable interrupt (MSI-X may still work).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IntxRouteStatus {
     /// A route was resolved and the corresponding [`crate::ResourceDesc::Irq`]
     /// resource was attached to the device.
@@ -168,7 +168,7 @@ pub enum IntxRouteStatus {
 }
 
 /// PCI device identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PciIdentity {
     /// PCI vendor id from the configuration-space vendor register.
     pub vendor_id: u16,
@@ -185,7 +185,7 @@ pub struct PciIdentity {
 }
 
 /// Platform device identity, carrying firmware and kernel-internal identifiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PlatformIdentity {
     /// Stable kernel-internal alias used for platform-static fallback devices.
     pub alias: Option<&'static str>,
@@ -199,7 +199,7 @@ pub struct PlatformIdentity {
 /// only VirtIO). Carrying the transport descriptor at descriptor level keeps
 /// bus identities (`PciIdentity` / `PlatformIdentity`) free of upper-layer
 /// concerns and lets matchers branch on transport without re-deriving it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransportInfo {
     /// VirtIO transport (PCI or MMIO underneath, distinguished by bus).
     Virtio {
@@ -212,7 +212,7 @@ pub enum TransportInfo {
 ///
 /// Each variant corresponds to a bus-type-specific identity structure whose
 /// interpretation is owned by the matching domain (`BusTypeObject`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceIdentity {
     /// PCI / PCIe device identity (including VirtIO-over-PCI).
     Pci(PciIdentity),
@@ -226,7 +226,7 @@ pub enum DeviceIdentity {
 /// be final before registration; the device core assigns the descriptor id and
 /// stores its own copy. It contains no runtime lifecycle state and no concrete
 /// firmware backend type.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct DeviceDescSpec {
     /// Bus instance the device was discovered on.
     pub bus_id: BusId,
@@ -270,7 +270,7 @@ pub struct DeviceDescSpec {
 /// lifecycle state. It is constructed only by registering a
 /// [`DeviceDescSpec`], which also creates the stable [`DeviceId`] documented by
 /// [`Self::device_id`].
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct DeviceDesc {
     /// Descriptor id assigned by the backend's enumeration context.
     id: DeviceDescId,
@@ -412,8 +412,8 @@ impl DeviceDesc {
 /// The `#[repr(u8)]` annotation lets `BindingRuntime` store the lifecycle as
 /// an `AtomicU8` so hot read paths (`state()`, `is_removing()`) can avoid
 /// taking a spinlock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceState {
     /// Discovered on a bus but not yet bound to a driver.
     Discovered = 0,
@@ -471,7 +471,7 @@ impl DeviceState {
 /// snapshot. Each group is internally consistent, but the two groups (and the
 /// lock-free `state` read) may originate from different instants. Display-only
 /// consumers must not treat cross-group combinations as a transaction.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct DeviceRecord {
     /// Globally-unique device id.
     pub id: DeviceId,

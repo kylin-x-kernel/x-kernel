@@ -64,8 +64,8 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> RtClass<T, Owner> {
         if !self.is_throttled() {
             return false;
         }
-        let period = self.rt_period_ns.max(1);
-        now < self.period_start_ns.saturating_add(period)
+        let period_ns = self.rt_period_ns.max(1);
+        now < self.period_start_ns.saturating_add(period_ns)
     }
 
     fn idx(priority: u8) -> usize {
@@ -160,12 +160,12 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for RtClass<T, Owne
         if self.period_start_ns == 0 {
             self.period_start_ns = now;
         }
-        let period = self.rt_period_ns.max(1);
-        if now >= self.period_start_ns.saturating_add(period) {
-            let steps = now.saturating_sub(self.period_start_ns) / period;
+        let period_ns = self.rt_period_ns.max(1);
+        if now >= self.period_start_ns.saturating_add(period_ns) {
+            let steps = now.saturating_sub(self.period_start_ns) / period_ns;
             self.period_start_ns = self
                 .period_start_ns
-                .saturating_add(steps.saturating_mul(period));
+                .saturating_add(steps.saturating_mul(period_ns));
             self.used_ns = 0;
             self.is_throttled = false;
         }

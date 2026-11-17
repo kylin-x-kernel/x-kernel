@@ -69,8 +69,8 @@ fn ns_reaper_is_exited(ns: &Arc<PidNamespace>) -> bool {
         .is_some_and(|reaper| reaper.is_exited())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ProcessExitState {
     Running = 0,
     Zombie  = 1,

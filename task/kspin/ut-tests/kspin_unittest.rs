@@ -31,7 +31,7 @@ type TestSpinIrq<T> = SpinLock<TestGuardIrq, T>;
 type TestRwSpinIrq<T> = SpinRwLock<TestGuardIrq, T>;
 type TestMutex<T> = SpinRaw<T>;
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Debug, Eq, PartialEq)]
 struct NonCopy(i32);
 
 #[def_test]

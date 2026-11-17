@@ -54,7 +54,7 @@ impl PreparedAction {
 ///
 /// The token is interpreted together with the IRQ line it was returned for.
 /// It is the `kirq` equivalent of Linux's `dev_id` removal key for shared IRQs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrqActionToken(usize);
 
 impl IrqActionToken {
@@ -70,7 +70,7 @@ impl IrqActionToken {
 }
 
 /// Internal identity for a registered IRQ action.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct IrqActionId(IrqActionToken);
 
 impl IrqActionId {
@@ -89,7 +89,7 @@ impl IrqActionId {
 ///
 /// This milestone only reserves the shape. It deliberately carries no task,
 /// waitqueue, workerqueue, or softirq target.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct IrqThreadSlot;
 
 bitflags! {
@@ -227,7 +227,7 @@ impl IrqAction {
 }
 
 /// Internal classification of a primary IRQ handler result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum IrqActionReturn {
     /// The primary handler did not claim the interrupt.
     Unhandled,

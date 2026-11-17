@@ -12,7 +12,7 @@ pub(super) const TEE_FS_NAME_MAX: usize = 350;
 pub(super) type TeeFileHandle = TeeFsFd;
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Clone, Copy, Debug)]
 /// GP: `struct tee_fs_dirent`
 pub(super) struct TeeFsDirent {
     pub oid: [u8; TEE_OBJECT_ID_MAX_LEN as _],

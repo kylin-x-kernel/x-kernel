@@ -15,8 +15,8 @@ pub const SMCCC_RET_SUCCESS: usize = 0;
 pub const SMCCC_RET_NOT_SUPPORTED: usize = usize::MAX;
 
 /// Firmware conduit used for SMCCC calls from the current kernel instance.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SmcccConduit {
     /// No valid SMCCC conduit has been discovered.
     None = 0,
@@ -52,7 +52,7 @@ static CONDUIT: AtomicU8 = AtomicU8::new(SmcccConduit::None as u8);
 /// Layout must stay `#[repr(C)]` with four `usize` fields in `x0..x3` order so
 /// the assembly in `smccc_trap.S` can store return registers with `stp`.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SmcccResult {
     pub x0: usize,
     pub x1: usize,

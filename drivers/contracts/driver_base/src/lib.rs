@@ -62,7 +62,7 @@
 /// assert_eq!(kind.as_str(), "net");
 /// ```
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceKind {
     /// Block storage device (e.g., disk).
     Block,
@@ -135,7 +135,7 @@ impl DeviceKind {
 /// assert!(err.should_retry());
 /// assert_eq!(err.message(), "Try again");
 /// ```
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DriverError {
     /// An entity already exists.
     AlreadyExists,

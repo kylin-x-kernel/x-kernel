@@ -11,7 +11,7 @@ use linux_raw_sys::general::{
     FUTEX_OP_SET, FUTEX_OP_XOR,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Operation {
     Set,
     Add,
@@ -20,7 +20,7 @@ enum Operation {
     Xor,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Comparison {
     Equal,
     NotEqual,
@@ -31,7 +31,7 @@ enum Comparison {
 }
 
 /// Decoded operation carried by the sixth argument of `FUTEX_WAKE_OP`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FutexWakeOp {
     operation: Operation,
     operation_argument: i32,

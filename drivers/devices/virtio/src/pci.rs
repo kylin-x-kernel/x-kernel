@@ -264,7 +264,7 @@ impl Transport for PciTransport {
 ///
 /// The variants are deliberately driver-neutral: the caller decides how to
 /// report them and may combine `NoInterrupt` with its own discovery facts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PciProbeError {
     /// The function is not a recognized VirtIO device.
     NotVirtio,

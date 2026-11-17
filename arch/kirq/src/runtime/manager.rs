@@ -111,7 +111,7 @@ pub fn prepare_percpu_forwarding(
 }
 
 /// Options for installing a regular IRQ handler.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrqRegisterOptions {
     auto_enable: bool,
     user_affinity_restricted: bool,
@@ -187,7 +187,7 @@ fn apply_platform_delivery(plan: IrqPlatformPlan) {
 /// source. Consumers that register a handler must use [`Self::virq`]; consumers
 /// that need trigger or controller details must use this descriptor rather than
 /// reconstructing a default one from the logical number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MappedIrq {
     /// OS-visible logical IRQ number.
     pub virq: Virq,
@@ -196,7 +196,7 @@ pub struct MappedIrq {
 }
 
 /// A firmware interrupt declaration that could not be mapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FwIrqMapError {
     /// No IRQ domain is registered for the specifier's exact controller node.
     ControllerNotReady,

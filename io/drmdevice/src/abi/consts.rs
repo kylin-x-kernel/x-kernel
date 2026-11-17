@@ -127,6 +127,16 @@ pub(crate) const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE: u32 = 1 << 2;
 
 /// `DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE`: publish `deadline_nsec` on the
 /// fences the wait parks on.
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    unitless_time_integer,
+    reason = "CG-011-time-unit-names: Linux UAPI name `DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE` from \
+              `include/uapi/drm/drm.h`"
+)]
 pub(crate) const DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE: u32 = 1 << 3;
 
 /// Upper bound on objects one `SYNCOBJ_*` request may address.

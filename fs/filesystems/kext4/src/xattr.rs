@@ -1356,6 +1356,16 @@ fn external_xattr_block_action(
     }
 }
 
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    vec_shift_in_loop,
+    reason = "CG-009-vec-shift-in-loop: inline xattrs are bounded by the inode's u16-sized inline \
+              byte region (at most 65,535 bytes)"
+)]
 fn plan_xattr_expansion_storage(
     inline_xattrs: &[Ext4Xattr],
     external_xattrs: &[Ext4Xattr],
@@ -1410,6 +1420,9 @@ fn plan_xattr_expansion_storage(
         let Some((entry_index, _)) = covering_entry.or(fallback_entry) else {
             return Ok(None);
         };
+        // Keep stable order: accepted duplicate keys are observable through
+        // get_xattr, which returns the first matching entry. The fixed inode
+        // inline region bounds this shift (at most 65,535 encoded bytes).
         external_xattrs.push(inline_xattrs.remove(entry_index));
     }
     sort_xattrs(&mut external_xattrs);

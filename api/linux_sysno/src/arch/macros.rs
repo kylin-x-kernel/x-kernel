@@ -2,7 +2,9 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-/// Helper for generating support code for a list of syscalls.
+/// An input name did not match a syscall in the selected table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnknownSyscallName;
 macro_rules! syscall_enum {
     (
         $(#[$outer:meta])*
@@ -35,7 +37,7 @@ macro_rules! syscall_enum {
         ///
         /// `new` rejects numbers absent from this table; membership does not imply
         /// kernel implementation. Name parsing is exact and case-sensitive and
-        /// returns `Err(())` for unknown names.
+        /// returns [`crate::UnknownSyscallName`] for unknown names.
         ///
         /// # Panics
         ///
@@ -174,7 +176,7 @@ macro_rules! syscall_enum {
         }
 
         impl core::str::FromStr for $Name {
-            type Err = ();
+            type Err = $crate::arch::UnknownSyscallName;
 
             fn from_str(s: &str) -> Result<Self, Self::Err> {
                 match s {
@@ -188,7 +190,7 @@ macro_rules! syscall_enum {
                             core::stringify!($extension_syscall) => Ok(Self::$extension_syscall),
                         )*
                     )*)?
-                    _ => Err(()),
+                    _ => Err($crate::arch::UnknownSyscallName),
                 }
             }
         }

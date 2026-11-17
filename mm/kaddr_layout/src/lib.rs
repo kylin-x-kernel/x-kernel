@@ -12,7 +12,7 @@ mod loongarch64;
 mod riscv64;
 mod x86_64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LayoutConsts {
     pub pg_va_bits: usize,
     pub kernel_aspace_base: usize,
@@ -27,7 +27,7 @@ pub struct LayoutConsts {
 }
 
 /// User-space virtual memory layout constants (per-architecture).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UserLayoutConsts {
     pub user_space_base: usize,
     pub user_space_size: usize,

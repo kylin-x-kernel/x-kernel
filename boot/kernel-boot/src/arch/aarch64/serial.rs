@@ -203,6 +203,9 @@ pub(crate) fn activate_boot_map() -> bool {
     true
 }
 
+// SAFETY: This is the only `_boot_print_usize` definition in kernel sources.
+// No caller exists in this repository, so the QEMU link discards it; if
+// retained, its C ABI must remain `fn(usize)` with no return value.
 #[unsafe(no_mangle)]
 pub(crate) extern "C" fn _boot_print_usize(num: usize) {
     if !is_enabled_idmap() {
@@ -212,6 +215,9 @@ pub(crate) extern "C" fn _boot_print_usize(num: usize) {
     write_str_idmap("\r\n");
 }
 
+// SAFETY: The QEMU link contains one `boot_print_str` definition. No external
+// caller exists in this repository; any use of this exported Rust ABI symbol
+// must retain its `fn(&str)` signature.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".idmap.text")]
 pub(crate) fn boot_print_str(data: &str) {
@@ -223,7 +229,7 @@ pub(crate) fn boot_print_usize(num: usize) {
     write_str_idmap("\r\n");
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Uart {
     base_address: usize,
 }

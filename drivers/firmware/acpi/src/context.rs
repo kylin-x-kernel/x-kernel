@@ -36,7 +36,7 @@ pub const MAX_AML_TABLE_LEN: usize = 16 * 1024 * 1024;
 const MAX_DEVICE_PATHS: usize = 1024;
 
 /// The interrupt model selected for AML evaluation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqModel {
     /// IO-APIC mode, selected with `\_PIC(1)`.
     IoApic,
@@ -79,7 +79,7 @@ pub enum ContextError {
 }
 
 /// Sticky failure state. Evaluation never resumes after one of these is set.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Poison {
     Host(HostFailure),
     UnsupportedRegion(u8),

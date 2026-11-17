@@ -6,7 +6,7 @@ use arm_gic_driver::v2::{CpuInterfaceTarget, CpuTargetMap, TargetList};
 use kcpu_id_map::{LogicalCpuId, RawCpuId};
 use unittest::{assert_eq, def_test};
 
-use super::{record_cpu_target, target_for_logical_cpu};
+use super::{GicInitError, record_cpu_target, target_for_logical_cpu};
 
 #[def_test]
 fn missing_hardware_identity_has_no_recorded_target() {
@@ -62,15 +62,15 @@ fn duplicate_association_is_idempotent_and_conflicts_never_overwrite() {
             0x105,
             CpuInterfaceTarget::Explicit(TargetList::from_raw(0x40)),
         ),
-        Err("conflicting GICv2 CPU target association")
+        Err(GicInitError::ConflictingCpuTarget)
     );
     assert_eq!(
         record_cpu_target(&routes, LogicalCpuId::new(2), 0x105, target),
-        Err("conflicting GICv2 CPU target association")
+        Err(GicInitError::ConflictingCpuTarget)
     );
     assert_eq!(
         record_cpu_target(&routes, LogicalCpuId::new(2), 0x106, target),
-        Err("conflicting GICv2 CPU target association")
+        Err(GicInitError::ConflictingCpuTarget)
     );
     assert_eq!(routes.cpu_interface_target_for_logical_cpu(1), Some(target));
 
@@ -100,7 +100,7 @@ fn duplicate_association_is_idempotent_and_conflicts_never_overwrite() {
             1,
             CpuInterfaceTarget::ImplicitUniprocessor,
         ),
-        Err("GICv2 CPU target is not one implemented CPU-interface bit")
+        Err(GicInitError::InvalidCpuTarget)
     );
 }
 
@@ -114,7 +114,7 @@ fn out_of_range_logical_cpu_and_non_one_hot_targets_are_rejected() {
             0x108,
             CpuInterfaceTarget::Explicit(TargetList::from_raw(0x20)),
         ),
-        Err("GICv2 logical CPU exceeds the CPU-interface range")
+        Err(GicInitError::LogicalCpuOutOfRange)
     );
     assert_eq!(
         record_cpu_target(
@@ -123,7 +123,7 @@ fn out_of_range_logical_cpu_and_non_one_hot_targets_are_rejected() {
             0,
             CpuInterfaceTarget::Explicit(TargetList::from_raw(0)),
         ),
-        Err("GICv2 CPU target is not one implemented CPU-interface bit")
+        Err(GicInitError::InvalidCpuTarget)
     );
     assert_eq!(
         record_cpu_target(
@@ -132,6 +132,6 @@ fn out_of_range_logical_cpu_and_non_one_hot_targets_are_rejected() {
             0,
             CpuInterfaceTarget::Explicit(TargetList::from_raw(0x50)),
         ),
-        Err("GICv2 CPU target is not one implemented CPU-interface bit")
+        Err(GicInitError::InvalidCpuTarget)
     );
 }

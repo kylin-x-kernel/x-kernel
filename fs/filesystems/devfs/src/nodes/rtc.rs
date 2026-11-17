@@ -11,7 +11,7 @@ use kvfs::{
     DeviceFileOps, DeviceId, DirMapping, NodeFlags, SimpleFs, VfsError, VfsFile, VfsResult,
 };
 use linux_raw_sys::ioctl::RTC_RD_TIME;
-use osvm::VirtMutPtr;
+use posix_types::{UserPtr, UserWrite};
 
 use crate::{DeviceFile, add_device_entry};
 
@@ -19,6 +19,7 @@ use crate::{DeviceFile, add_device_entry};
 pub(crate) const RTC0_DEVICE_ID: DeviceId = DeviceId::new(250, 0);
 
 #[repr(C)]
+#[derive(UserWrite)]
 struct rtc_time {
     tm_sec: c_int,
     tm_min: c_int,
@@ -55,7 +56,7 @@ impl DeviceFileOps for Rtc {
             RTC_RD_TIME => {
                 let unix_nanos = i64::try_from(ktime::realtime().unix_nanos()).unwrap_or(i64::MAX);
                 let wall = chrono::DateTime::from_timestamp_nanos(unix_nanos);
-                (arg as *mut rtc_time).write_vm(rtc_time {
+                UserPtr::<rtc_time>::from(arg).write_vm(rtc_time {
                     tm_sec: wall.second() as _,
                     tm_min: wall.minute() as _,
                     tm_hour: wall.hour() as _,

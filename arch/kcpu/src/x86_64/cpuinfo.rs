@@ -14,8 +14,8 @@ use x86_64::registers::control::{Cr0, Cr0Flags, Cr4, Cr4Flags};
 /// Selected CPUID capabilities; presence means supported by the CPU and the
 /// kernel's current state-management policy. Absence does not prove that the
 /// hardware lacks the instruction. This is not a complete CPUID interface.
-#[derive(Clone, Copy)]
 #[repr(usize)]
+#[derive(Clone, Copy)]
 pub enum CpuFeature {
     /// The `fpu` capability (Linux cpuinfo spelling).
     Fpu        = 0,

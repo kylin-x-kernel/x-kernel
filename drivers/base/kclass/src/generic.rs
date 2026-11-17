@@ -304,7 +304,7 @@ pub type ClassAvailabilityCallback<T> = Arc<dyn Fn(ClassDevice<T>) + Send + Sync
 /// credential: it is never exposed through a `DeviceId`, a `BindingRef` or any
 /// public binding API. It only proves to [`ClassRegistry::finish_retirement`]
 /// that the caller is finishing the sequence it claimed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ClassRetirement {
     id: DeviceId,
     token: u64,

@@ -45,7 +45,7 @@ use crate::ns16550_mmio::{Port as Ns16550MmioPort, SerialRegWidth};
 ///
 /// Used to match an early-boot stdout instance against a device-model node so
 /// the runtime serial driver can adopt the same hardware without remapping it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SerialIdent {
     /// Memory-mapped register window.
     Mmio { paddr: PhysAddr, size: usize },
@@ -54,7 +54,7 @@ pub enum SerialIdent {
 }
 
 /// Functional role of a port within the system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SerialRole {
     /// The kernel stdout console (early printk target).
     Stdout,
@@ -484,7 +484,7 @@ impl SerialPort {
 /// plus binding cells) and let the IRQ core translate it. Platforms without an
 /// IRQ domain for their controller, such as the x86 I/O-port console, retain a
 /// pre-decoded descriptor as an explicit legacy description.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum EarlyIrq {
     /// Firmware declaration, mapped through the controller's registered domain.
     #[cfg(any(feature = "pl011", feature = "ns16550-mmio"))]

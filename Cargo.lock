@@ -1562,7 +1562,7 @@ dependencies = [
  "lazyinit",
  "log",
  "memaddr",
- "osvm",
+ "posix-types",
  "unittest",
 ]
 
@@ -3366,7 +3366,6 @@ dependencies = [
  "log",
  "memaddr",
  "memspace",
- "osvm",
  "posix-types",
  "strum",
  "unittest",
@@ -3670,8 +3669,8 @@ dependencies = [
  "linux-raw-sys",
  "log",
  "memaddr",
- "osvm",
  "pagecache",
+ "posix-types",
  "slab",
  "smallvec",
  "unittest",
@@ -4660,6 +4659,7 @@ dependencies = [
  "osvm",
  "posix-fs",
  "posix-ipc",
+ "posix-types",
  "tee_kernel",
  "unittest",
 ]
@@ -6091,6 +6091,7 @@ dependencies = [
  "memaddr",
  "memspace",
  "osvm",
+ "posix-types",
  "unittest",
 ]
 

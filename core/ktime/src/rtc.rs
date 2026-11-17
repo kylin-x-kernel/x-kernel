@@ -103,8 +103,8 @@ pub struct RtcSleepAccounting<C> {
 /// restore MONOTONIC and hardware even on abort. This session never freezes
 /// clocks, stops CPUs or restores devices. Do not forget the session, drop it
 /// from NMI, or hold timekeeping/observer locks during settlement or Drop.
-#[derive(Debug)]
 #[must_use = "retain the session until explicit settlement or cancellation"]
+#[derive(Debug)]
 pub struct RtcSleepSession<'a, C> {
     owner: &'a mut RtcSleepAccounting<C>,
     token: Option<SuspendToken>,

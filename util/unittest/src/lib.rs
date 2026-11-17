@@ -78,7 +78,7 @@ pub use test_framework::{
     register_user_test_executor, set_printer,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TestResult {
     Ok,
     Failed,

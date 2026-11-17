@@ -59,7 +59,7 @@ pub struct ActiveDeviceAdoption {
 }
 
 /// Result of one driver-core probe attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProbeOutcome {
     /// The probe activated the device in this call.
     Activated,
@@ -829,7 +829,7 @@ pub fn detach_device_parent(child_id: DeviceId) -> Result<(), DriverError> {
 }
 
 /// What happens to the discovery descriptor when its bound device is removed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DescDisposition {
     /// Unbind: restore `Pending` so the descriptor may be bound again.
     Requeue,

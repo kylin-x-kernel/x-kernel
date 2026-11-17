@@ -24,7 +24,10 @@ fn capability_bitmaps_use_linux_word_order() {
 #[def_test]
 fn actions_accept_only_the_linux_kobject_set() {
     assert_eq!(UeventAction::try_from("change"), Ok(UeventAction::Change));
-    assert_eq!(UeventAction::try_from("change\0remove"), Err(()));
+    assert_eq!(
+        UeventAction::try_from("change\0remove"),
+        Err(InvalidUeventAction)
+    );
 }
 
 #[def_test]

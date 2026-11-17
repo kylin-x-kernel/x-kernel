@@ -106,6 +106,17 @@ checked through the configured kernel's `make clippy` during this migration.
 | Rule | Level | Backend | Lints |
 | --- | --- | --- | --- |
 | [CG-001-static-spinlock-registration](CG-001-static-spinlock-registration.md) | MUST | dylint | `unregistered_static_spinlock` |
+| [CG-002-static-mutex-registration](CG-002-static-mutex-registration.md) | MUST | dylint | `unregistered_static_lock` |
+| [CG-003-runtime-lock-tracking](CG-003-runtime-lock-tracking.md) | MUST | dylint | `untracked_runtime_lock` |
+| [CG-004-static-mut-option](CG-004-static-mut-option.md) | MUST | dylint | `static_mut_option` |
+| [CG-005-user-abi-layout](CG-005-user-abi-layout.md) | MUST | dylint | `unsound_user_abi_impl` |
+| [CG-006-user-copy-abi-contract](CG-006-user-copy-abi-contract.md) | MUST | dylint | `user_copy_without_abi_contract` |
+| [CG-007-attribute-order](CG-007-attribute-order.md) | MUST | dylint | `derive_not_last`, `unsorted_attributes` |
+| [CG-008-unsafe-attribute-safety](CG-008-unsafe-attribute-safety.md) | MUST | dylint | `undocumented_unsafe_attribute` |
+| [CG-009-vec-shift-in-loop](CG-009-vec-shift-in-loop.md) | SHOULD | dylint | `vec_shift_in_loop` |
+| [CG-010-typed-error-result](CG-010-typed-error-result.md) | SHOULD | dylint | `untyped_error_result` |
+| [CG-011-time-unit-names](CG-011-time-unit-names.md) | SHOULD | dylint | `unitless_time_integer` |
+| [CG-012-private-foreign-items](CG-012-private-foreign-items.md) | SHOULD | dylint | `exported_foreign_item` |
 | [CG-013-no-sleep-under-spinlock](CG-013-no-sleep-under-spinlock.md) | MUST | ai | — |
 | [CG-014-spin-noirq-needs-irq-contender](CG-014-spin-noirq-needs-irq-contender.md) | SHOULD | ai | — |
 | [CG-015-no-split-critical-section](CG-015-no-split-critical-section.md) | MUST | ai | — |

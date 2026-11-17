@@ -81,7 +81,7 @@ impl AnonPrivatePageHandle {
 }
 
 /// One released private page whose last object reference just disappeared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AnonPrivateReleasedPage {
     pa: PhysAddr,
     size: PageSize,
@@ -253,7 +253,7 @@ impl PreparedAnonPrivatePage {
 }
 
 /// Error returned while committing a private page slot replacement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AnonPrivatePageCommitError<E> {
     /// The object slot no longer has the expected absent or matching-page state.
     Changed,

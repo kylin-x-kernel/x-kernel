@@ -94,7 +94,7 @@ struct StdoutDesc {
 
 /// Device-tree MMIO layout for an NS16550-compatible UART.
 #[cfg(feature = "ns16550-mmio")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SerialMmioLayout {
     /// Device-tree `reg-shift`: adjacent register offset is `1 << reg_shift`.
     pub reg_shift: u32,

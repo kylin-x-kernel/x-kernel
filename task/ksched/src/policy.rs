@@ -9,7 +9,7 @@
 /// Rank is Linux order: Stop, Deadline, RT, Fair, Idle. Smaller
 /// discriminant wins.
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum SchedClass {
     /// Highest rank. Kernel-only; not a user `SCHED_*` policy.
     Stop     = 0,
@@ -55,7 +55,7 @@ impl SchedClass {
 ///
 /// FIFO and RR decode onto the RT class. Deadline decodes onto its rank.
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchedPolicy {
     /// `SCHED_NORMAL`.
     Normal   = 0,
@@ -106,7 +106,7 @@ impl SchedPolicy {
 }
 
 /// `SCHED_FIFO` / `SCHED_RR` priority. Larger wins. Non-RT is [`Self::NONE`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RtPrio(u8);
 
 impl RtPrio {
@@ -138,7 +138,7 @@ impl RtPrio {
 }
 
 /// Linux nice in `-20..=19`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Nice(i8);
 
 impl Nice {
@@ -216,7 +216,7 @@ const _: () = assert!(NICE_TO_WEIGHT[20] as i64 == NICE_0_WEIGHT);
 /// every `period_ns`, and each request must finish within `deadline_ns` of
 /// its activation. A period of zero is normalized to the deadline by the
 /// syscall boundary, so the stored period is always nonzero.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DlParams {
     /// Maximum runtime available in one period.
     pub runtime_ns: u64,
@@ -282,7 +282,7 @@ impl DlParams {
 }
 
 /// User-visible scheduling attributes. Unique fact on [`crate::SchedTask`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SchedAttr {
     /// Linux `sched_policy`.
     pub policy: SchedPolicy,
@@ -391,7 +391,7 @@ impl SchedAttr {
 }
 
 /// Policy / placement errors returned to `ktask` and mapped to errno there.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchedError {
     /// Unknown or unsupported `SCHED_*` value.
     InvalidPolicy,

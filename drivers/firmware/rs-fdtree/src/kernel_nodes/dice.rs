@@ -7,7 +7,7 @@
 use crate::{FdtNode, RegIter};
 
 /// Represents the node with interrupt-controller property
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Dice<'b, 'a> {
     pub(crate) node: FdtNode<'b, 'a>,
 }

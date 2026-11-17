@@ -7,7 +7,7 @@ use crate::node::FdtNode;
 
 /// The `/chosen` node: firmware-to-kernel runtime parameters selected by
 /// the boot loader.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Chosen<'b, 'a> {
     pub(crate) node: FdtNode<'b, 'a>,
 }

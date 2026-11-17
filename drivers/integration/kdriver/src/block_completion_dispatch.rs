@@ -24,7 +24,7 @@ use kirq::softirq::{self, SoftirqVec};
 use kspin::{NoPreempt, SpinNoIrq, static_lock};
 use ksync::Mutex;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProcessingPhase {
     Idle,
     Queued(usize),

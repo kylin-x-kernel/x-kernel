@@ -23,8 +23,8 @@ triggers:
   helpers and callbacks; blocking primitives include `ksync::Mutex`, `RwLock`,
   `Semaphore`, and `WaitQueue`.
   Not this rule: [CG-001](CG-001-static-spinlock-registration.md),
-  the pending Dylint lint `unregistered_static_lock` ([pending](pending.md)) and
-  the pending Dylint lint `untracked_runtime_lock` ([pending](pending.md)) own lock registration and runtime
+  the Dylint lint `unregistered_static_lock` ([CG-002](CG-002-static-mutex-registration.md)) and
+  the Dylint lint `untracked_runtime_lock` ([CG-003](CG-003-runtime-lock-tracking.md)) own lock registration and runtime
   constructor tracking; this rule owns work done while guards are live.
   Attribute an unnecessary IRQ mask to
   [CG-014](CG-014-spin-noirq-needs-irq-contender.md), and an atomicity gap

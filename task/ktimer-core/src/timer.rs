@@ -18,8 +18,8 @@ struct TimerData<H> {
 }
 
 /// Outcome of one non-waiting cancellation attempt, not a durable stop guarantee.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CancelResult {
     /// No pending membership or in-flight delivery was present.
     Inactive,

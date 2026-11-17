@@ -31,8 +31,8 @@ const HANDOFF: u8 = 4;
 // Match the initial unfairness budget of the page-lock wait protocol.
 const LOCK_RETRY_BUDGET: usize = 5;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum FolioWaitBit {
     Locked    = LOCKED,
     Writeback = WRITEBACK,
@@ -78,7 +78,7 @@ pub(super) static FOLIO_STATS: ksync::LockClassStats =
 #[linkme::distributed_slice(ksync::LOCK_CLASSES)]
 static FOLIO_CLASS: &ksync::LockClassStats = &FOLIO_STATS;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum WaitMode {
     Uninterruptible,
     Killable,

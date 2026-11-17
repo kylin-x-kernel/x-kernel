@@ -45,7 +45,7 @@ pub trait ProfileWriter {
 }
 
 /// Structured error type for profile operations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProfileError {
     /// Coverage instrumentation is not enabled.
     NotEnabled,

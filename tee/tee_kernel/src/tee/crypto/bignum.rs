@@ -10,7 +10,7 @@ use tee_raw_sys::*;
 use crate::tee::{TeeResult, config::CFG_CORE_BIGNUM_MAX_BITS};
 
 /// BigNum wrapper — delegates to tee_crypto::bignum::TeeBigNum.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct BigNum(pub TeeBigNum);
 
 impl BigNum {

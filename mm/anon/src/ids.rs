@@ -18,7 +18,7 @@ pub(crate) fn next_anon_lineage_id() -> AnonLineageId {
 }
 
 /// Stable identity for one private anonymous lineage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct AnonLineageId(pub(crate) u64);
 
 impl AnonLineageId {

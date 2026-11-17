@@ -50,8 +50,8 @@ pub fn init() -> bool {
 }
 
 /// Fixed softirq vector identifiers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SoftirqVec {
     /// High-priority bottom-half work.
     High    = 0,

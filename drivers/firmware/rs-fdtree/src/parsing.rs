@@ -15,8 +15,8 @@ impl<'a> CStr<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
 pub struct BigEndianU32(u32);
 
 impl BigEndianU32 {
@@ -29,8 +29,8 @@ impl BigEndianU32 {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug)]
 pub struct BigEndianU64(u64);
 
 impl BigEndianU64 {
@@ -43,7 +43,7 @@ impl BigEndianU64 {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct FdtData<'a> {
     bytes: &'a [u8],
 }

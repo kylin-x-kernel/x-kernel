@@ -14,6 +14,8 @@ use x86_64::{
 
 // Raw template so trap-entry assembly can reach TSS fields through
 // `gs:[offset __KCPU_SLOT_TSS]` without going through a descriptor.
+// SAFETY: x86 trap assembly resolves this unique data symbol as the TSS template base and uses
+// its fixed gs-relative field offsets; the static has the expected TaskStateSegment layout.
 #[unsafe(no_mangle)]
 #[used]
 #[unsafe(link_section = ".cpu_slot.template")]

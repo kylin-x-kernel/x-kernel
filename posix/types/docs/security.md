@@ -63,6 +63,7 @@ The crate never dereferences a user pointer itself; every access goes through
 | T-06 | iovec count/length abuse | Medium | > 1024 segments, negative `iov_len`, total overflow | rejected in `from_iovecs` before any user-memory I/O |
 | T-07 | Time-field abuse (negative nsec, pre-epoch deadlines) | Low | malformed `timespec`/`timeval` | subsecond range checked in every conversion; `try_into_realtime_deadline` rejects pre-epoch |
 | T-08 | `nfds` beyond `FD_SETSIZE` accepted | Low | `select` with huge `nfds` | matches Linux semantics (bits above `nfds` cleared, oversized `nfds` leaves carrier unchanged); adapters document their own fd-limit policy |
+| T-09 | Signal union member leaves upper bytes uninitialized | High | A `sigval_t` integer arm or short `siginfo_t` payload is copied as the entire union | `k_sigval` and `k_sigevent` do not implement `UserWrite`. `k_siginfo` seals its raw field and its unsafe raw constructor requires every byte initialized; `ksignal::SignalInfo::empty` zeroes the complete record and its timer constructor sets the full-width `sigval` pointer arm. Its `into_bytes` path preserves all 128 initialized bytes for the signal frame. |
 
 ## Failure handling and FMEA
 

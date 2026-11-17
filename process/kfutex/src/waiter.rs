@@ -20,10 +20,10 @@ const WOKEN: u8 = 2;
 const CANCELLED: u8 = 3;
 
 /// Index of one permanently allocated futex bucket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BucketId(pub(crate) usize);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct WaiterRoute {
     key: FutexKey,
     bucket: BucketId,

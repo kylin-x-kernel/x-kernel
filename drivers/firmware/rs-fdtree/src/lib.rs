@@ -49,7 +49,7 @@ pub use reference::{InterruptSpec, NodeReference, ReferenceError};
 
 /// Iterator over the DTB memory-reservation block, yielding each
 /// `(address, size)` pair until the `0, 0` terminator.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MemReserveIter<'a> {
     stream: FdtData<'a>,
 }

@@ -9,7 +9,7 @@ use khal::percpu::this_cpu_id;
 
 /// Rendezvous phases.
 #[repr(usize)]
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum Phase {
     /// No rendezvous in progress.
     Idle      = 0,

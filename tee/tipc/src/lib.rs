@@ -62,8 +62,8 @@ pub const IPC_CONNECT_ASYNC: u32 = 0x2;
 ///
 /// TIPC intentionally treats this as opaque data so that TEE and non-TEE
 /// clients can provide identities without coupling the IPC core to either.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct IpcUuid(uuid::Uuid);
 
 impl IpcUuid {

@@ -11,7 +11,7 @@
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 
 /// Vsock address.
-#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct VsockAddr {
     /// Context Identifier.
     pub cid: u64,
@@ -20,7 +20,7 @@ pub struct VsockAddr {
 }
 
 /// Vsock connection id.
-#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct VsockConnId {
     /// Peer address.
     pub peer_addr: VsockAddr,
@@ -44,7 +44,7 @@ impl VsockConnId {
 /// underlying virtio-vsock driver needs to fill packet headers. The transport
 /// reads it but does not modify it (the manager updates it in place as credit
 /// evolves).
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct VsockConnectionInfo {
     /// Connection identifier (peer address + local port).
     pub conn_id: VsockConnId,

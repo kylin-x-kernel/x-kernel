@@ -26,8 +26,8 @@ use crate::{
 };
 
 /// Lifecycle state of one channel endpoint.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IpcChanState {
     /// Server endpoint queued on a port.
     Accepting     = 1,

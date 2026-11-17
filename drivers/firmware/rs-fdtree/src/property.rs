@@ -34,7 +34,7 @@ pub(crate) fn resource_names<'b, 'a: 'b>(
 /// Device-tree properties carry cells as four-byte big-endian words. This
 /// view keeps the payload borrowed and decodes each cell on access, so it
 /// stays allocation-free and does not depend on host alignment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Cells<'a> {
     bytes: &'a [u8],
 }
@@ -110,7 +110,7 @@ impl<'a> Cells<'a> {
 }
 
 /// Failure to read a complete property with the requested shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PropertyError {
     /// No property has this name.
     Missing,

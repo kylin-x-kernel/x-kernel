@@ -333,7 +333,7 @@ impl Handler for MockHost {
         Handle(index)
     }
 
-    fn acquire(&self, _mutex: Handle, _timeout: u16) -> Result<(), AmlError> {
+    fn acquire(&self, _mutex: Handle, _timeout_ms: u16) -> Result<(), AmlError> {
         Ok(())
     }
 

@@ -348,7 +348,7 @@ fn parse_octal_u32(value: &[u8]) -> VfsResult<u32> {
 }
 
 /// Kind of shmem object represented by a tmpfs-backed inode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShmemObjectKind {
     /// Anonymous file created for `memfd_create`.
     Memfd,

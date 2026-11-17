@@ -326,7 +326,7 @@ impl QueuePartition {
         if !state.pending_on(self)
             || state
                 .delayed_deadline_ns()
-                .is_none_or(|deadline| deadline > now_ns)
+                .is_none_or(|deadline_ns| deadline_ns > now_ns)
         {
             return Ok(false);
         }

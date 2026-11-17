@@ -14,8 +14,8 @@ pub(crate) const FDT_NOP: u32 = 4;
 const FDT_END: u32 = 9;
 const MAX_NODE_DEPTH: usize = 63;
 
-#[derive(Debug, Clone, Copy)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
 struct FdtProperty {
     len: crate::parsing::BigEndianU32,
     name_offset: crate::parsing::BigEndianU32,
@@ -32,7 +32,7 @@ impl FdtProperty {
 
 /// A device-tree node: its name plus borrowed views of its property bytes
 /// and (optionally) its parent's property bytes for `#*-cells` lookups.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct FdtNode<'b, 'a> {
     /// Node name (may include unit address, e.g., "uart@10000000")
     pub name: &'a str,
@@ -52,7 +52,7 @@ pub struct FdtNode<'b, 'a> {
 /// The borrowed pieces of a node, kept by allocation-backed indexes so a
 /// node can be rebuilt without scanning the structure block again.
 #[cfg(feature = "alloc")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct NodeParts<'a> {
     pub(crate) name: &'a str,
     pub(crate) offset: u32,
@@ -363,7 +363,7 @@ pub(crate) fn all_nodes<'b, 'a: 'b>(
 }
 
 /// A raw property: its name and uninterpreted big-endian payload bytes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct NodeProperty<'a> {
     /// Property name as stored in the strings block.
     pub name: &'a str,
@@ -408,7 +408,7 @@ impl<'a> NodeProperty<'a> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CellSizes {
     pub address_cells: usize,
     pub size_cells: usize,
@@ -425,7 +425,7 @@ impl Default for CellSizes {
 
 /// A physical memory region described by the device tree: a start address
 /// and a size in bytes.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MemoryRegion {
     /// Start address (physical for firmware-described regions).
     pub starting_address: *const u8,
@@ -435,7 +435,7 @@ pub struct MemoryRegion {
 
 /// Iterator over the `reg` entries of one node, decoding address/size
 /// pairs with the node's `#address-cells` / `#size-cells` widths.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct RegIter<'a> {
     stream: FdtData<'a>,
     sizes: CellSizes,

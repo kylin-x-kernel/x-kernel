@@ -22,7 +22,7 @@ triggers:
   normal control flow. Determine reachability from inputs and established
   invariants; an operation proven infallible does not have a legitimate failure
   path. Runtime validation must not be downgraded to `debug_assert!`. The three Clippy lints run at warn; `make clippy` promotes warnings to errors.
-  Not this rule: the pending Dylint lint `untyped_error_result` ([pending](pending.md)) owns unit/string
+  Not this rule: the Dylint lint `untyped_error_result` ([CG-010](CG-010-typed-error-result.md)) owns unit/string
   `Result` error types, and
   [CG-036](CG-036-ordinary-error-propagation.md) owns ordinary `?`
   propagation style; this rule owns terminating or omitting runtime validation

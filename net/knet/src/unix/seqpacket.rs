@@ -96,7 +96,7 @@ struct Pending {
 /// `Unlistened` is distinct from `AcceptShutdown`: the first must fail `accept`
 /// immediately, while the second still lets `accept` drain connections queued
 /// before `shutdown(SHUT_RD)`.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum ListenerState {
     Unlistened,
     Listening,

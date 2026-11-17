@@ -756,6 +756,11 @@ interval and an `Option<TimerInstant>` deadline — never bare unitless
 integers. POSIX timers reuse `ITimer` as their specification and add
 notification and overrun state.
 
+For explicit POSIX timer notifications, `ksyscall` copies the complete
+`sigevent` and converts its `sigval` to pointer-sized opaque bits. `ktimer`
+keeps those bits in `TimerSigValue` and `TimerSignal`; `ksignal` builds the
+outbound `siginfo` union using its full-width pointer member.
+
 ## Execution context
 
 - `ProcessTimerManager` is serialized by the owning `ProcessRuntime`'s

@@ -12,7 +12,7 @@ use memaddr::VirtAddr;
 /// This is the stable boundary type for trap and user-runtime callers. It
 /// carries only CPU/user-visible fault facts; VMA-derived
 /// backing offsets are attached when it is converted into [`FaultContext`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FaultInput {
     address: VirtAddr,
     access_flags: PageFaultFlags,
@@ -47,7 +47,7 @@ impl FaultInput {
 ///
 /// `FaultContext` starts from [`FaultInput`] and is enriched with VMA-derived
 /// backing coordinates before it is passed to runtime/backing handlers.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FaultContext {
     address: VirtAddr,
     access_flags: PageFaultFlags,
@@ -121,7 +121,7 @@ impl FaultContext {
 }
 
 /// Result of resolving a page fault against a VMA/backing object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FaultOutcome {
     /// Fault was resolved and the mapping is now present.
     Resolved,

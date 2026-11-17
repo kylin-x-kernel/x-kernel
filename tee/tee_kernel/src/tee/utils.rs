@@ -14,8 +14,8 @@ pub(super) const fn bit(nr: u32) -> u32 {
     bit32(nr)
 }
 
-#[inline]
 #[cfg(unittest)]
+#[inline]
 pub(crate) fn shift_u32(v: u32, shift: u32) -> u32 {
     v << shift
 }

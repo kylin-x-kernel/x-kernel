@@ -271,39 +271,39 @@ fn progress_deadlines_remain_in_timer_range() {
 
 #[def_test]
 fn repeated_demand_does_not_postpone_progress_deadline() {
-    let deadline = progress_rearm_deadline(0, None, 0).unwrap();
+    let deadline_ns = progress_rearm_deadline(0, None, 0).unwrap();
     // Each call models a demanded pass while the GP remains active. No wall
     // clock or scheduling assumption is needed to test the production decision.
-    for now in [0, 1, deadline / 2, deadline - 1] {
-        assert_eq!(progress_rearm_deadline(now, Some(deadline), now), None);
+    for now_ns in [0, 1, deadline_ns / 2, deadline_ns - 1] {
+        assert_eq!(progress_rearm_deadline(now_ns, Some(deadline_ns), now_ns), None);
     }
     assert_eq!(
-        progress_rearm_deadline(deadline, Some(deadline), deadline),
-        Some(deadline + PROGRESS_INTERVAL_NS)
+        progress_rearm_deadline(deadline_ns, Some(deadline_ns), deadline_ns),
+        Some(deadline_ns + PROGRESS_INTERVAL_NS)
     );
     assert_eq!(
-        progress_rearm_deadline(deadline + 1, Some(deadline), deadline + 1),
-        Some(deadline + 1 + PROGRESS_INTERVAL_NS)
+        progress_rearm_deadline(deadline_ns + 1, Some(deadline_ns), deadline_ns + 1),
+        Some(deadline_ns + 1 + PROGRESS_INTERVAL_NS)
     );
 }
 
 #[def_test]
 fn slow_progress_round_rearms_from_completion_time() {
-    let interval = PROGRESS_INTERVAL_NS;
-    let finished_ns = 4 * interval;
+    let interval_ns = PROGRESS_INTERVAL_NS;
+    let finished_ns = 4 * interval_ns;
     // Both initial assistance and a due round can take longer than an interval.
     assert_eq!(
         progress_rearm_deadline(0, None, finished_ns),
-        Some(5 * interval)
+        Some(5 * interval_ns)
     );
     assert_eq!(
-        progress_rearm_deadline(interval, Some(interval), finished_ns),
-        Some(5 * interval)
+        progress_rearm_deadline(interval_ns, Some(interval_ns), finished_ns),
+        Some(5 * interval_ns)
     );
     // An early demanded pass performed no timed assistance. Even if its work
     // crossed the old deadline, preserve that obligation for the next pass.
     assert_eq!(
-        progress_rearm_deadline(interval - 1, Some(interval), finished_ns),
+        progress_rearm_deadline(interval_ns - 1, Some(interval_ns), finished_ns),
         None
     );
 }

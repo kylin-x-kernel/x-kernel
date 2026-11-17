@@ -61,21 +61,21 @@ fn duplicate_deadlines_remove_by_identity_and_preserve_minimum() {
 fn removed_node_can_change_deadline_and_reuse_its_link() {
     let node = TimerNode::new(setting(100));
     let mut index = TimerIndex::new();
-    for deadline in [100, 0, u64::MAX, 10, 1] {
+    for deadline_ns in [100, 0, u64::MAX, 10, 1] {
         // SAFETY: the previous iteration drained this node. This test
         // exclusively accesses it, and its address remains stable.
-        unsafe { node.replace_deadline(setting(deadline)) };
+        unsafe { node.replace_deadline(setting(deadline_ns)) };
         // SAFETY: The stack node stays live and unmoved until this index
         // and all removed handles have finished accessing it.
         let pending = unsafe { UnsafeRef::from_raw(&node) };
         // SAFETY: The node is unlinked, has its prepared deadline, and this
         // sequential test excludes all concurrent node access.
         unsafe { index.insert(pending) };
-        assert_eq!(index.earliest_deadline_ns(), Some(deadline));
-        if deadline > 0 {
-            assert!(index.pop_due(deadline - 1).is_none());
+        assert_eq!(index.earliest_deadline_ns(), Some(deadline_ns));
+        if deadline_ns > 0 {
+            assert!(index.pop_due(deadline_ns - 1).is_none());
         }
-        let removed = index.pop_due(deadline).unwrap();
+        let removed = index.pop_due(deadline_ns).unwrap();
         assert!(ptr::eq(removed.as_ref(), &node));
         assert!(!node.link.is_linked());
         assert!(cache_is_valid(&index));
@@ -96,8 +96,8 @@ fn index_drop_unlinks_but_does_not_destroy_borrowed_nodes() {
     }
     assert!(!node.link.is_linked());
     // SAFETY: index destruction finished; no other node access exists.
-    let deadline = unsafe { node.deadline().deadline_ns() };
-    assert_eq!(deadline, 7);
+    let deadline_ns = unsafe { node.deadline().deadline_ns() };
+    assert_eq!(deadline_ns, 7);
 }
 
 #[def_test]
@@ -113,17 +113,17 @@ fn repeated_reordering_matches_reference_minimum() {
             let removed = unsafe { index.remove(&nodes[slot]) };
             assert!(ptr::eq(removed.as_ref(), &nodes[slot]));
         }
-        let deadline = ((step * 31) % 127) as u64;
+        let deadline_ns = ((step * 31) % 127) as u64;
         // SAFETY: this node is now unlinked, has a stable stack address,
         // and is exclusively accessed by this sequential test.
-        unsafe { nodes[slot].replace_deadline(setting(deadline)) };
+        unsafe { nodes[slot].replace_deadline(setting(deadline_ns)) };
         // SAFETY: The stack node stays live and unmoved until this index
         // and all removed handles have finished accessing it.
         let pending = unsafe { UnsafeRef::from_raw(&nodes[slot]) };
         // SAFETY: The node is unlinked, has its prepared deadline, and this
         // sequential test excludes all concurrent node access.
         unsafe { index.insert(pending) };
-        deadlines[slot] = Some(deadline);
+        deadlines[slot] = Some(deadline_ns);
         assert_eq!(
             index.earliest_deadline_ns(),
             deadlines.iter().flatten().copied().min()
@@ -134,9 +134,9 @@ fn repeated_reordering_matches_reference_minimum() {
     let mut drained = 0;
     while let Some(node) = index.pop_due(u64::MAX) {
         // SAFETY: removed node remains backed by nodes; no writer exists.
-        let deadline = unsafe { node.deadline().deadline_ns() };
-        assert!(deadline >= previous);
-        previous = deadline;
+        let deadline_ns = unsafe { node.deadline().deadline_ns() };
+        assert!(deadline_ns >= previous);
+        previous = deadline_ns;
         drained += 1;
         assert!(cache_is_valid(&index));
     }

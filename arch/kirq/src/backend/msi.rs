@@ -15,7 +15,7 @@ use crate::{Hwirq, IrqAffinity, Virq};
 use crate::{IrqController, IrqDesc, IrqFlags, IrqTrigger, MSI_DOMAIN};
 
 /// Architecture-neutral MSI message programmed into a device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MsiMessage {
     address: u64,
     data: u32,
@@ -39,14 +39,14 @@ impl MsiMessage {
 }
 
 /// MSI interrupt style requested from the active backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MsiKind {
     /// PCI MSI-X table entry.
     PciMsix,
 }
 
 /// Capability token required to call backend-only MSI operations.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MsiBackendToken {
     _private: (),
 }
@@ -64,8 +64,8 @@ impl MsiBackendToken {
 /// be cloned or reconstructed from a hardware number. Published ownership lives
 /// in the Line, not in the device-visible allocation handle. Drop deliberately
 /// does not release hardware: dropping a lookup owner proves no device quiescence.
-#[derive(Debug)]
 #[must_use = "MSI reservations must be published or explicitly returned to the backend"]
+#[derive(Debug)]
 pub struct MsiReservation {
     hwirq: Hwirq,
 }
@@ -88,7 +88,7 @@ impl MsiReservation {
 ///
 /// Dropping this handle does not free the reservation. The resource owner must
 /// stop the device, remove its actions, and explicitly call [`free_msix`].
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct MsiAllocation {
     virq: Virq,
     message: MsiMessage,

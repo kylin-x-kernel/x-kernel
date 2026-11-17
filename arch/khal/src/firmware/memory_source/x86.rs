@@ -13,7 +13,7 @@ use super::{
 };
 use crate::mem::{ReservedKind, ReservedRegion, ReservedSource};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum X86BootMemoryKind {
     Ram,
     Reserved {

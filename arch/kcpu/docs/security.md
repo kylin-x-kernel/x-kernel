@@ -250,6 +250,10 @@ field of the next task. The callee-saved register layout is consistent with `Con
 **Why it is safe**: the layouts of `FpState`/`FpuState`/`FxStateBlock` are guaranteed by
 `static_assertions` or `repr(C, align(...))` to match what the instructions expect.
 
+On aarch64, the 32 128-bit vector registers occupy the first 512 bytes; `fpcr` and
+`fpsr` are 32-bit fields at offsets 512 and 516. The naked assembly must access
+both fields as 32-bit words and must not read or write the trailing alignment padding.
+
 ### 5a. x86_64 signal-frame FP/SIMD restore (`x86_64/xstate.rs`)
 
 `rt_sigreturn` reads `ucontext` and the FP bytes with a checked copy at the syscall boundary.

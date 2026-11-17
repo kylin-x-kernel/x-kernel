@@ -18,7 +18,7 @@ use crate::NodeIndex;
 use crate::{Cells, FdtNode, LinuxFdt, NodeProperty, PropertyError};
 
 /// Why a phandle reference or interrupt specifier could not be resolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferenceError {
     /// A required property is missing or malformed.
     Property(PropertyError),
@@ -35,7 +35,7 @@ impl From<PropertyError> for ReferenceError {
 }
 
 /// A resolved reference: a target node and its argument cells.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct NodeReference<'b, 'a> {
     /// Referenced node.
     pub node: FdtNode<'b, 'a>,
@@ -44,7 +44,7 @@ pub struct NodeReference<'b, 'a> {
 }
 
 /// One interrupt specifier: the controller plus its raw binding cells.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct InterruptSpec<'b, 'a> {
     /// Controller named by the specifier.
     pub controller: FdtNode<'b, 'a>,

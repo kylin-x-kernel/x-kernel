@@ -233,7 +233,7 @@ impl DentryAlias {
 }
 
 /// Strong reference to a VFS directory entry.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Dentry(Arc<DentryInner>);
 
 /// A dentry view protected by the VFS namespace operation that created it.

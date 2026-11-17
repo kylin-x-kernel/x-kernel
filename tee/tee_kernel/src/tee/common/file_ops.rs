@@ -45,7 +45,7 @@ fn open_path(
     )
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct FileVariant {
     pub fd: isize,
 }

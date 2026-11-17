@@ -249,9 +249,9 @@ pub(super) fn tee_time_set_ta_time(uuid: &TEE_UUID, time: &TeeTime) -> TeeResult
 
 /// Sleep until the delay completes or this thread observes unmasked cancellation.
 /// No session state borrow remains live across the scheduler sleep.
-pub(super) fn sys_tee_scn_wait(milliseconds_delay: u32) -> TeeResult {
+pub(super) fn sys_tee_scn_wait(delay_ms: u32) -> TeeResult {
     let end = monotonic_time()
-        .checked_add(TimeSpan::from_millis(milliseconds_delay as u64))
+        .checked_add(TimeSpan::from_millis(delay_ms as u64))
         .ok_or(TEE_ERROR_OVERFLOW)?;
     loop {
         let cancellation = super::tee_cancel::cancellation_wait_deadline()?;

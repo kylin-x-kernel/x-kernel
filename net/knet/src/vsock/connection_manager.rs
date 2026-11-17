@@ -26,7 +26,7 @@ pub(crate) const VSOCK_RX_BUFFER_SIZE: usize = 256 * 1024;
 const VSOCK_ACCEPT_QUEUE_SIZE: usize = 128; // accept queue size
 
 /// connection states
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConnectionState {
     Idle,
     Listening,
@@ -928,8 +928,8 @@ impl PollBackoff {
 
     fn snapshot(&self) -> (u64, u64) {
         let idle = self.consecutive_idle.load(Ordering::Relaxed);
-        let interval = self.next_interval().as_micros() as u64;
-        (idle, interval)
+        let interval_us = self.next_interval().as_micros() as u64;
+        (idle, interval_us)
     }
 }
 

@@ -703,6 +703,16 @@ impl Ext4SbInfo {
         Ok(true)
     }
 
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        vec_shift_in_loop,
+        reason = "CG-009-vec-shift-in-loop: extent path depth is bounded by the on-disk tree \
+                  depth (at most five levels)"
+    )]
     fn prune_extent_path_leaf(
         &self,
         inode: &Ext4Inode,
@@ -2288,17 +2298,23 @@ fn validate_mutable_extents(
 
 // Merges adjacent extents that are logically and physically contiguous.
 fn merge_adjacent_extents(extents: &mut Vec<MutableExtent>) -> Ext4Result<()> {
-    let mut index = 0usize;
-    while index + 1 < extents.len() {
-        let left = extents[index];
-        let right = extents[index + 1];
+    if extents.is_empty() {
+        return Ok(());
+    }
+    let mut write = 0usize;
+    for read in 1..extents.len() {
+        let left = extents[write];
+        let right = extents[read];
         if left.can_merge(right)? {
-            extents[index] = left.merge(right)?;
-            extents.remove(index + 1);
+            extents[write] = left.merge(right)?;
         } else {
-            index += 1;
+            write += 1;
+            if write != read {
+                extents[write] = right;
+            }
         }
     }
+    extents.truncate(write + 1);
     debug_assert!(
         extents
             .windows(2)

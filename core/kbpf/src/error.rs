@@ -5,7 +5,7 @@
 //! Error types for the BPF execution engine.
 
 /// Errors produced by the BPF interpreter and supporting code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     /// A program byte slice has a length that is not a multiple of the
     /// 8-byte instruction slot size (see [`crate::insn::SLOT_SIZE`]).

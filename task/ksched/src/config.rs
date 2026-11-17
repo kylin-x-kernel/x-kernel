@@ -11,9 +11,13 @@ const fn us_to_ns(us: usize) -> u64 {
 }
 
 const fn clamp_runtime_ns(runtime_us: usize, period_us: usize) -> u64 {
-    let period = us_to_ns(period_us);
-    let runtime = us_to_ns(runtime_us);
-    if runtime > period { period } else { runtime }
+    let period_ns = us_to_ns(period_us);
+    let runtime_ns = us_to_ns(runtime_us);
+    if runtime_ns > period_ns {
+        period_ns
+    } else {
+        runtime_ns
+    }
 }
 
 /// Default EEVDF request length (`SCHED_FAIR_REQUEST_US`).

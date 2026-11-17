@@ -13,7 +13,7 @@ use crate::{
 
 /// Represents a single stack frame in the unwound stack.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Frame {
     /// The frame pointer of the previous stack frame.
     pub fp: usize,

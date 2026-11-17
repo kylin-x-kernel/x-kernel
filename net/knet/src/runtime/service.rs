@@ -50,9 +50,9 @@ use crate::{
 const IPV4_HEADER_LEN: usize = 20;
 const RX_INGRESS_BATCH_PACKETS: usize = 64;
 const POLL_ROUND_TIME_LIMIT: TimeSpan = TimeSpan::from_millis(1);
-const POLL_TIME_CHECK_INTERVAL_WORK_ITEMS: usize = 32;
+const WORK_ITEMS_PER_POLL_TIME_CHECK: usize = 32;
 const IPV4_REASSEMBLY_TIMER_PENDING: u64 = 1;
-const IPV4_REASSEMBLY_DEADLINE_OFFSET: u64 = 2;
+const IPV4_REASSEMBLY_DEADLINE_OFFSET_US: u64 = 2;
 
 #[derive(Default)]
 struct SmoltcpIngressProgress {
@@ -90,7 +90,7 @@ fn ipv4_reassembly_timer_state(next: Option<MonotonicInstant>) -> u64 {
     }
     u64::try_from(next.span_since_origin().as_micros())
         .unwrap_or(u64::MAX)
-        .saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET)
+        .saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET_US)
 }
 
 struct NetworkTimer;
@@ -291,7 +291,7 @@ impl Service {
             if stack_tx_passes >= stack_tx_pass_limit || has_reached_time_limit {
                 break;
             }
-            if stack_tx_passes.is_multiple_of(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
+            if stack_tx_passes.is_multiple_of(WORK_ITEMS_PER_POLL_TIME_CHECK)
                 && has_reached_poll_round_time_limit(round_started_at, monotonic_time())
             {
                 has_reached_time_limit = true;
@@ -436,7 +436,7 @@ impl Service {
         }
 
         while progress.packets < budget {
-            if packets_since_time_check >= POLL_TIME_CHECK_INTERVAL_WORK_ITEMS {
+            if packets_since_time_check >= WORK_ITEMS_PER_POLL_TIME_CHECK {
                 packets_since_time_check = 0;
                 if has_reached_poll_round_time_limit(round_started_at, monotonic_time()) {
                     progress.has_reached_time_limit = true;
@@ -461,7 +461,7 @@ impl Service {
             let batch_budget = budget
                 .saturating_sub(progress.packets)
                 .min(RX_INGRESS_BATCH_PACKETS)
-                .min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
+                .min(WORK_ITEMS_PER_POLL_TIME_CHECK)
                 .min(router.ingress_capacity());
             if batch_budget == 0 {
                 let neighbor_events = router.take_neighbor_events();
@@ -785,11 +785,11 @@ impl Service {
             return;
         }
 
-        let deadline = u64::try_from(next.total_micros())
+        let deadline_us = u64::try_from(next.total_micros())
             .unwrap_or(u64::MAX)
             .saturating_add(1);
         self.timeout_deadline_micros
-            .store(deadline, Ordering::Release);
+            .store(deadline_us, Ordering::Release);
     }
 
     fn update_ipv4_reassembly_timeout(&self, next: Option<MonotonicInstant>) {
@@ -830,22 +830,22 @@ impl Service {
 
     pub(crate) fn handle_timer_tick(&self) {
         let current_micros = u64::try_from(now().total_micros()).unwrap_or(0);
-        let protocol_deadline = self.timeout_deadline_micros.load(Ordering::Acquire);
-        let has_protocol_expired = protocol_deadline != 0
-            && current_micros.saturating_add(1) >= protocol_deadline
+        let protocol_deadline_us = self.timeout_deadline_micros.load(Ordering::Acquire);
+        let has_protocol_expired = protocol_deadline_us != 0
+            && current_micros.saturating_add(1) >= protocol_deadline_us
             && self
                 .timeout_deadline_micros
-                .compare_exchange(protocol_deadline, 0, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange(protocol_deadline_us, 0, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok();
 
-        let reassembly_deadline = self.ipv4_reassembly_deadline_micros.load(Ordering::Acquire);
-        let has_reassembly_expired = reassembly_deadline > IPV4_REASSEMBLY_TIMER_PENDING
-            && current_micros.saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET)
-                >= reassembly_deadline
+        let reassembly_deadline_us = self.ipv4_reassembly_deadline_micros.load(Ordering::Acquire);
+        let has_reassembly_expired = reassembly_deadline_us > IPV4_REASSEMBLY_TIMER_PENDING
+            && current_micros.saturating_add(IPV4_REASSEMBLY_DEADLINE_OFFSET_US)
+                >= reassembly_deadline_us
             && self
                 .ipv4_reassembly_deadline_micros
                 .compare_exchange(
-                    reassembly_deadline,
+                    reassembly_deadline_us,
                     IPV4_REASSEMBLY_TIMER_PENDING,
                     Ordering::AcqRel,
                     Ordering::Acquire,
@@ -1361,7 +1361,7 @@ fn poll_smoltcp_ingress_budgeted(
     while progress.packets < budget_packets {
         if progress
             .packets
-            .is_multiple_of(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS)
+            .is_multiple_of(WORK_ITEMS_PER_POLL_TIME_CHECK)
             && progress.packets > 0
             && has_reached_poll_round_time_limit(round_started_at, monotonic_time())
         {
@@ -1430,7 +1430,7 @@ fn dispatch_tx_budgeted(
     let mut has_reached_time_limit = false;
 
     while remaining > 0 {
-        let chunk = remaining.min(POLL_TIME_CHECK_INTERVAL_WORK_ITEMS);
+        let chunk = remaining.min(WORK_ITEMS_PER_POLL_TIME_CHECK);
         let (dispatched, _) = router.dispatch_budgeted(timestamp, chunk);
         work_done += dispatched;
         remaining = remaining.saturating_sub(dispatched);
@@ -1509,18 +1509,27 @@ fn ipv4_transition_events(
     routes_before: Vec<Rule>,
     routes_after: &[Rule],
 ) -> Vec<NetworkEvent> {
-    let mut added_routes = routes_after.to_vec();
+    // Each surviving route consumes the first still-unmatched equal entry, so
+    // duplicates cancel one-for-one and the remaining order is preserved.
+    let mut is_unchanged = vec![false; routes_after.len()];
     let mut removed_routes = Vec::new();
     for route in routes_before {
-        if let Some(index) = added_routes
+        if let Some(index) = routes_after
             .iter()
-            .position(|candidate| *candidate == route)
+            .zip(&is_unchanged)
+            .position(|(candidate, &is_matched)| !is_matched && *candidate == route)
         {
-            added_routes.remove(index);
+            is_unchanged[index] = true;
         } else {
             removed_routes.push(route);
         }
     }
+    let mut added_routes: Vec<Rule> = routes_after
+        .iter()
+        .zip(&is_unchanged)
+        .filter(|&(_, &is_matched)| !is_matched)
+        .map(|(route, _)| *route)
+        .collect();
 
     // Preserve the cascade order reported by the address set: explicitly
     // removed sources first, in their removal order, followed by any other
@@ -1547,15 +1556,11 @@ fn ipv4_transition_events(
     }
 
     let take_routes = |routes: &mut Vec<Rule>, snapshot: &Ipv4AddrSnapshot, deleting: bool| {
-        let mut owned = Vec::new();
-        let mut index = 0;
-        while index < routes.len() {
-            if routes[index].is_derived_from_address(snapshot.dev, snapshot.entry) {
-                owned.push(routes.remove(index));
-            } else {
-                index += 1;
-            }
-        }
+        let mut owned: Vec<Rule> = routes
+            .extract_if(.., |route| {
+                route.is_derived_from_address(snapshot.dev, snapshot.entry)
+            })
+            .collect();
         // The snapshot's storage order is a lookup concern, not an
         // announcement order.  Linux installs and removes the same set of
         // derived routes in different sequences; apply the matching one.

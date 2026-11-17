@@ -142,7 +142,7 @@ const _: () = assert!(core::mem::size_of::<PageMeta>() == 16);
 ///
 /// Unreferenced pages may still belong to a raw allocator user, heap or PCP.
 /// A snapshot neither acquires ownership nor authorizes content access.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferenceState {
     /// No reference-protocol holders; this does not mean the page is free.
     Unreferenced,

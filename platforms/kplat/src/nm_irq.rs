@@ -34,7 +34,7 @@ use kplat_macros::device_interface;
 pub type NmiCb = fn();
 
 /// Runtime NMI capability reported by the platform.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NmiMode {
     /// True hardware NMI (GICv3.3 — cannot be masked by IRQ disable).
     Hardware,

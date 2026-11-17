@@ -13,7 +13,10 @@ use xmas_elf::{
     program::{ProgramHeader32, ProgramHeader64},
 };
 
-use crate::auxv::{AuxEntry, AuxType};
+use crate::{
+    ElfError,
+    auxv::{AuxEntry, AuxType},
+};
 
 pub struct ElfHeadersBuilder<'a>(ElfHeaders<'a>);
 impl<'a> ElfHeadersBuilder<'a> {
@@ -28,10 +31,10 @@ impl<'a> ElfHeadersBuilder<'a> {
     ///
     /// Returns an error when `input` is shorter than the ELF header, lacks the
     /// ELF magic, has an unsupported class, or is not aligned as required.
-    pub fn new(input: &'a [u8]) -> Result<Self, &'static str> {
+    pub fn new(input: &'a [u8]) -> Result<Self, ElfError> {
         check_header_alignment(input)?;
         Ok(Self(ElfHeaders {
-            header: xmas_elf::header::parse_header(input)?,
+            header: xmas_elf::header::parse_header(input).map_err(ElfError::InvalidHeader)?,
             ph: Vec::new(),
         }))
     }
@@ -45,24 +48,24 @@ impl<'a> ElfHeadersBuilder<'a> {
     ///
     /// Returns an error when the entry size does not match the ELF class or
     /// when the table range cannot be represented as a `u64` range.
-    pub fn ph_range(&self) -> Result<Range<u64>, &'static str> {
+    pub fn ph_range(&self) -> Result<Range<u64>, ElfError> {
         let start = self.0.header.pt2.ph_offset();
         let entry_size = u64::from(self.0.header.pt2.ph_entry_size());
         let expected_entry_size = match self.0.header.pt1.class() {
             Class::ThirtyTwo => size_of::<ProgramHeader32>() as u64,
             Class::SixtyFour => size_of::<ProgramHeader64>() as u64,
-            Class::None | Class::Other(_) => return Err("Invalid ELF class"),
+            Class::None | Class::Other(_) => return Err(ElfError::InvalidClass),
         };
         if entry_size != expected_entry_size {
-            return Err("Invalid program-header entry size");
+            return Err(ElfError::InvalidProgramHeaderEntrySize);
         }
         let count = u64::from(self.0.header.pt2.ph_count());
         let size = entry_size
             .checked_mul(count)
-            .ok_or("Program-header table size overflows")?;
+            .ok_or(ElfError::ProgramHeaderTableSizeOverflow)?;
         let end = start
             .checked_add(size)
-            .ok_or("Program-header table range overflows")?;
+            .ok_or(ElfError::ProgramHeaderTableRangeOverflow)?;
         Ok(start..end)
     }
 
@@ -77,21 +80,21 @@ impl<'a> ElfHeadersBuilder<'a> {
     /// Returns an error when the ELF class is unsupported, the program-header
     /// entry size or table length is inconsistent with the ELF header, or a
     /// program-header entry cannot be parsed.
-    pub fn build(mut self, ph: &[u8]) -> Result<ElfHeaders<'a>, &'static str> {
+    pub fn build(mut self, ph: &[u8]) -> Result<ElfHeaders<'a>, ElfError> {
         let entry_size = usize::from(self.0.header.pt2.ph_entry_size());
         let expected_entry_size = match self.0.header.pt1.class() {
             Class::ThirtyTwo => size_of::<ProgramHeader32>(),
             Class::SixtyFour => size_of::<ProgramHeader64>(),
-            Class::None | Class::Other(_) => return Err("Invalid ELF class"),
+            Class::None | Class::Other(_) => return Err(ElfError::InvalidClass),
         };
         if entry_size != expected_entry_size {
-            return Err("Invalid program-header entry size");
+            return Err(ElfError::InvalidProgramHeaderEntrySize);
         }
         let expected_len = entry_size
             .checked_mul(usize::from(self.0.header.pt2.ph_count()))
-            .ok_or("Program-header table size overflows")?;
+            .ok_or(ElfError::ProgramHeaderTableSizeOverflow)?;
         if ph.len() != expected_len {
-            return Err("Incomplete program-header table");
+            return Err(ElfError::IncompleteProgramHeaderTable);
         }
 
         self.0.ph = match self.0.header.pt1.class() {
@@ -103,7 +106,7 @@ impl<'a> ElfHeadersBuilder<'a> {
                 .chunks_exact(entry_size)
                 .map(read_program_header64)
                 .collect::<Result<_, _>>()?,
-            Class::None | Class::Other(_) => return Err("Invalid ELF class"),
+            Class::None | Class::Other(_) => return Err(ElfError::InvalidClass),
         };
         Ok(self.0)
     }
@@ -120,7 +123,7 @@ const ELFCLASS64: u8 = 2;
 /// `parse_header` returns `&HeaderPt2_` into `input` through `zero::read`,
 /// which asserts alignment instead of returning an error. Inputs that are too
 /// short or carry an unknown class are left to `parse_header` to reject.
-fn check_header_alignment(input: &[u8]) -> Result<(), &'static str> {
+fn check_header_alignment(input: &[u8]) -> Result<(), ElfError> {
     let Some(pt2) = input.get(size_of::<HeaderPt1>()..) else {
         return Ok(());
     };
@@ -132,15 +135,15 @@ fn check_header_alignment(input: &[u8]) -> Result<(), &'static str> {
     if is_aligned {
         Ok(())
     } else {
-        Err("ELF header buffer is misaligned")
+        Err(ElfError::MisalignedHeader)
     }
 }
 
 /// Copies one ELF32 program-header entry that may start at any byte offset.
-fn read_program_header32(entry: &[u8]) -> Result<ProgramHeader32, &'static str> {
+fn read_program_header32(entry: &[u8]) -> Result<ProgramHeader32, ElfError> {
     let entry: &[u8; size_of::<ProgramHeader32>()] = entry
         .try_into()
-        .map_err(|_| "Truncated program-header entry")?;
+        .map_err(|_| ElfError::TruncatedProgramHeaderEntry)?;
     // SAFETY: `entry` is exactly `size_of::<ProgramHeader32>()` readable,
     // initialized bytes. `xmas_elf` implements `zero::Pod` for this `repr(C)`
     // type of integer fields, so every byte pattern is a valid value, and
@@ -149,10 +152,10 @@ fn read_program_header32(entry: &[u8]) -> Result<ProgramHeader32, &'static str> 
 }
 
 /// Copies one ELF64 program-header entry that may start at any byte offset.
-fn read_program_header64(entry: &[u8]) -> Result<ProgramHeader64, &'static str> {
+fn read_program_header64(entry: &[u8]) -> Result<ProgramHeader64, ElfError> {
     let entry: &[u8; size_of::<ProgramHeader64>()] = entry
         .try_into()
-        .map_err(|_| "Truncated program-header entry")?;
+        .map_err(|_| ElfError::TruncatedProgramHeaderEntry)?;
     // SAFETY: `entry` is exactly `size_of::<ProgramHeader64>()` readable,
     // initialized bytes. `xmas_elf` implements `zero::Pod` for this `repr(C)`
     // type of integer fields, so every byte pattern is a valid value, and
@@ -194,7 +197,7 @@ impl<'a> ElfParser<'a> {
     ///
     /// Returns an error if no segment covers the program-header table offset
     /// or its biased virtual address cannot be represented.
-    pub fn new(headers: &'a ElfHeaders<'a>, bias: usize) -> Result<Self, &'static str> {
+    pub fn new(headers: &'a ElfHeaders<'a>, bias: usize) -> Result<Self, ElfError> {
         let base = if headers.header.pt2.type_().as_type() == xmas_elf::header::Type::SharedObject {
             bias
         } else {
@@ -207,13 +210,13 @@ impl<'a> ElfParser<'a> {
             .find(|header| {
                 header.offset <= ph_offset && ph_offset - header.offset < header.file_size
             })
-            .ok_or("program-header table is not covered by a segment")?;
+            .ok_or(ElfError::ProgramHeaderTableUnmapped)?;
         let phdr = header
             .virtual_addr
             .checked_add(ph_offset - header.offset)
             .and_then(|address| usize::try_from(address).ok())
             .and_then(|address| address.checked_add(base))
-            .ok_or("program-header address overflows")?;
+            .ok_or(ElfError::ProgramHeaderAddressOverflow)?;
         Ok(Self {
             headers,
             base,

@@ -55,7 +55,7 @@ const DIRTY_BITS: usize = DIRTY_WORDS * 64;
 /// reused: a retained [`crate::api::ThreadSignalManager`] can never address a
 /// successor thread's state, which the previous `Weak`-identity scheme
 /// enforced by pointer comparison.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SlotId {
     index: usize,
     generation: u64,

@@ -20,7 +20,7 @@ use super::{
 
 /// One memory window advertised by a PCI host bridge `_CRS` resource
 /// template.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PciHostMemWindow {
     /// CPU physical base address of the window.
     pub base: u64,

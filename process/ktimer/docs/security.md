@@ -98,14 +98,10 @@ No user pointers, MMIO, DMA, FFI, or device input reach this crate; the
 
 ## Unsafe inventory
 
-One unsafe block exists, in `posix_timer.rs`:
-
-| Location | Operation | Invariant |
-|---|---|---|
-| `TimerSigValue::from_raw` | read of `k_sigval.sival_ptr` | `k_sigval` is an ABI carrier union; the pointer view is read solely to preserve the raw user bits and is never dereferenced |
-
-There is no FFI or inline assembly; architecture time reads come through
-`khal`/`ktime`.
+This crate has no unsafe blocks, FFI, or inline assembly. The syscall boundary
+reads the complete user-copied `sigval` as opaque pointer-sized bits;
+`TimerSigValue` and `TimerSignal` carry those bits without accessing the union.
+Architecture time reads come through `khal`/`ktime`.
 
 ## Threat analysis
 

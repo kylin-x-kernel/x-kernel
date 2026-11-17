@@ -411,6 +411,8 @@ impl TaskContext {
 /// Floating-point access must be enabled on this CPU. Prevent task switches
 /// while saving so all registers belong to the same task; the destination
 /// state must remain exclusively borrowed for the assembly writes.
+// SAFETY: The FP-enabled caller passes a writable FpuState in a0; the naked body only stores FP
+// registers, FCC, and FCSR before returning.
 #[cfg(feature = "fp-simd")]
 #[unsafe(naked)]
 unsafe extern "C" fn save_fp_registers(fpu: &mut FpuState) {
@@ -433,6 +435,8 @@ unsafe extern "C" fn save_fp_registers(fpu: &mut FpuState) {
 /// Floating-point access must be enabled on this CPU, and the source must
 /// contain valid saved or initial FP state. Prevent task switches and ensure
 /// no live kernel FP values depend on the registers replaced by this call.
+// SAFETY: The FP-enabled caller passes a populated FpuState in a0; the naked body only reloads
+// FP registers, FCC, and FCSR before returning.
 #[cfg(feature = "fp-simd")]
 #[unsafe(naked)]
 unsafe extern "C" fn restore_fp_registers(fpu: &FpuState) {
@@ -457,6 +461,8 @@ unsafe extern "C" fn restore_fp_registers(fpu: &FpuState) {
 /// resume address established by `TaskContext::init` or an earlier switch.
 /// Keep both contexts and stacks live until their saved continuations finish;
 /// FP state and address-space state must already match the next task.
+// SAFETY: The scheduler passes valid current and next TaskContext pointers in a0/a1; the naked
+// body only swaps LoongArch callee-saved registers, ra, and sp.
 #[unsafe(naked)]
 unsafe extern "C" fn context_switch(_current_task: &mut TaskContext, _next_task: &TaskContext) {
     naked_asm!(

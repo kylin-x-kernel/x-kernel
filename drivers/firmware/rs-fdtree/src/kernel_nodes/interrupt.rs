@@ -7,7 +7,7 @@
 use crate::node::FdtNode;
 
 /// Represents the node with interrupt-controller property
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct InterruptController<'b, 'a> {
     pub(crate) node: FdtNode<'b, 'a>,
 }

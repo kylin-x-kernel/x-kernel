@@ -49,8 +49,8 @@ kcpu_slot::cpu_slot_cell! {
 /// stack there and using `tf` in place as the temporary trap stack (TSS.rsp0
 /// points to the end of `tf`). Keeping both in this struct lets the user return
 /// avoid copying the whole trap frame around the user window.
-#[derive(Debug, Clone, Copy)]
 #[repr(C, align(16))]
+#[derive(Clone, Copy, Debug)]
 pub struct UserContext {
     kernel_rsp: u64,
     tf: TrapFrame,
@@ -64,8 +64,8 @@ pub struct UserContext {
 ///
 /// Segment bases accompany the x87/SSE/YMM snapshot inherited by fork/clone.
 /// Signal delivery instead exports the Linux FP payload through `fpregs`.
-#[derive(Debug, Clone, Copy)]
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct UserRestorableContext {
     fs_base: u64,
     gs_base: u64,
@@ -296,7 +296,7 @@ impl UserContext {
 impl_user_context_deref!(TrapFrame, tf);
 
 /// Information about an exception that occurred in user space.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ExceptionInfo {
     /// The exception vector.
     pub vector: u8,

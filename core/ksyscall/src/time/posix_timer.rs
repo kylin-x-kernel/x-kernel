@@ -39,12 +39,16 @@ fn parse_sigevent(sevp: UserConstPtr<k_sigevent>) -> KResult<PosixTimerCreateNot
     };
 
     let sevp = sevp.read_vm()?;
+    // SAFETY: UserRead copied the complete sigevent record from userspace,
+    // including every byte of sigev_value. The pointer arm is read only to
+    // preserve those opaque bits; it is never dereferenced.
+    let value_bits = unsafe { sevp.sigev_value.sival_ptr as usize };
     match sevp.sigev_notify as u32 {
         SIGEV_NONE => Ok(PosixTimerCreateNotify::None),
         SIGEV_SIGNAL => Ok(PosixTimerCreateNotify::Signal {
             signo: Signo::from_raw(sevp.sigev_signo).ok_or(KError::InvalidInput)?,
             target_tid: None,
-            value: PosixTimerSigValue::Explicit(TimerSigValue::from_raw(sevp.sigev_value)),
+            value: PosixTimerSigValue::Explicit(TimerSigValue::from_raw_bits(value_bits)),
         }),
         SIGEV_THREAD_ID => {
             // SAFETY: `_sigev_un._tid` is the ABI-defined field for
@@ -67,7 +71,7 @@ fn parse_sigevent(sevp: UserConstPtr<k_sigevent>) -> KResult<PosixTimerCreateNot
             Ok(PosixTimerCreateNotify::Signal {
                 signo: Signo::from_raw(sevp.sigev_signo).ok_or(KError::InvalidInput)?,
                 target_tid: Some(tid),
-                value: PosixTimerSigValue::Explicit(TimerSigValue::from_raw(sevp.sigev_value)),
+                value: PosixTimerSigValue::Explicit(TimerSigValue::from_raw_bits(value_bits)),
             })
         }
         _ => Err(KError::InvalidInput),

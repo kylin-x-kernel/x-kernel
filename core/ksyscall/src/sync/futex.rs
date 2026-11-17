@@ -303,7 +303,7 @@ pub(crate) fn sys_futex(
 ///
 /// `FUTEX_WAIT` stores `u32::MAX` in `bitset`. The value lives only in this
 /// crate; `kprocess` stores it in an opaque per-thread slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FutexWaitRestartBlock {
     uaddr: usize,
     expected: u32,

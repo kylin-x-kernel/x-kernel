@@ -62,7 +62,9 @@ not merely signal consumption. Default continue actions cannot suppress this
 resolution, and signal return must not restart an already restored context.
 
 `exit_robust_list` reads the registered userspace head and linked nodes through
-`read_vm`; failed reads stop the walk. Pointer low-bit tags distinguish PI
+`UserConstPtr::read_vm`; `RobustListHead` and `RobustList` implement `UserRead`
+because their pointer and integer fields admit every bit pattern. Failed reads
+stop the walk. Pointer low-bit tags distinguish PI
 entries. Both kinds are marked, but only ordinary entries use plain wake.
 The walk stops at the sentinel or `ROBUST_LIST_LIMIT`, then separately handles
 a nonnull pending entry.

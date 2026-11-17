@@ -100,8 +100,8 @@ fn raw_zst_and_empty_slice_preserve_alignment() {
 
 #[def_test]
 fn copied_slice_preserves_source_and_alignment() {
-    #[derive(Clone, Copy, Debug, PartialEq)]
     #[repr(align(256))]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     struct Aligned(u32);
     let source = [Aligned(3), Aligned(7)];
     let mut owned = KBox::from_slice_with_flags(&source, AllocFlags::NOWAIT).unwrap();

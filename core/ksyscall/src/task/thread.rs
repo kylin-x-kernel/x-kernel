@@ -14,8 +14,8 @@ use kerrno::{KError, KResult};
 /// It is only avaliable on x86_64, and is not convenient
 /// to generate automatically via c_to_rust binding.
 #[cfg(target_arch = "x86_64")]
-#[derive(Debug, Eq, PartialEq, num_enum::TryFromPrimitive)]
 #[repr(i32)]
+#[derive(Debug, Eq, PartialEq, num_enum::TryFromPrimitive)]
 enum ArchPrctlCode {
     /// Set the GS segment base
     SetGs    = 0x1001,
@@ -40,8 +40,6 @@ pub(crate) fn sys_arch_prctl(
     code: i32,
     addr: usize,
 ) -> KResult<isize> {
-    use osvm::VirtMutPtr;
-
     let code = ArchPrctlCode::try_from(code).map_err(|_| KError::InvalidInput)?;
     debug!("sys_arch_prctl: code = {code:?}, addr = {addr:#x}");
 
@@ -49,7 +47,7 @@ pub(crate) fn sys_arch_prctl(
         // According to Linux implementation, SetFs & SetGs does not return
         // error at all
         ArchPrctlCode::GetFs => {
-            (addr as *mut usize).write_vm(uctx.tls())?;
+            posix_types::UserPtr::<usize>::from(addr).write_vm(uctx.tls())?;
             Ok(0)
         }
         ArchPrctlCode::SetFs => {
@@ -57,7 +55,7 @@ pub(crate) fn sys_arch_prctl(
             Ok(0)
         }
         ArchPrctlCode::GetGs => {
-            (addr as *mut usize).write_vm(uctx.gs_base as _)?;
+            posix_types::UserPtr::<usize>::from(addr).write_vm(uctx.gs_base as _)?;
             Ok(0)
         }
         ArchPrctlCode::SetGs => {

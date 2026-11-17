@@ -12,7 +12,6 @@ use ktime_types::{BoottimeInstant, MonotonicInstant, ProcessCpuInstant, SystemTi
 use linux_raw_sys::general::{
     CLOCK_BOOTTIME, CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_REALTIME,
 };
-use posix_types::k_sigval;
 
 use crate::{
     Pid, Tid,
@@ -152,17 +151,9 @@ pub struct TimerSigValue {
 }
 
 impl TimerSigValue {
-    /// Captures the raw bits of a user-provided `sigval`.
-    ///
-    /// The pointer view is read only to preserve the bit pattern; it is
-    /// never dereferenced (see the `SAFETY` note at the read).
-    pub fn from_raw(value: k_sigval) -> Self {
-        Self {
-            // SAFETY: `k_sigval` is an ABI carrier union. Reading the pointer
-            // view preserves the raw user-provided bits regardless of which
-            // union field userspace conceptually initialized.
-            raw_bits: unsafe { value.sival_ptr as usize },
-        }
+    /// Wraps the complete pointer-sized bits of a user-provided `sigval`.
+    pub fn from_raw_bits(raw_bits: usize) -> Self {
+        Self { raw_bits }
     }
 
     pub(crate) fn from_timer_id(timer_id: i32) -> Self {
@@ -171,14 +162,12 @@ impl TimerSigValue {
         }
     }
 
-    pub(crate) fn into_raw(self) -> k_sigval {
-        k_sigval {
-            sival_ptr: self.raw_bits as *mut _,
-        }
+    pub(crate) fn raw_bits(self) -> usize {
+        self.raw_bits
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum PosixTimerClock {
     Realtime,
     Monotonic,
@@ -506,7 +495,7 @@ impl PosixTimer {
             signo,
             timer_id,
             overrun.min(i32::MAX as u32) as i32,
-            value.into_raw(),
+            value.raw_bits(),
             self.signal_seq,
             self.spec.is_periodic(),
         )?;

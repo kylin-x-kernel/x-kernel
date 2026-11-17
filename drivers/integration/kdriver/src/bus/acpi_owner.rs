@@ -34,7 +34,7 @@ use pci::{DeviceFunction, LegacyInterruptRoute, PciConfigAccess};
 ///
 /// The full typed error is logged once at initialization; this snapshot keeps
 /// the failure publishable from a `Sync` static and reachable at query time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InitFailure {
     /// The AML context could not be constructed.
     Context,
@@ -45,7 +45,7 @@ pub(crate) enum InitFailure {
 }
 
 /// Why a firmware route query produced no answer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RouteFailure {
     /// The owner was queried before the ACPI discovery path initialized it.
     NotInitialized,

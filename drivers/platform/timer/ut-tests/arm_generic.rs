@@ -53,15 +53,15 @@ fn bounded_countdown_matches_wide_integer_reference() {
         1_000_000_000,
         u32::MAX as u64,
     ] {
-        for now in [0, 1, 1_000_000, 1 << 62, u64::MAX - 1] {
-            for deadline in [0, 1, 17, 1_000_000_001, 1 << 62, u64::MAX - 1, u64::MAX] {
-                let remaining = u128::from(deadline.saturating_sub(now));
+        for now_ns in [0, 1, 1_000_000, 1 << 62, u64::MAX - 1] {
+            for deadline_ns in [0, 1, 17, 1_000_000_001, 1 << 62, u64::MAX - 1, u64::MAX] {
+                let remaining = u128::from(deadline_ns.saturating_sub(now_ns));
                 let expected = (remaining * u128::from(frequency))
                     .div_ceil(u128::from(ktime_types::NANOS_PER_SEC))
                     .min(u128::from(MAX_TIMER_INTERVAL_TICKS))
                     as u64;
                 assert_eq!(
-                    deadline_to_interval_ticks(deadline, now, frequency),
+                    deadline_to_interval_ticks(deadline_ns, now_ns, frequency),
                     expected
                 );
             }

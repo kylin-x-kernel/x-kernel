@@ -7,8 +7,8 @@
 use aarch64_cpu::registers::{ID_AA64ISAR0_EL1, ID_AA64PFR0_EL1, MIDR_EL1, Readable};
 
 /// Selected usable capabilities; procfs owns their Linux spellings.
-#[derive(Clone, Copy)]
 #[repr(u8)]
+#[derive(Clone, Copy)]
 pub enum CpuFeature {
     /// Scalar floating point with kernel context preservation.
     Fp,

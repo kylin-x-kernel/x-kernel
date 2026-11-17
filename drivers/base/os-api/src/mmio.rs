@@ -164,7 +164,7 @@ impl Drop for IoMap {
 }
 
 /// A physical MMIO region described by firmware.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MmioRegion {
     pub base: usize,
     pub size: usize,
@@ -177,7 +177,7 @@ impl MmioRegion {
 }
 
 /// An x86 I/O port range described by firmware or PCI BARs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IoPortRange {
     pub base: u16,
     pub size: u16,
@@ -189,7 +189,7 @@ pub struct IoPortRange {
 /// [`MmioOp::unmap_mmio`]. Copying or constructing this metadata does not create
 /// an acquisition. Only the original unreleased token may be passed to unsafe
 /// unmap; drivers normally retain an [`IoMap`] instead.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct MmioMapping {
     /// Virtual address the CPU uses to access the region.
     pub vaddr: usize,

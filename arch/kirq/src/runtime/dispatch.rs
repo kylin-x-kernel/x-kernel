@@ -375,7 +375,7 @@ pub(super) fn replay(line: Arc<IrqLine>) {
 
 /// Distinguishes ordinary running ownership from source-owner-protected PerCpu
 /// traversal. PerCpu is not a shared counter or an independently drainable lease.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum DispatchAdmission {
     PerCpu,
     Running,

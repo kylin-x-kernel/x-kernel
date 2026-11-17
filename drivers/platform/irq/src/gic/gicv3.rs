@@ -14,6 +14,8 @@ use kirq::TargetCpu;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
+use super::GicInitError;
+
 static GIC: LazyInit<SpinNoIrq<Gic>> = LazyInit::new();
 static TRAP_OP: LazyInit<TrapOp> = LazyInit::new();
 
@@ -265,10 +267,11 @@ pub(super) fn init(gicd_base: memaddr::VirtAddr, gicr_base: memaddr::VirtAddr) {
     TRAP_OP.init_once(cpu.trap_operations());
 }
 
-pub(super) fn init_current_cpu() -> Result<(), &'static str> {
+pub(super) fn init_current_cpu() -> Result<(), GicInitError> {
     debug!("Initialize GICv3 CPU Interface...");
     let mut cpu = GIC.lock().cpu_interface();
-    cpu.init_current_cpu()?;
+    cpu.init_current_cpu()
+        .map_err(|reason| GicInitError::CpuInterface { reason })?;
     cpu.set_eoi_mode(true);
     Ok(())
 }

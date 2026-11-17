@@ -8,11 +8,13 @@
 extern crate alloc;
 
 mod auxv;
+mod error;
 mod info;
 mod user_stack;
 
 pub use self::{
     auxv::*,
+    error::ElfError,
     info::*,
     user_stack::{app_stack_region, app_stack_region_with_auxv},
 };

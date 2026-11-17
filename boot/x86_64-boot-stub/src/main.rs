@@ -74,6 +74,8 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     }
 }
 
+// SAFETY: The boot-stub assembly resolves this unique C ABI symbol and passes magic, boot-info
+// pointer, and source-image address in its three usize arguments.
 #[unsafe(no_mangle)]
 /// # Safety
 ///

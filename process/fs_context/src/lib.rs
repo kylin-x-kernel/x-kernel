@@ -70,8 +70,8 @@ pub struct FsStruct {
 /// protected by the context mutex. Process finalization may run in a
 /// non-sleeping deferred context, so releasing the last owner must not need to
 /// take the sleepable filesystem mutex. Dropping this guard is that release.
-#[derive(Debug)]
 #[must_use = "dropping the guard releases the process owner"]
+#[derive(Debug)]
 pub struct ProcessUserGuard {
     process_users: Arc<AtomicUsize>,
 }

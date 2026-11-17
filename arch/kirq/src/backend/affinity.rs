@@ -9,7 +9,7 @@ use kcpu_id_map::KCpuMask;
 use crate::IrqDesc;
 
 /// Delivery constraint for an accepted routing transaction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqAffinityDelivery {
     /// Preserve actual hardware enablement, including temporary flow masking.
     Preserve,
@@ -18,7 +18,7 @@ pub enum IrqAffinityDelivery {
 }
 
 /// A controller must distinguish pre-write rejection from uncertain hardware.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqAffinityApplyError {
     /// No route or delivery write occurred. The preceding state remains valid.
     Rejected,
@@ -71,7 +71,7 @@ pub struct IrqDeferredAffinityChip {
 }
 
 /// Result of the pre-EOI deferred preparation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqAffinityPrepare {
     /// The transaction completed before EOI and this is the effective target.
     Complete(KCpuMask),

@@ -18,7 +18,7 @@ use linux_raw_sys::{
 use crate::SignalSet;
 
 /// Default actions for signals when no custom handler is set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DefaultSignalAction {
     /// Terminate the process.
     Terminate,
@@ -36,7 +36,7 @@ pub enum DefaultSignalAction {
 ///
 /// These represent the actions the kernel should take after signal
 /// processing, distinct from user-defined signal handlers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SignalOsAction {
     /// Terminate the process immediately.
     Terminate,
@@ -77,7 +77,7 @@ bitflags! {
 }
 
 /// Disposition configured for one signal.
-#[derive(Debug, Default, Clone)]
+#[derive(Clone, Debug, Default)]
 pub enum SignalDisposition {
     /// Use the default signal action.
     #[default]
@@ -93,7 +93,7 @@ pub enum SignalDisposition {
 }
 
 /// Signal action. Corresponds to `struct sigaction` in libc.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct SignalAction {
     /// `SA_*` behavior flags.
     pub flags: SignalActionFlags,

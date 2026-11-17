@@ -157,7 +157,7 @@ pub(super) const MAX_PENDING_RECORDS: usize = 256;
 pub(super) const MAX_PENDING_ANCILLARY: usize = 1024;
 
 /// Why the producer could not register a control record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum EnqueueError {
     /// The consumer closed this direction; the record could never be
     /// delivered, so the send fails like a write to a closed peer.

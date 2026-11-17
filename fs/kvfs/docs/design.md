@@ -557,7 +557,9 @@ block-special inodes uniformly install KVFS's `DefaultBlkdevFileOperations`, cor
 after withdrawal or device-number reuse. The claim preserves `O_EXCL`; ioctl uses
 the current nonblocking flag. Last-file release closes once.
 A block-device special inode has no canonical block address space yet, so mmap returns ENODEV; the medium-change invalidation protocol must be implemented before enabling it.
-KVFS supplies checked argument access and `has_sys_admin` from the current caller.
+KVFS supplies checked argument access and `has_sys_admin` from the current caller;
+the scalar argument is read through `posix_types::UserConstPtr`, whose `UserRead`
+bound constrains the ABI type at the call site.
 The ioctl path receives the syscall caller's `&Cred`, without retaining extra credentials.
 Generic block commands and the driver fallback for unknown commands are dispatched uniformly by `BlockDevice::ioctl`. An ordinary close and write do not implicitly flush; only an explicit fsync passes the
 durability request to the backend. KVFS maintains no second `dev_t -> DeviceFileOps` table;

@@ -32,7 +32,7 @@ fn with_ctx<R>(
         .expect("fixture has a probe context")
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Event {
     MapMmio(MmioRegion),
     UnmapMmio(MmioRegion),

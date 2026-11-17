@@ -15,8 +15,8 @@ triggers:
   in interrupt context.
 - **Scope**: Selection of `SpinNoIrq` for shared state in all Rust code.
   Not this rule: [CG-001](CG-001-static-spinlock-registration.md),
-  the pending Dylint lint `unregistered_static_lock` ([pending](pending.md)) and
-  the pending Dylint lint `untracked_runtime_lock` ([pending](pending.md)) own registration and runtime
+  the Dylint lint `unregistered_static_lock` ([CG-002](CG-002-static-mutex-registration.md)) and
+  the Dylint lint `untracked_runtime_lock` ([CG-003](CG-003-runtime-lock-tracking.md)) own registration and runtime
   constructor tracking; this rule owns whether IRQ masking is justified.
   Sleeping while a guard is live belongs to
   [CG-013](CG-013-no-sleep-under-spinlock.md), and lost atomicity across

@@ -6,7 +6,7 @@
 
 /// Result of servicing an IRQ: unclaimed, handled, or a threaded wake request.
 /// Device-specific queue and event routing stays inside the driver.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrqEvent {
     handled: bool,
     wake_thread: bool,

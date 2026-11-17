@@ -10,6 +10,8 @@ use kirq::TargetCpu;
 use kspin::SpinNoIrq;
 use lazyinit::LazyInit;
 
+use super::GicInitError;
+
 mod affinity;
 pub(super) use affinity::CHIP as AFFINITY;
 
@@ -221,24 +223,20 @@ fn record_cpu_target(
     logical_cpu: LogicalCpuId,
     hardware_cpu_id: usize,
     target: CpuInterfaceTarget,
-) -> Result<(), &'static str> {
+) -> Result<(), GicInitError> {
     targets
         .record_cpu_interface_target(logical_cpu.as_usize(), hardware_cpu_id, target)
         .map_err(|error| match error {
-            CpuTargetMapError::InvalidLogicalCpu => {
-                "GICv2 logical CPU exceeds the CPU-interface range"
-            }
-            CpuTargetMapError::InvalidTarget => {
-                "GICv2 CPU target is not one implemented CPU-interface bit"
-            }
-            CpuTargetMapError::ConflictingRoute => "conflicting GICv2 CPU target association",
+            CpuTargetMapError::InvalidLogicalCpu => GicInitError::LogicalCpuOutOfRange,
+            CpuTargetMapError::InvalidTarget => GicInitError::InvalidCpuTarget,
+            CpuTargetMapError::ConflictingRoute => GicInitError::ConflictingCpuTarget,
         })
 }
 
-fn record_current_cpu_target(target: CpuInterfaceTarget) -> Result<(), &'static str> {
+fn record_current_cpu_target(target: CpuInterfaceTarget) -> Result<(), GicInitError> {
     let logical_cpu = kplat::cpu::id();
     let hardware_cpu_id = raw_cpu_id(logical_cpu)
-        .ok_or("GICv2 CPU has no hardware identity")?
+        .ok_or(GicInitError::MissingHardwareCpuId)?
         .as_usize();
     record_cpu_target(&CPU_TARGETS, logical_cpu, hardware_cpu_id, target)
 }
@@ -246,7 +244,7 @@ fn record_current_cpu_target(target: CpuInterfaceTarget) -> Result<(), &'static 
 pub(super) fn init(
     gicd_base: memaddr::VirtAddr,
     gicc_base: memaddr::VirtAddr,
-) -> Result<(), &'static str> {
+) -> Result<(), GicInitError> {
     if GIC.get().is_some() {
         return Ok(());
     }
@@ -262,7 +260,7 @@ pub(super) fn init(
     // published controller always has its boot CPU association.
     let boot_target = gic
         .try_init()
-        .map_err(|_| "failed to discover boot GICv2 CPU target")?;
+        .map_err(|_| GicInitError::BootCpuTargetDiscovery)?;
     record_current_cpu_target(boot_target)?;
     super::remember_standard_intid_limit(gic.typer_raw());
     GIC.init_once(SpinNoIrq::new(gic));
@@ -271,9 +269,9 @@ pub(super) fn init(
     Ok(())
 }
 
-pub(super) fn init_current_cpu() -> Result<(), &'static str> {
+pub(super) fn init_current_cpu() -> Result<(), GicInitError> {
     debug!("Initialize GICv2 CPU Interface...");
-    let gic = GIC.get().ok_or("GICv2 is not initialized")?;
+    let gic = GIC.get().ok_or(GicInitError::NotInitialized)?;
     // Configuration starts with local IRQ delivery masked and before runtime
     // publishes this CPU as interrupt-ready. Discovery and registration thus
     // complete before any affinity candidate can name this CPU.
@@ -281,7 +279,7 @@ pub(super) fn init_current_cpu() -> Result<(), &'static str> {
         let gic = gic.lock();
         gic.cpu_interface()
             .discover_target()
-            .map_err(|_| "failed to discover current GICv2 CPU target")?
+            .map_err(|_| GicInitError::CurrentCpuTargetDiscovery)?
     };
     record_current_cpu_target(target)?;
     let gic = gic.lock();

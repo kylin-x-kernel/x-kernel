@@ -14,7 +14,7 @@ use khal::mem::{
 };
 
 /// A physical-memory category accepted by the ACPI host adapter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemoryClass {
     /// Free RAM owned by the kernel allocator after boot. This class never
     /// authorizes firmware access: the range may already hold kernel objects
@@ -41,7 +41,7 @@ pub enum MemoryClass {
 }
 
 /// Why a range could not be classified as one permitted memory category.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemoryRangeError {
     /// The size is zero.
     Empty,
@@ -84,7 +84,7 @@ pub unsafe trait AcpiMemoryMap: Sync {
 }
 
 /// The kernel's boot-firmware physical memory map.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct KernelMemoryMap;
 
 // SAFETY: the kernel memory map is immutable after boot, and its reserved

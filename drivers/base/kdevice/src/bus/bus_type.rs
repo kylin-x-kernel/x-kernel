@@ -46,7 +46,7 @@ impl DriverMatchInfo for DriverObject {
 /// bus types use the [`BusTypeId::PCI`] and [`BusTypeId::PLATFORM`] constants;
 /// external crates can mint their own handles via [`BusTypeId::new`] with a
 /// unique `'static` string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct BusTypeId(&'static str);
 
 impl BusTypeId {

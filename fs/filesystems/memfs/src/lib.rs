@@ -244,7 +244,7 @@ fn init_memory_filesystems() {
     kvfs::register_filesystem(&MQUEUE_TYPE).expect("mqueue filesystem type must register once");
 }
 
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 struct FileName(String);
 
 impl PartialOrd for FileName {

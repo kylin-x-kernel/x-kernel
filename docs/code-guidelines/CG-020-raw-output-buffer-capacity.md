@@ -22,8 +22,8 @@ triggers:
   field or the fact that a page was allocated does not prove earlier writes fit.
   Not this rule: [CG-018](CG-018-uninitialized-storage-model.md) owns
   constructing valid initialized values,
-  the pending Dylint lint `unsound_user_abi_impl` ([pending](pending.md)) and
-  the pending Dylint lint `user_copy_without_abi_contract` ([pending](pending.md)) own user-copy representation
+  the Dylint lint `unsound_user_abi_impl` ([CG-005](CG-005-user-abi-layout.md)) and
+  the Dylint lint `user_copy_without_abi_contract` ([CG-006](CG-006-user-copy-abi-contract.md)) own user-copy representation
   contracts, and [CG-019](CG-019-user-pointers-stop-at-syscall-boundary.md)
   owns syscall user-access placement; this rule owns destination capacity and
   arithmetic overflow in raw output serialization. A missing comment for a

@@ -2163,7 +2163,7 @@ static FAIL_NEXT_PM_SUSPEND: AtomicBool = AtomicBool::new(false);
 static FAIL_NEXT_DRIVER_REMOVE: AtomicBool = AtomicBool::new(false);
 static DROP_SAW_DATA_LOCK: AtomicBool = AtomicBool::new(false);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TypedEvent {
     Remove(u64, usize),
     Cleanup(u64),

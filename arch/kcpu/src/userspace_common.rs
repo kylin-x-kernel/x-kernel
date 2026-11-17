@@ -10,7 +10,7 @@ use crate::{ExceptionContext, excp::PageFaultFlags, userspace::ExceptionInfo};
 
 /// A reason as to why the control of the CPU is returned from
 /// the user space to the kernel.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum ReturnReason {
     /// An interrupt.
     Interrupt,
@@ -25,7 +25,7 @@ pub enum ReturnReason {
 }
 
 /// A generalized kind for [`ExceptionInfo`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExceptionKind {
     /// A breakpoint exception.
     Breakpoint,
@@ -38,7 +38,7 @@ pub enum ExceptionKind {
 }
 
 #[repr(C)]
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ExceptionTableEntry {
     from: usize,
     to: usize,

@@ -19,7 +19,7 @@ use lazyinit::LazyInit;
 use crate::{DeviceDescId, DeviceId};
 
 /// A point where a test can deterministically pause a driver-core path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BindingPause {
     /// A driver registration scan is about to wait for this descriptor's
     /// binding lock.

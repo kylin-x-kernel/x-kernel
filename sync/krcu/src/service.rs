@@ -316,14 +316,14 @@ impl GracePeriodTask {
         // itself remains bound to this task, never to the boot task.
         self.waker.call_once(|| wait.waker());
         startup_waker.wake();
-        let mut deadline = None::<u64>;
+        let mut deadline_ns = None::<u64>;
         loop {
             // Consume before processing: demand arriving during the pass must
             // survive for the next iteration. The prepared waker retains races
             // between this exchange, processing and actual park.
             let has_demand = self.has_demand.swap(false, Ordering::AcqRel);
             let now = kiface_time_api::monotonic_time_nanos();
-            let is_due = deadline.is_some_and(|deadline| now >= deadline);
+            let is_due = deadline_ns.is_some_and(|deadline_ns| now >= deadline_ns);
             if has_demand || is_due {
                 for cpu in 0..kcpu_id_map::nr_cpus() {
                     #[expect(
@@ -354,7 +354,7 @@ impl GracePeriodTask {
                 // bookkeeping lock. Eligibility is persistent before its wake.
                 for cpu in 0..kcpu_id_map::nr_cpus() {
                     #[cfg(feature = "ipi")]
-                    if is_active && (deadline.is_none() || is_due) {
+                    if is_active && (deadline_ns.is_none() || is_due) {
                         // A kick only requests scheduling. The scheduler hook
                         // must still preserve the outgoing reader and report;
                         // neither IPI acceptance nor expiry is quiescence.
@@ -372,11 +372,13 @@ impl GracePeriodTask {
                     }
                 }
                 if !is_active {
-                    deadline = None;
+                    deadline_ns = None;
                     timer.cancel_sync();
-                } else if let Some(next) =
-                    progress_rearm_deadline(now, deadline, kiface_time_api::monotonic_time_nanos())
-                {
+                } else if let Some(next) = progress_rearm_deadline(
+                    now,
+                    deadline_ns,
+                    kiface_time_api::monotonic_time_nanos(),
+                ) {
                     #[expect(
                         clippy::expect_used,
                         reason = "CG-021-no-panic-on-reachable-failure: startup validates timer \
@@ -387,7 +389,7 @@ impl GracePeriodTask {
                     // never waits, reenters timer dispatch or holds RCU locks.
                     unsafe { timer.arm(next) }
                         .expect("RCU progress deadline and timer owner are validated");
-                    deadline = Some(next);
+                    deadline_ns = Some(next);
                 }
             }
             wait.park();
@@ -443,8 +445,12 @@ impl GracePeriodTask {
 }
 
 /// Retains early-wakeup timing; a performed progress round gets a fresh interval.
-fn progress_rearm_deadline(observed_ns: u64, deadline: Option<u64>, rearm_ns: u64) -> Option<u64> {
-    if deadline.is_some_and(|deadline| observed_ns < deadline) {
+fn progress_rearm_deadline(
+    observed_ns: u64,
+    deadline_ns: Option<u64>,
+    rearm_ns: u64,
+) -> Option<u64> {
+    if deadline_ns.is_some_and(|deadline_ns| observed_ns < deadline_ns) {
         return None;
     }
     // Like Linux's post-FQS wait, measure the next interval after the work,

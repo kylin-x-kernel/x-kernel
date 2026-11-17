@@ -79,6 +79,8 @@ macro_rules! impl_user_write_for_scalars {
 }
 
 impl_user_write_for_scalars!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+// SAFETY: `()` has no bytes, so copying it to user memory writes nothing.
+unsafe impl UserWrite for () {}
 
 // SAFETY: fixed-size arrays are valid when each element upholds the same contract.
 unsafe impl<T: UserRead, const N: usize> UserRead for [T; N] where [T; N]: Copy {}
@@ -161,6 +163,16 @@ impl<T> UserPtr<T> {
     /// # Errors
     ///
     /// Propagates the `osvm` memory-access error for the user source range.
+    #[expect(
+        clippy::allow_attributes,
+        reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+    )]
+    #[allow(
+        unknown_lints,
+        user_copy_without_abi_contract,
+        reason = "CG-006-user-copy-abi-contract: UserPtr::read_uninit forwards opaque bytes as \
+                  MaybeUninit<T>; callers must validate before constructing T"
+    )]
     pub fn read_uninit(self) -> osvm::MemResult<MaybeUninit<T>> {
         self.as_const().read_uninit()
     }

@@ -28,7 +28,7 @@ bitflags::bitflags! {
 }
 
 /// The type of a namespace.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum NamespaceType {
     /// Mount-tree namespace.
     Mnt,

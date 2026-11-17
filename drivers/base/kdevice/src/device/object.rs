@@ -36,7 +36,7 @@ pub(crate) struct DeviceRelations {
 }
 
 /// Whether the stable object still belongs to a registration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Registration {
     /// Test/fixture object that never had a descriptor registration.
     #[cfg_attr(

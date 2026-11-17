@@ -718,7 +718,7 @@ enum MetadataReclaimBoundary {
     EndOfTrace,
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug, Default)]
 struct MetadataReadCounts {
     hot_reloads: usize,
     total_reloads: usize,

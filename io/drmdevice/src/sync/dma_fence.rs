@@ -52,7 +52,7 @@ const STATE_ERROR: u8 = 2;
 /// Fences of one context are totally ordered by sequence number; fences of
 /// different contexts are only ordered by their signaling. Distinct drivers and
 /// the anonymous source therefore use distinct values.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct SyncContext(u64);
 
 impl SyncContext {

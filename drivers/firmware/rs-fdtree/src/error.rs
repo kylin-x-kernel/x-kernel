@@ -5,7 +5,7 @@
 //! Error types for minimal FDT parsing.
 
 /// Possible errors when working with a Flattened Device Tree.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FdtError {
     /// The blob's header magic is not `0xd00dfeed`.
     BadMagic,

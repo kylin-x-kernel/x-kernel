@@ -120,17 +120,29 @@ fn on_display_available(device: ClassDevice<DisplayDeviceImpl>) {
     }
 }
 
-fn try_setup() -> Result<(), ()> {
+#[derive(Debug)]
+enum SetupError {
+    NoDisplay,
+    InvalidResolution,
+    SizeOverflow,
+    AllocationFailed,
+    ResourceSetupFailed,
+}
+
+fn try_setup() -> Result<(), SetupError> {
     // Pick the primary display device, when one already probed.
-    let device = class_display_devices().into_iter().next().ok_or(())?;
+    let device = class_display_devices()
+        .into_iter()
+        .next()
+        .ok_or(SetupError::NoDisplay)?;
     try_setup_with(device)
 }
 
-fn try_setup_with(device: ClassDevice<DisplayDeviceImpl>) -> Result<(), ()> {
+fn try_setup_with(device: ClassDevice<DisplayDeviceImpl>) -> Result<(), SetupError> {
     let info = device.info();
     if info.width == 0 || info.height == 0 {
         warn!("primary display reported zero resolution; skipping fbdev");
-        return Err(());
+        return Err(SetupError::InvalidResolution);
     }
 
     // Size the shadow for the full visible surface at BGRA8888, page-aligned so
@@ -139,19 +151,20 @@ fn try_setup_with(device: ClassDevice<DisplayDeviceImpl>) -> Result<(), ()> {
     let size = (info.width as usize)
         .checked_mul(info.height as usize)
         .and_then(|pixels| pixels.checked_mul(BYTES_PER_PIXEL))
-        .ok_or(())?;
+        .ok_or(SetupError::SizeOverflow)?;
     let pages = size.div_ceil(PAGE_SIZE_4K);
 
     let shadow =
         alloc_zeroed_pages_exact_ref(pages, PAGE_SIZE_4K, UsageKind::Global).map_err(|_| {
             warn!("failed to allocate {}-page fbdev shadow buffer", pages);
+            SetupError::AllocationFailed
         })?;
     let shadow_len_bytes = pages * PAGE_SIZE_4K;
 
     // FbEmulation retains the page hold for the lifetime of the host resource.
     // Publish only the requested byte range, excluding allocator rounding slack.
     let range = memaddr::PhysAddrRange::try_from_start_size(shadow.phys_addr(), shadow_len_bytes)
-        .ok_or(())?;
+        .ok_or(SetupError::SizeOverflow)?;
     let backing = ShadowBacking {
         _pages: &shadow,
         range,
@@ -167,7 +180,7 @@ fn try_setup_with(device: ClassDevice<DisplayDeviceImpl>) -> Result<(), ()> {
     let created = device.create_scanout_resource(resource, &ScanoutWindow::new(&backing));
     if let Err(e) = created {
         warn!("create_scanout_resource failed on primary display: {:?}", e);
-        return Err(());
+        return Err(SetupError::ResourceSetupFailed);
     }
 
     *FB.lock() = Some(Arc::new(FbEmulation {

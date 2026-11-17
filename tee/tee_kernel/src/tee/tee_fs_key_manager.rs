@@ -36,7 +36,7 @@ cfg_if::cfg_if! {
         const TEE_FS_KM_ENC_FEK_ALG: u32 = TEE_ALG_AES_ECB_NOPAD;
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct TeeFsSsk {
     pub is_init: bool,
     pub key: [u8; TEE_FS_KM_SSK_SIZE],

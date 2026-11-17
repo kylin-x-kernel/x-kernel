@@ -4,6 +4,7 @@
 
 #[macro_use]
 mod macros;
+pub use macros::UnknownSyscallName;
 
 #[cfg(any(target_arch = "aarch64", feature = "aarch64"))]
 pub mod aarch64;

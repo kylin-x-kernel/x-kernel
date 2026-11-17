@@ -46,7 +46,7 @@ bitflags::bitflags! {
 }
 
 #[repr(u64)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Arm64MemAttr {
     Device             = 0,
     Normal             = 1,
@@ -151,8 +151,8 @@ impl From<PagingFlags> for Arm64Attr {
 /// addresses and [`Arm64Attr`] attributes. Physical addresses are masked
 /// to cover bits 12–47 (48-bit physical address space). Software bit 55
 /// records mapping ownership independently of permission flags and address updates.
-#[derive(Clone, Copy)]
 #[repr(transparent)]
+#[derive(Clone, Copy)]
 pub struct A64PageEntry(u64);
 
 impl A64PageEntry {

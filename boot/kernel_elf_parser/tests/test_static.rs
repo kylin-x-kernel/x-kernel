@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use kernel_elf_parser::{AuxType, ElfHeadersBuilder, ElfParser};
+use kernel_elf_parser::{AuxType, ElfError, ElfHeadersBuilder, ElfParser};
 
 #[test]
 fn test_elf_parser() {
@@ -153,11 +153,11 @@ fn parser_rejects_missing_or_overflowing_program_header_addresses() {
     header.virtual_addr = u64::MAX;
     assert!(matches!(
         ElfParser::new(&headers, 0),
-        Err("program-header address overflows")
+        Err(ElfError::ProgramHeaderAddressOverflow)
     ));
     headers.ph.clear();
     assert!(matches!(
         ElfParser::new(&headers, 0),
-        Err("program-header table is not covered by a segment")
+        Err(ElfError::ProgramHeaderTableUnmapped)
     ));
 }

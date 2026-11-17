@@ -10,7 +10,7 @@ use super::{ConfigRegisters, IntId, Trigger, checked_config, configure_locked};
 use kirq::{IrqDescError, IrqTrigger};
 use unittest::{assert_eq, def_test};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 enum Access {
     ReadConfig,
     ReadEnable,

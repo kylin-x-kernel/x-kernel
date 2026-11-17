@@ -783,7 +783,7 @@ impl Handler for AcpiOs {
         Handle(index as u32)
     }
 
-    fn acquire(&self, mutex: Handle, timeout: u16) -> Result<(), AmlError> {
+    fn acquire(&self, mutex: Handle, timeout_ms: u16) -> Result<(), AmlError> {
         if self.failed() {
             return Err(AmlError::MutexAcquireTimeout);
         }
@@ -813,7 +813,7 @@ impl Handler for AcpiOs {
             return Ok(());
         }
 
-        let limit_ms = match timeout {
+        let limit_ms = match timeout_ms {
             0 => 0,
             u16::MAX => MAX_MUTEX_WAIT_MS,
             value => u64::from(value).min(MAX_MUTEX_WAIT_MS),

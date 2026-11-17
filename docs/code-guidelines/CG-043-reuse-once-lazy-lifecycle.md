@@ -17,7 +17,7 @@ triggers:
   initialization state machine needs a documented lifecycle mismatch.
 - **Scope**: Changed global initialization and its reads, including bespoke
   static-mut or atomic-pointer once-state machines outside foundational crates.
-  Not this rule: the pending Dylint lint `static_mut_option` ([pending](pending.md)) owns the prohibited
+  Not this rule: the Dylint lint `static_mut_option` ([CG-004](CG-004-static-mut-option.md)) owns the prohibited
   Option<T> static-mut form; the non-Option declaration candidate is in
   [pending.md](pending.md). [CG-017](CG-017-unsafe-impl-send-sync-argument.md)
   owns Send/Sync arguments. This rule owns lifecycle reuse; actual publication

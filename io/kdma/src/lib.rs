@@ -155,7 +155,7 @@ pub unsafe fn deallocate_dma_memory(dma: DmaInfo, layout: Layout) {
 }
 
 /// Direction for a temporary DMA mapping of an existing buffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DmaDirection {
     /// The device reads data the CPU produced (e.g. a TX descriptor ring).
     DriverToDevice,
@@ -245,7 +245,7 @@ pub unsafe fn cancel_dma_mapping(dma_addr: DmaBusAddress, len: usize) {
 ///
 /// It's a wrapper type around an [`u64`].
 #[repr(transparent)]
-#[derive(Copy, Clone, Default, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DmaBusAddress(u64);
 
 impl DmaBusAddress {
@@ -275,7 +275,7 @@ impl core::fmt::Debug for DmaBusAddress {
 }
 
 /// Represents information related to a DMA operation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct DmaInfo {
     /// The address at which the CPU accesses this memory region. This address
     /// is a virtual memory address used by the CPU to access memory.
