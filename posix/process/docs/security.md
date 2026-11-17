@@ -1,5 +1,15 @@
 # posix-process — Security and reliability
 
+## Physical OOM faults
+
+A user page fault that returns `OutOfMemory` terminates the allocating process
+through kernel `SIGKILL`, independently of user signal handlers. There is no
+retry loop, address-error misclassification, global victim scan or reclaim.
+MM cleanup releases commitments and private pages, but unrelated infallible
+kernel allocations can still fail; this policy is not an end-to-end NOFAIL
+recovery guarantee. Default overcommit admission and `MAP_NORESERVE` semantics
+are owned by `memspace`, not the signal layer.
+
 ## Synchronous signal-frame faults
 
 The fault API accepts only kernel-generated fault information in the current

@@ -230,3 +230,36 @@ fn anon_private_first_cow_commit_failure_keeps_slot_absent() {
     );
     object.detach_range(0, 4096).finalize_release();
 }
+
+#[def_test]
+fn post_unmap_release_preserves_fork_references_and_calls_outside_object_lock() {
+    use khal::{mem::PhysAddr, paging::PageSize};
+
+    let parent = AnonPrivateObject::new_root();
+    parent
+        .install_page(0, PhysAddr::from_usize(0x2000), PageSize::Size4K)
+        .unwrap();
+    parent
+        .install_page(0x1000, PhysAddr::from_usize(0x3000), PageSize::Size4K)
+        .unwrap();
+    let child = parent.fork_child();
+    parent
+        .prepare_fork_child_pages(0, 0x1000, &child)
+        .unwrap()
+        .commit()
+        .unwrap();
+    let mut releases = 0;
+    parent.release_range_after_unmap(0, 0x2000, |page| {
+        assert!(parent.page_at(0x1000).is_none());
+        assert_eq!(page.phys_addr(), PhysAddr::from_usize(0x3000));
+        releases += 1;
+    });
+    assert_eq!(releases, 1);
+    assert!(child.page_at(0).unwrap().is_exclusive());
+    child.release_range_after_unmap(0, 0x1000, |page| {
+        assert!(child.page_at(0).is_none());
+        assert_eq!(page.phys_addr(), PhysAddr::from_usize(0x2000));
+        releases += 1;
+    });
+    assert_eq!(releases, 2);
+}

@@ -131,6 +131,8 @@ pub(crate) fn run_user_thread_loop(
                 if outcome.is_retryable() {
                     ktask::check_preempt_pending();
                     continue;
+                } else if outcome == PageFaultOutcome::OutOfMemory {
+                    kill_current_process_for_oom(addr.as_usize());
                 } else if !outcome.is_resolved() {
                     // Linux distinguishes backing-store rejection from a
                     // protection or unmapped-address fault through si_code.
@@ -649,6 +651,22 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
             let _ = kprocess::process_signals::send_to_thread(None, tid, Some(sig.clone()));
         }
     }
+}
+
+// Without reclaim or global victim selection, terminate the allocating
+// process so its MM can release backing. A valid exhausted mapping is not an
+// unmapped address, and retrying without reclaim cannot make progress.
+fn kill_current_process_for_oom(address: usize) {
+    warn!(
+        "page-fault OOM: killing pid={} at {address:#x}",
+        current_user_thread().pid()
+    );
+    // Ordinary SIGKILL has no receipt and PendingSignals queues only its bit,
+    // without allocating a node, so signal admission cannot return QueueFull.
+    // Released signal configuration instead makes raise_signal_fatal exit
+    // directly. This current-user-thread call therefore has no error result.
+    raise_signal_fatal(SignalInfo::new_kernel(Signo::SIGKILL))
+        .expect("ordinary SIGKILL admission requires no signal queue storage");
 }
 
 /// Queues a fatal signal for the current thread or exits the thread.

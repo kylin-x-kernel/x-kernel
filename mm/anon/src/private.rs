@@ -503,6 +503,34 @@ impl AnonPrivateObject {
         Ok(old.release())
     }
 
+    /// Releases a range of private slots after all corresponding PTEs and
+    /// stale TLB entries have been removed.
+    ///
+    /// The caller serializes the mapping lifecycle against faults and fork.
+    /// Each last-reference frame is passed to `release` outside the object
+    /// lock. This path allocates no temporary page list, allowing exit during
+    /// physical-memory exhaustion.
+    pub fn release_range_after_unmap(
+        &self,
+        object_start: u64,
+        object_len: usize,
+        mut release: impl FnMut(AnonPrivateReleasedPage),
+    ) {
+        let object_end = object_start.saturating_add(object_len as u64);
+        loop {
+            let page = {
+                let mut pages = self.pages.lock();
+                let Some((&offset, _)) = pages.range(object_start..object_end).next() else {
+                    break;
+                };
+                pages.remove(&offset)
+            };
+            if let Some(released) = page.and_then(|page| page.release()) {
+                release(released);
+            }
+        }
+    }
+
     /// Detaches one range of private page slots from this object.
     ///
     /// The caller must first tear down any still-visible PTEs and only then

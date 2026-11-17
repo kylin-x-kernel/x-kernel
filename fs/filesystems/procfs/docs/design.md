@@ -1,5 +1,14 @@
 # procfs - Design
 
+## Private commitment reporting
+
+`/proc/meminfo` reports `Committed_AS` from `memspace::committed_pages()` in
+KiB. It counts outstanding private anonymous/file COW commitments across MMs,
+including inherited accounted mappings. It is independent of page residency,
+`MemFree` and `RLIMIT_AS`; the default overcommit policy does not enforce it as
+a global hard limit. Shared object quota/residency is not included in this
+private commitment counter.
+
 ## CPU information
 
 `src/basic_nodes/cpuinfo.rs` formats `/proc/cpuinfo`; `root.rs` only registers

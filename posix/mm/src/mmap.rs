@@ -385,6 +385,12 @@ impl MmapRequest {
             None
         };
         check_address_space_limit(aspace, length_bytes, replacement, limit_bytes)?;
+        if matches!(self.map_type, MapType::Private)
+            && self.permissions.current.contains(MappingFlags::WRITE)
+            && !self.flags.contains(MmapFlags::NORESERVE)
+        {
+            memspace::check_memory_commitment(length_bytes)?;
+        }
         // MAP_FIXED must not discard the old mappings before budget admission.
         if is_fixed {
             aspace.mmap_resolve_addr(hint, length_bytes, page_size as usize, AddrPolicy::Fixed)?;
@@ -638,22 +644,29 @@ pub fn sys_mmap(
         };
 
         if let Some((vma, runtime)) = file_vma {
-            mapping
-                .aspace_mut()
-                .map_runtime_vma(vma, request.flags.is_populate(), runtime)?;
+            mapping.aspace_mut().map_runtime_vma(
+                vma.with_noreserve(request.flags.contains(MmapFlags::NORESERVE)),
+                request.flags.is_populate(),
+                runtime,
+            )?;
         } else {
             let runtime = match request.map_type {
                 MapType::Shared => VmRuntimeRef::new_anon_shared(start, length, page_size)?,
                 MapType::Private => VmRuntimeRef::new_anon_private(start, page_size),
             };
-            mapping.aspace_mut().map_with_max_flags(
+            let vma = memspace::VmArea::new(
                 start,
                 length,
                 request.permissions.current,
                 request.permissions.maximum,
-                request.flags.is_populate(),
-                runtime,
-            )?;
+                runtime.backing_info(),
+                0,
+                None,
+            )
+            .with_noreserve(request.flags.contains(MmapFlags::NORESERVE));
+            mapping
+                .aspace_mut()
+                .map_runtime_vma(vma, request.flags.is_populate(), runtime)?;
         }
 
         Ok(start.as_usize() as _)
@@ -735,8 +748,6 @@ pub fn sys_mremap(
     aspace_ref.with_mapping_owner(|mut mapping| {
         let mut source = mapping.aspace_mut().resolve_mremap_source(addr, old_size)?;
         let vma_end = source.end();
-        let mapping_flags = source.flags();
-        let max_flags = source.max_flags();
         let page_size = source.page_size();
 
         // Linux checks growth before MREMAP_FIXED removes the destination.
@@ -755,22 +766,20 @@ pub fn sys_mremap(
                 source = mapping.aspace().resolve_mremap_source(addr, old_size)?;
                 check_address_space_limit(mapping.aspace(), new_size, None, address_space_limit)?;
             }
+            let retained = if mremap_flags.keeps_source_mapping() {
+                let runtime = VmRuntimeRef::new_anon_private(addr, page_size);
+                Some((source.fresh_mapping(move_size, &runtime)?, runtime))
+            } else {
+                None
+            };
             mapping.relocate_mapping(
                 &source,
                 target_addr,
                 new_size,
                 !mremap_flags.keeps_source_mapping(),
             )?;
-            if mremap_flags.keeps_source_mapping() {
-                let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
-                mapping.aspace_mut().map_with_max_flags(
-                    addr,
-                    move_size,
-                    mapping_flags,
-                    max_flags,
-                    false,
-                    fresh_runtime,
-                )?;
+            if let Some((vma, runtime)) = retained {
+                mapping.aspace_mut().map_runtime_vma(vma, false, runtime)?;
             }
             return Ok(target_addr.as_usize() as _);
         }
@@ -782,18 +791,14 @@ pub fn sys_mremap(
                 .aspace_mut()
                 .find_relocation_target(addr, new_size, page_size)?;
 
+            let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
+            let fresh_vma = source.fresh_mapping(old_size, &fresh_runtime)?;
             mapping.relocate_mapping(&source, target_addr, new_size, false)?;
             // The old mapping's role was retired after the PTE transfer; install
             // fresh anonymous backing at the original address.
-            let fresh_runtime = VmRuntimeRef::new_anon_private(addr, page_size);
-            mapping.aspace_mut().map_with_max_flags(
-                addr,
-                old_size,
-                mapping_flags,
-                max_flags,
-                false,
-                fresh_runtime,
-            )?;
+            mapping
+                .aspace_mut()
+                .map_runtime_vma(fresh_vma, false, fresh_runtime)?;
             return Ok(target_addr.as_usize() as _);
         }
 

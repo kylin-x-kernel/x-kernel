@@ -1,5 +1,16 @@
 # posix-process — Design
 
+## Page-fault OOM policy
+
+`PageFaultOutcome::OutOfMemory` has a separate trap-loop path. With no reclaim
+engine or system-wide OOM victim selector, the current allocating process is
+selected for an uncatchable kernel `SIGKILL`. The existing fatal-signal path
+performs group termination and resource teardown. Valid mappings with exhausted
+backing are not reported as `SIGSEGV/SEGV_MAPERR`; unmapped/protection faults
+retain their normal signals. There is no unconditional fault retry. This is a
+minimal OOM victim policy, not Linux's reclaim, badness scoring, memcg OOM or
+OOM reaper implementation.
+
 ## Synchronous signal-frame faults
 
 `raise_current_thread_fault` queues kernel-generated faults on the current

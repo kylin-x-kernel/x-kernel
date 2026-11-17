@@ -1,5 +1,18 @@
 # posix-mm — Design Document
 
+## System commitment admission
+
+`RLIMIT_AS` remains the per-process virtual footprint limit. Independently,
+`memspace` enforces Linux's default overcommit heuristic for new private writable
+commitments, writable protection upgrades and remap growth. A single new
+commitment larger than managed RAM is denied even with unlimited `RLIMIT_AS`.
+The heuristic does not cap aggregate commitments or eagerly allocate backing.
+Before destructive `MAP_FIXED` replacement, the syscall preflights this admission
+using the requested private/write/noreserve policy. VMA installation performs
+the owned charge; mapping creation, fork, changes and destruction are accounted
+inside `memspace`. `MAP_NORESERVE` is preserved on file/anonymous mappings and
+fresh `MREMAP_DONTUNMAP` source mappings. Shared objects keep their own quotas.
+
 ## Positioning
 
 `posix-mm` implements the POSIX/Linux-style memory-management syscall entry points, including
@@ -31,8 +44,9 @@ All raw syscall arguments are first frozen into a typed request inside `posix-mm
 sys_mmap(raw args)
   -> MmapRequest::from_raw()
   -> MmapRequest { flags, map_type, page_size, permissions, offset }
-  -> MmSpace::mmap_resolve_addr()
-  -> filemap::mmap_*_file() + MmSpace::map_runtime_vma() or MmSpace::map_with_max_flags()
+  -> MmapRequest::resolve_address_with_limit() (RLIMIT_AS and commitment admission)
+  -> file-backed: filemap::mmap_*_file(); anonymous: construct VmArea + VmRuntimeRef
+  -> MmSpace::map_runtime_vma()
 
 sys_mprotect(raw args)
   -> MprotectRequest::from_raw()

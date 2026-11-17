@@ -4,6 +4,50 @@ Msync test runtimes own their sync callbacks through fallible `KBox` allocation.
 Fixture mapping may run with MM serialization held, including inside a sync
 callback replacing a mapping, so callback allocation uses NOWAIT.
 
+## Default overcommit and private commitments
+
+`src/commit.rs` implements the Linux `OVERCOMMIT_GUESS` admission rule from
+Linux commit `818bebeb63dd` (`mm/util.c::__vm_enough_memory`): a single new
+commitment must fit managed RAM plus swap. X-Kernel has no swap. The rule uses
+`kalloc::global_allocator().total_pages()`, never `MemFree` or a percentage
+threshold, and does not cap aggregate commitments. Lazy backing allocation is
+preserved; admission is not a physical allocation guarantee. Strict and always
+overcommit modes and the corresponding writable sysctls are not implemented.
+
+`VmArea::is_accounted` corresponds to Linux `VM_ACCOUNT`; `is_noreserve`
+preserves `MAP_NORESERVE`. Private writable anonymous and file mappings acquire
+a commitment; linear and shared mappings do not. Shared objects retain their
+existing backing/quota policy. `MAP_NORESERVE` bypasses private admission and
+accounting under this default policy. A private read-only mapping is charged
+when `mprotect` first grants WRITE. Charges remain attached after WRITE is
+removed, until unmap; the anonymous-object model does not implement Linux's
+optional early uncharge for an untouched anonymous VMA without `anon_vma`.
+
+A local `CommitCharge` rolls back on failed mapping/fork/extension preparation.
+The installed VMA owns the charge after publication. VMA splits, trims and
+relocation preserve its flags; unmap releases only the removed portion. Fork
+charges each inherited accounted VMA before preparing its COW runtime; partial
+child destruction releases earlier charges. In-place and moving `mremap` admit
+only growth, transfer the retained source commitment, and undo newly reserved
+growth if relocation fails. `MREMAP_DONTUNMAP` preflights the fresh retained
+source before PTE transfer, then charges it separately with its inherited
+policy. A VMA grown beyond RAM through individually admissible extensions can
+therefore fail a new fork or retained-source commitment without losing its
+source mapping. Failed eager population removes the new mapping and its charge.
+
+Global-counter regression cases use `#[def_test(serial)]` so parallel mapping
+tests cannot change their reference snapshots.
+
+The independent global atomic counts committed base pages for
+`/proc/meminfo:Committed_AS`; it does not publish PTEs or synchronize object
+state. Owning MM locks serialize VMA edits; there is no global lock nested
+across runtime callbacks. MM teardown retains the mainline direct VMA walk
+without allocating a snapshot vector; commitment release follows invalidation
+callbacks before clearing VMA metadata. Private object slots are released one at a time only
+after page-table teardown and TLB completion. This removes range-sized
+allocations from these cleanup steps; other kernel allocation paths remain
+fallible or infallible according to their existing APIs.
+
 ## Post-populate action ownership
 
 `PopulateHook` owns a fallibly allocated `KBox` callback. A concrete `Option<F>`
@@ -79,16 +123,20 @@ the way tests are executed remain unchanged, and `super` still refers to the ori
 | Test file | Original module path | Test cases |
 | --- | --- | --- |
 | `ut-tests/lib.rs` | `tests_memspace` | 3 |
-| `ut-tests/aspace.rs` | `aspace::tests` | 16 |
-| `ut-tests/vma.rs` | `vma::tests` | 17 |
+| `ut-tests/aspace.rs` | `aspace::tests` | 38 |
+| `ut-tests/vma.rs` | `vma::tests` | 23 |
 | `ut-tests/fault.rs` | `fault::tests` | 2 |
 | `ut-tests/cpu_residency.rs` | `cpu_residency::tests_cpu_residency` | 3 |
+| `ut-tests/dma_mapping.rs` | `dma_mapping::tests` | 1 |
 | `ut-tests/backend_private.rs` | `backend::private::tests` | 6 |
 | `ut-tests/backend_shared.rs` | `backend::shared::tests` | 1 |
 | `ut-tests/aarch64_asid.rs` | `aarch64_asid::tests` | 6 |
 
-There are 8 test modules and 54 test cases in total; `aarch64_asid` keeps the AArch64 architecture gate of its parent module,
-and other architectures select the remaining 48 test cases. The tests have no extra feature gates or serial/user markers.
+There are 9 test modules and 83 test cases in total; `aarch64_asid` keeps the
+AArch64 architecture gate of its parent module, and other architectures select
+the remaining 77 test cases. Five `aspace` cases use `#[def_test(serial)]`:
+three compare global commitment snapshots and two compare allocator usage
+snapshots. The remaining cases have no serial/user markers or extra feature gates.
 They are verified using the guest unittest flow with a configured kernel, not replaced by host Cargo tests.
 
 ## Architecture
@@ -162,9 +210,17 @@ This protection does not explain why the upper layer chose the overlapping addre
 
 - `VmAreaSet::unmap()` supports exact removal, front/back trim, and middle split.
 - `VmAreaSet::protect()` supports partial range split and updates only the current permission.
+  It locates the first intersecting VMA by tree key, including a containing
+  predecessor when the request starts inside a VMA, and bounds mutable traversal
+  by the request end. Per-VMA commits therefore do not repeatedly scan unrelated
+  prefixes. With M total VMAs and N affected VMAs, sequential metadata commits
+  cost O(N log M) tree lookup/split work rather than O(N²) prefix visits.
 - Protection changes use each runtime's actual PTE flags. Empty PTE flags
   follow the zap/TLB/runtime-notification contract even when the VMA request
   itself is nonempty; a later error cannot retain tokens for cleared prefixes.
+  Each completed VMA commits its permissions and newly acquired commitment
+  before the next VMA is processed. If a later VMA rejects the request, earlier
+  changes remain effective and the rejecting VMA retains its original state.
 - `VmAreaSet::merge_adjacent_where()` merges only adjacent VMAs that are semantically equivalent and have the same runtime kind.
 - The file-backed `FileMappingInfo.offset` and `page_offset` are updated in sync during split/trim.
 

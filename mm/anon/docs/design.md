@@ -49,8 +49,9 @@ Runtime role:
 - private-anon page-state updates are transactional:
   - prepare first-touch page publication in `mm/anon`, install the PTE in the
     runtime, then commit the page slot into `AnonPrivateObject`;
-  - detach object slots before unmapping, but only release frames after the
-    runtime finishes tearing down visible PTEs;
+  - release private object slots after the runtime has torn down visible PTEs
+    and completed TLB invalidation; transactional detach remains available for
+    callers that need rollback;
   - prepare fork-shared page state first, then commit it into the child
     object only after parent write-protect, child page-table installation, and
     the page-table finalization boundary succeed.
@@ -86,6 +87,16 @@ COW replacement contract:
   fault instead of overwriting the competing slot.
 - the runtime-provided commit closure performs the page-table compare/replace
   step; object publication happens only after that closure succeeds.
+
+## Allocation-free private range release
+
+`AnonPrivateObject::release_range_after_unmap` removes one object slot at a
+time and reports last-reference frames outside the page-map lock. The runtime
+must first remove the entire corresponding PTE range and finish TLB invalidation,
+while excluding faults and fork on that mapping. Unlike `detach_range`, this
+path needs no temporary slot/release vectors and cannot roll back PTE changes;
+on page-table teardown failure the runtime leaves slots intact. Transactional
+`detach_range` remains available to callers that need explicit detach rollback.
 
 ## Atomically Publishing the First Anonymous COW Page
 

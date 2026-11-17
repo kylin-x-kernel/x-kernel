@@ -654,6 +654,8 @@ pub struct VmArea {
     perm: VmPerm,
     may_perm: VmMayPerm,
     inheritance: VmInheritance,
+    is_accounted: bool,
+    is_noreserve: bool,
     backing: VmBackingInfo,
     page_offset: u64,
     file: Option<FileMappingInfo>,
@@ -684,11 +686,43 @@ impl VmArea {
             perm: VmPerm::from_mapping_flags(flags),
             may_perm: VmMayPerm::from_mapping_flags(max_flags),
             inheritance: VmInheritance::default_for_mapping(),
+            is_accounted: false,
+            is_noreserve: false,
             backing,
             page_offset,
             file,
             runtime: None,
         }
+    }
+
+    /// Preserves Linux `MAP_NORESERVE` across VMA changes and fork.
+    ///
+    /// Under the default overcommit policy this bypasses private commitment
+    /// admission; backing allocation can still fail at page-fault time.
+    pub fn with_noreserve(mut self, is_noreserve: bool) -> Self {
+        self.is_noreserve = is_noreserve;
+        self
+    }
+
+    pub(crate) fn is_noreserve(&self) -> bool {
+        self.is_noreserve
+    }
+
+    pub(crate) fn is_accounted(&self) -> bool {
+        self.is_accounted
+    }
+
+    pub(crate) fn set_accounted(&mut self, is_accounted: bool) {
+        self.is_accounted = is_accounted;
+    }
+
+    pub(crate) fn needs_commitment(&self, flags: MappingFlags) -> bool {
+        !self.is_noreserve
+            && flags.contains(MappingFlags::WRITE)
+            && matches!(
+                self.backing.kind(),
+                VmBackingKind::AnonymousPrivate { .. } | VmBackingKind::FilePrivate { .. }
+            )
     }
 
     /// Returns the VMA start address.
@@ -841,6 +875,8 @@ impl VmArea {
             && self.perm == next.perm
             && self.may_perm == next.may_perm
             && self.inheritance == next.inheritance
+            && self.is_accounted == next.is_accounted
+            && self.is_noreserve == next.is_noreserve
             && self.backing == next.backing
             && self.next_page_offset() == Some(next.page_offset)
             && (!matches!(self.backing.kind(), VmBackingKind::FilePrivate { .. })
@@ -871,6 +907,8 @@ impl VmArea {
             self.file.clone(),
         )
         .with_inheritance(self.inheritance)
+        .with_noreserve(self.is_noreserve)
+        .with_accounted(self.is_accounted)
         .with_runtime(self.runtime.clone())
     }
 
@@ -933,6 +971,11 @@ impl VmArea {
         self.perm = VmPerm::from_mapping_flags(flags);
     }
 
+    pub(crate) fn with_accounted(mut self, is_accounted: bool) -> Self {
+        self.is_accounted = is_accounted;
+        self
+    }
+
     pub(crate) fn with_runtime(mut self, runtime: Option<VmRuntimeRef>) -> Self {
         self.runtime = runtime;
         self
@@ -950,6 +993,8 @@ impl VmArea {
                 perm: self.perm,
                 may_perm: self.may_perm,
                 inheritance: self.inheritance,
+                is_accounted: self.is_accounted,
+                is_noreserve: self.is_noreserve,
                 backing: self.backing,
                 page_offset: self.page_offset + delta_pages,
                 file: self.shifted_file_mapping(delta_pages),
@@ -1246,20 +1291,26 @@ impl VmAreaSet {
     }
 
     /// Updates mapping flags for VMAs overlapping `[start, start + size)`.
+    ///
+    /// Locates the first overlap by tree key and visits only intersecting VMAs.
     pub fn protect(&mut self, start: VirtAddr, size: usize, new_flags: khal::paging::MappingFlags) {
         if size == 0 {
             return;
         }
         let end = start + size;
+        // A request may begin inside its predecessor. Include that VMA only
+        // when it overlaps, so per-VMA commits never rescan unrelated prefixes.
+        let first_start = self
+            .areas
+            .range(..=start)
+            .next_back()
+            .filter(|(_, area)| area.end() > start)
+            .map_or(start, |(&area_start, _)| area_start);
         let mut to_insert = Vec::new();
-        for (&area_start, area) in self.areas.iter_mut() {
+        for (&area_start, area) in self.areas.range_mut(first_start..end) {
             let area_end = area.end();
 
-            if area_start >= end {
-                break;
-            } else if area_end <= start {
-                continue;
-            } else if area_start >= start && area_end <= end {
+            if area_start >= start && area_end <= end {
                 area.set_flags(new_flags);
             } else if area_start < start && area_end > end {
                 #[expect(
@@ -1280,6 +1331,8 @@ impl VmAreaSet {
                     area.shifted_file_mapping(((start - area_start) / PAGE_SIZE_4K) as u64),
                 )
                 .with_inheritance(area.inheritance())
+                .with_noreserve(area.is_noreserve)
+                .with_accounted(area.is_accounted)
                 .with_runtime(area.runtime().cloned());
                 to_insert.push((right.start(), right));
                 to_insert.push((middle.start(), middle));
@@ -1318,6 +1371,12 @@ impl VmAreaSet {
         let new_end = area.end().wrapping_add(additional);
         assert!(is_aligned_4k(additional));
         area.set_end(new_end);
+    }
+
+    pub(crate) fn account_range(&mut self, range: VirtAddrRange) {
+        for (_, vma) in self.areas.range_mut(range.start..range.end) {
+            vma.set_accounted(true);
+        }
     }
 
     /// Clears all metadata.

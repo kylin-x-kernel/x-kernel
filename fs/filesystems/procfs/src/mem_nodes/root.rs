@@ -43,6 +43,7 @@ impl SeqIterator for MeminfoIter {
         let user_kib = bytes_to_kib(usages.get(UsageKind::VirtMem));
         let dma_kib = bytes_to_kib(usages.get(UsageKind::Dma));
         let available_kib = free_kib + cache_kib;
+        let committed_kib = memspace::committed_pages().saturating_mul(PAGE_SIZE_4K / KB);
 
         self.lines = vec![
             format!("MemTotal:{total_kib:>15} kB\n"),
@@ -55,6 +56,7 @@ impl SeqIterator for MeminfoIter {
             format!("Inactive:{:>16} kB\n", 0),
             format!("SwapTotal:{:>14} kB\n", 0),
             format!("SwapFree:{:>15} kB\n", 0),
+            format!("Committed_AS:{committed_kib:>11} kB\n"),
             format!("Dirty:{:>19} kB\n", 0),
             format!("Writeback:{:>15} kB\n", 0),
             format!("AnonPages:{user_kib:>15} kB\n"),

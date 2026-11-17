@@ -1,5 +1,12 @@
 # procfs - Security and Reliability
 
+## Commitment statistics
+
+`Committed_AS` is a lock-free snapshot of the MM private commitment counter.
+It is informational and can change during a multi-line meminfo read; it does
+not expose object addresses or promise physical allocation. Admission never
+uses the printed value as an available-memory budget.
+
 ## CPU information boundary
 
 `/proc/cpuinfo` is read-only, including for privileged writers through the

@@ -19,6 +19,7 @@ extern crate alloc;
 mod aarch64_asid;
 mod aspace;
 pub mod backend;
+mod commit;
 mod cpu_residency;
 mod dma_mapping;
 mod fault;
@@ -41,6 +42,7 @@ pub use vmobj::{ObjectInvalidateRequest, VmObjectId};
 pub use self::aarch64_asid::Aarch64UserAsidContext;
 pub use self::{
     aspace::{AddrPolicy, AddrSpace, FutexBacking, InvalidateHandle, MmSpace, MremapSource},
+    commit::{check_memory_commitment, committed_pages},
     cpu_residency::{MmCpuResidency, MmCpuResidencyRef},
     fault::{FaultContext, FaultInput, FaultOutcome, PageFaultOutcome},
     iomap::{

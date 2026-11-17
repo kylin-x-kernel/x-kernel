@@ -222,6 +222,75 @@ fn vma_set_protect_preserves_file_metadata_offsets() {
 }
 
 #[def_test]
+fn vma_set_protect_across_holes_preserves_boundaries_and_commitment_flags() {
+    let mut set = VmAreaSet::new();
+    for (start, page_count, page_offset) in [
+        (0x1000, 1, 1),
+        (0x4000, 3, 40),
+        (0x9000, 3, 90),
+        (0xe000, 1, 140),
+    ] {
+        set.insert(
+            test_area(start, PAGE_SIZE_4K * page_count, page_offset)
+                .with_accounted(start == 0x4000)
+                .with_noreserve(start == 0x9000),
+        );
+    }
+    let writable = MappingFlags::READ | MappingFlags::WRITE;
+
+    // Include the containing predecessor and clip the last VMA while leaving
+    // the hole and the neighbors outside the requested range untouched.
+    set.protect(vaddr(0x5000), PAGE_SIZE_4K * 6, MappingFlags::READ);
+    assert_eq!(
+        ranges(&set),
+        alloc::vec![
+            (0x1000, 0x2000, 1),
+            (0x4000, 0x5000, 40),
+            (0x5000, 0x7000, 41),
+            (0x9000, 0xb000, 90),
+            (0xb000, 0xc000, 92),
+            (0xe000, 0xf000, 140),
+        ]
+    );
+    for area in set.iter() {
+        let is_protected = matches!(area.start().as_usize(), 0x5000 | 0x9000);
+        let expected = if is_protected {
+            MappingFlags::READ
+        } else {
+            writable
+        };
+        assert_eq!(area.flags(), expected);
+        assert_eq!(area.max_flags(), writable);
+        assert_eq!(
+            area.is_accounted(),
+            area.start() >= vaddr(0x4000) && area.end() <= vaddr(0x7000)
+        );
+        assert_eq!(
+            area.is_noreserve(),
+            area.start() >= vaddr(0x9000) && area.end() <= vaddr(0xc000)
+        );
+    }
+
+    // A predecessor ending exactly at the start must be excluded even when
+    // the request begins in a hole. Splitting the next VMA keeps its policy.
+    set.protect(vaddr(0x7000), PAGE_SIZE_4K * 3, MappingFlags::WRITE);
+    assert_eq!(set.find(vaddr(0x5000)).unwrap().flags(), MappingFlags::READ);
+    let changed = set.find(vaddr(0x9000)).unwrap();
+    assert_eq!(changed.end(), vaddr(0xa000));
+    assert_eq!(changed.flags(), MappingFlags::WRITE);
+    assert!(changed.is_noreserve());
+    let retained = set.find(vaddr(0xa000)).unwrap();
+    assert_eq!(retained.flags(), MappingFlags::READ);
+    assert_eq!(retained.page_offset(), 91);
+    assert!(retained.is_noreserve());
+
+    let before = ranges(&set);
+    set.protect(vaddr(0), PAGE_SIZE_4K, MappingFlags::empty());
+    set.protect(vaddr(0xc000), PAGE_SIZE_4K * 2, MappingFlags::empty());
+    assert_eq!(ranges(&set), before);
+}
+
+#[def_test]
 fn vma_set_protect_middle_derives_anon_offset_from_page_offset() {
     let start = vaddr(0x1000);
     let mut set = VmAreaSet::new();

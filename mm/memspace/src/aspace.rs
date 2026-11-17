@@ -45,6 +45,7 @@ use crate::{
     FaultContext, FaultInput, ForkCloneTarget, MsyncPolicy, PageFaultOutcome, VmArea, VmAreaSet,
     VmBackingKind,
     backend::{FaultCompletionResult, map_paging_err, pages_in},
+    commit::{self, CommitCharge},
     cpu_residency::{MmCpuResidency, MmCpuResidencyRef},
     lifetime::{MmUserHandle, MmUserLifetime},
     vma::VmRuntimeRef,
@@ -228,6 +229,33 @@ impl MremapSource {
     /// Returns the source mapping's maximum protection flags.
     pub fn max_flags(&self) -> MappingFlags {
         self.vma.max_flags()
+    }
+
+    /// Prepares a fresh DONTUNMAP source with the inherited commitment policy.
+    ///
+    /// Call before transferring the original mapping so rejected admission
+    /// leaves the source intact. Installation acquires the actual VMA charge.
+    ///
+    /// # Errors
+    ///
+    /// Returns `KError::NoMemory` when retaining the source would add a
+    /// commitment larger than managed RAM.
+    pub fn fresh_mapping(&self, size: usize, runtime: &VmRuntimeRef) -> KResult<VmArea> {
+        let vma = VmArea::new(
+            self.range.start,
+            size,
+            self.flags(),
+            self.max_flags(),
+            runtime.backing_info(),
+            0,
+            None,
+        )
+        .with_noreserve(self.vma.is_noreserve())
+        .with_accounted(self.vma.is_accounted());
+        if vma.is_accounted() || vma.needs_commitment(vma.flags()) {
+            commit::check_memory_commitment(size)?;
+        }
+        Ok(vma)
     }
 
     /// Returns the end address of the source VMA.
@@ -462,11 +490,22 @@ impl MmSpace {
         outcome.is_resolved() || outcome.is_retryable()
     }
 
+    fn charge_vma(vma: &mut VmArea) -> KResult<CommitCharge> {
+        if vma.is_accounted() || vma.needs_commitment(vma.flags()) {
+            let charge = CommitCharge::new(vma.size())?;
+            vma.set_accounted(true);
+            Ok(charge)
+        } else {
+            Ok(CommitCharge::default())
+        }
+    }
+
     fn install_runtime_mapping(
         &mut self,
         mut vma: VmArea,
         runtime: VmRuntimeRef,
         is_new: bool,
+        charge: CommitCharge,
     ) -> KResult {
         // Refuse an overlapping range before the page table is touched and
         // before object views are registered, so a rejected mapping leaves no
@@ -488,6 +527,7 @@ impl MmSpace {
             &vma,
         ));
         self.vmas.insert(vma);
+        charge.commit();
         Ok(())
     }
 
@@ -512,6 +552,12 @@ impl MmSpace {
         for (overlap, runtime) in &operations {
             runtime.on_invalidate_complete(*overlap);
         }
+        for vma in &overlapped_vmas {
+            if vma.is_accounted() {
+                let overlap = VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
+                commit::uncharge(overlap.size());
+            }
+        }
         self.vmas.unmap(start, size);
         Ok(())
     }
@@ -526,6 +572,11 @@ impl MmSpace {
         if self.vmas.overlaps(VirtAddrRange::new(current_end, new_end)) {
             return Err(KError::AlreadyExists);
         }
+        let charge = if vma.is_accounted() {
+            CommitCharge::new(additional)?
+        } else {
+            CommitCharge::default()
+        };
         let extension = VirtAddrRange::from_start_size(current_end, additional);
         match &runtime {
             VmRuntimeRef::FileShared(_) | VmRuntimeRef::FilePrivate(_) => {
@@ -534,6 +585,7 @@ impl MmSpace {
             _ => runtime.map(extension, vma.flags(), &mut self.pgtbl.modify())?,
         }
         self.vmas.extend(start, additional);
+        charge.commit();
         Ok(())
     }
 
@@ -545,28 +597,25 @@ impl MmSpace {
     ) -> KResult {
         let range = VirtAddrRange::from_start_size(start, size);
         let overlapped_vmas = self.vmas.collect_overlapping(range);
-        let operations = overlapped_vmas
-            .iter()
-            .map(|vma| {
-                let protect_range =
-                    VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
-                let runtime = vma.runtime().cloned().ok_or(KError::BadAddress)?;
-                Ok((protect_range, runtime, vma.backing().page_size()))
-            })
-            .collect::<KResult<Vec<_>>>()?;
-        for (protect_range, runtime, page_size) in &operations {
+        for vma in &overlapped_vmas {
+            let protect_range =
+                VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
+            let runtime = vma.runtime().cloned().ok_or(KError::BadAddress)?;
+            let page_size = vma.backing().page_size();
+            let needs_charge = !vma.is_accounted() && vma.needs_commitment(flags);
+            let charge = if needs_charge {
+                CommitCharge::new(protect_range.size())?
+            } else {
+                CommitCharge::default()
+            };
             let pte_flags = {
                 let mut modify = self.pgtbl.modify();
-                let result = runtime.on_protect(*protect_range, flags, &mut modify);
+                let result = runtime.on_protect(protect_range, flags, &mut modify);
                 modify.finish();
                 result?
             };
             if pte_flags.is_empty() {
-                // A runtime may remove WRITE for COW, turning a nonempty VMA
-                // request into an empty PTE permission set. Use the normal zap
-                // contract: finish TLBs, then retire each cleared page's token,
-                // including a cleared prefix if a later operation fails.
-                self.zap_present_range(*protect_range, *page_size, Some(runtime))?;
+                self.zap_present_range(protect_range, page_size, Some(&runtime))?;
             } else {
                 let mut modify = self.pgtbl.modify();
                 let result =
@@ -574,8 +623,13 @@ impl MmSpace {
                 modify.finish();
                 result.map_err(crate::backend::map_paging_err)?;
             }
+            self.vmas
+                .protect(protect_range.start, protect_range.size(), flags);
+            if needs_charge {
+                self.vmas.account_range(protect_range);
+            }
+            charge.commit();
         }
-        self.vmas.protect(start, size, flags);
         Ok(())
     }
 
@@ -596,6 +650,9 @@ impl MmSpace {
             vma.runtime()
                 .expect("runtime entry must exist for every VMA")
                 .on_invalidate_complete(vma.range());
+            if vma.is_accounted() {
+                commit::uncharge(vma.size());
+            }
         }
         self.vmas.clear();
     }
@@ -1218,13 +1275,18 @@ impl MmSpace {
         self.map_runtime_vma(vma, populate, runtime)
     }
 
-    /// Map a region using an explicit VMA metadata record and runtime reference.
+    /// Maps explicit VMA metadata and acquires its private commitment.
+    ///
+    /// Private writable mappings use default overcommit admission unless the
+    /// VMA carries `MAP_NORESERVE`. Backing remains lazy unless `populate` is
+    /// requested. Failed population removes the new mapping and its charge.
     ///
     /// # Errors
     ///
     /// Returns [`KError::AlreadyExists`] if the range overlaps an installed VMA,
     /// before editing page tables or registering object views for the incoming
-    /// mapping. Also propagates invalid-range and runtime mapping errors.
+    /// mapping. Returns [`KError::NoMemory`] if the new commitment exceeds
+    /// managed RAM. Also propagates invalid-range and runtime mapping errors.
     pub fn map_runtime_vma(
         &mut self,
         vma: VmArea,
@@ -1236,9 +1298,27 @@ impl MmSpace {
         let size = vma.size();
         let flags = vma.flags();
         self.validate_region(start, size)?;
-        self.install_runtime_mapping(vma, runtime, true)?;
-        if populate {
-            self.populate_area(start, size, flags)?;
+        let mut vma = vma;
+        let charge = Self::charge_vma(&mut vma)?;
+        self.install_runtime_mapping(vma, runtime, true, charge)?;
+        if populate && let Err(err) = self.populate_area(start, size, flags) {
+            let vma = self
+                .vmas
+                .find(start)
+                .expect("new mapping remains installed");
+            let runtime = vma.runtime().cloned().expect("new mapping has a runtime");
+            let is_accounted = vma.is_accounted();
+            {
+                let mut modify = self.pgtbl.modify();
+                runtime.unmap(vma.range(), &mut modify)?;
+                modify.finish();
+            }
+            runtime.on_invalidate_complete(VirtAddrRange::from_start_size(start, size));
+            self.vmas.unmap(start, size);
+            if is_accounted {
+                commit::uncharge(size);
+            }
+            return Err(err);
         }
         Ok(())
     }
@@ -1253,7 +1333,9 @@ impl MmSpace {
     /// All destination PTEs are prepared before retained source PTEs are removed.
     /// Failure clears newly prepared destination PTEs and retires destination
     /// registrations; retained source PTEs and backing remain intact. Successful
-    /// retirement removes only source metadata, not its transferred backing.
+    /// retirement transfers the retained source commitment with its metadata.
+    /// Only growth acquires a new commitment and can fail admission with
+    /// [`KError::NoMemory`]; failure releases that newly reserved growth.
     pub fn relocate_mapping(
         &mut self,
         snapshot: &MremapSource,
@@ -1271,6 +1353,11 @@ impl MmSpace {
         if snapshot.range.overlaps(target_range) {
             return Err(KError::InvalidInput);
         }
+        let charge = if snapshot.vma.is_accounted() {
+            CommitCharge::new(new_size.saturating_sub(snapshot.range.size()))?
+        } else {
+            CommitCharge::default()
+        };
         // Fixed replacement discards the target first, then shrinks the source.
         // Re-resolve the source after those edits because unmapping may split it.
         let replacement_source;
@@ -1341,6 +1428,7 @@ impl MmSpace {
             runtime.on_mapping_retired(range);
         }
         self.vmas.unmap(source_range.start, source_range.size());
+        charge.commit();
         Ok(())
     }
 
@@ -1468,10 +1556,17 @@ impl MmSpace {
         })
     }
 
-    /// Updates mapping within the specified virtual address range.
+    /// Updates mapping permissions within the specified virtual address range.
     ///
-    /// Returns an error if the address range is out of the address space or not
-    /// aligned.
+    /// Granting WRITE to an unaccounted private mapping acquires a commitment
+    /// unless it carries `MAP_NORESERVE`. Removing WRITE retains that promise
+    /// until unmap. Earlier VMA changes remain effective if a later VMA fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unmapped, out-of-bounds or unaligned ranges,
+    /// disallowed permissions, runtime errors, or a new commitment exceeding
+    /// managed RAM (`KError::NoMemory`).
     pub fn protect(&mut self, start: VirtAddr, size: usize, flags: MappingFlags) -> KResult {
         self.drain_pending_invalidations();
         self.validate_region(start, size)?;
@@ -1650,7 +1745,9 @@ impl MmSpace {
     /// Extend an existing memory area in place.
     ///
     /// Returns an error if the extension would exceed address space bounds
-    /// or overlap with another mapping.
+    /// or overlap with another mapping. An accounted mapping admits only the
+    /// additional commitment; growth larger than managed RAM returns
+    /// [`KError::NoMemory`] without extending the original VMA.
     pub fn extend_area(&mut self, start: VirtAddr, additional: usize) -> KResult {
         self.drain_pending_invalidations();
         // Validate the extension range [area.end, area.end + additional),
@@ -1924,7 +2021,14 @@ impl MmSpace {
     ///
     /// This method creates a new empty address space with the same base and
     /// size, then iterates over all memory areas in the original address
-    /// space to copy or share their mappings into the new one.
+    /// space to copy or share their mappings into the new one. Each inherited
+    /// accounted VMA acquires its own commitment before preparing its runtime.
+    /// Failed cloning releases the partially constructed child's charges.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::NoMemory`] if an inherited commitment exceeds managed
+    /// RAM or allocation fails, and propagates runtime/page-table errors.
     pub fn try_clone(&mut self) -> KResult<Arc<Mutex<Self>>> {
         self.drain_pending_invalidations();
         let new_aspace = Arc::new(Mutex::new(Self::new_empty_user(self.base(), self.size())?));
@@ -1943,6 +2047,8 @@ impl MmSpace {
             .collect::<KResult<Vec<_>>>()?;
         let mut self_modify = self.pgtbl.modify();
         for (vma_meta, runtime) in &operations {
+            let mut child_vma = vma_meta.clone();
+            let charge = Self::charge_vma(&mut child_vma)?;
             let invalidate = Some(guard.invalidate_handle(&new_aspace_clone));
             let new_mm_id = guard.mm_id();
             let new_runtime = {
@@ -1959,12 +2065,12 @@ impl MmSpace {
                     },
                 )?
             };
-            let vma = vma_meta
+            let vma = child_vma
                 .relocated(vma_meta.start(), vma_meta.size(), vma_meta.flags())
                 .with_backing(new_runtime.backing_info());
 
             let aspace = guard.deref_mut();
-            aspace.install_runtime_mapping(vma, new_runtime, false)?;
+            aspace.install_runtime_mapping(vma, new_runtime, false, charge)?;
         }
         drop(guard);
 

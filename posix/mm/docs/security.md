@@ -1,5 +1,15 @@
 # posix-mm — Security and Reliability Analysis
 
+## Independent resource limits
+
+Finite `RLIMIT_AS` and default system commitment admission are separate checks.
+Unlimited `RLIMIT_AS` no longer permits a single private writable commitment
+larger than managed RAM. The check uses total capacity, not volatile free pages,
+and is performed before destructive fixed-address replacement. `MAP_NORESERVE`
+bypasses default private commitment admission as on Linux, so physical OOM is
+still possible and handled by the process runtime. A passed heuristic admission
+is not a guarantee of future physical backing or complete OOM recovery.
+
 ## Trust Model
 
 `posix-mm` trusts that:

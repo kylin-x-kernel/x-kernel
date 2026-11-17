@@ -1046,23 +1046,77 @@ fn failed_protect_retires_tokens_for_the_already_cleared_prefix() {
         invalidate: guard.invalidate_handle(&mm),
     });
     let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
-    let next_vma = VmArea::new(next, PAGE_SIZE_4K, flags - MappingFlags::WRITE, flags,
-        next_runtime.backing_info(), 0, Some(memspace::FileMappingInfo {
+    let next_vma = VmArea::new(
+        next,
+        PAGE_SIZE_4K,
+        flags - MappingFlags::WRITE,
+        flags,
+        next_runtime.backing_info(),
+        0,
+        Some(memspace::FileMappingInfo {
             offset: 0,
             inode: file.inode().inode(),
             path: None,
-        }));
-    guard.map_runtime_vma(next_vma, false, next_runtime).expect("install rejecting second VMA");
-    assert_eq!(guard.protect(runtime.start, PAGE_SIZE_4K * 2, MappingFlags::WRITE),
-        Err(kerrno::KError::PermissionDenied), "readonly shared file rejects write upgrade");
+        }),
+    );
+    guard
+        .map_runtime_vma(next_vma, false, next_runtime)
+        .expect("install rejecting second VMA");
+    assert_eq!(
+        guard.protect(runtime.start, PAGE_SIZE_4K * 2, MappingFlags::WRITE),
+        Err(kerrno::KError::PermissionDenied),
+        "readonly shared file rejects write upgrade"
+    );
+    assert_eq!(
+        guard
+            .find_vma(runtime.start)
+            .expect("completed first VMA")
+            .flags(),
+        MappingFlags::WRITE,
+        "a later failure must preserve the first VMA's completed protection change"
+    );
+    assert_eq!(
+        guard.find_vma(next).expect("rejected second VMA").flags(),
+        flags - MappingFlags::WRITE,
+        "the rejecting VMA must retain its original permissions"
+    );
     assert!(guard.page_table().query(runtime.start).is_err());
-    assert!(runtime.file_pages.lock().is_empty(),
-        "first VMA's cleared PTE must release its token before the later VMA rejects protection");
-    assert!(guard.handle_page_fault(runtime.start, PageFaultFlags::READ).is_resolved());
+    assert!(
+        runtime.file_pages.lock().is_empty(),
+        "first VMA's cleared PTE must release its token before the later VMA rejects protection"
+    );
+    assert_eq!(
+        guard.handle_page_fault(runtime.start, PageFaultFlags::READ),
+        memspace::PageFaultOutcome::AccessDenied,
+        "the completed write-only VMA must reject a software read fault"
+    );
+    // Restore read access explicitly before checking that refault reacquires
+    // the token released by the completed write-only protection change.
+    guard
+        .protect(runtime.start, PAGE_SIZE_4K, MappingFlags::READ)
+        .expect("restore first VMA read access");
+    assert!(
+        guard
+            .handle_page_fault(runtime.start, PageFaultFlags::READ)
+            .is_resolved()
+    );
     assert!(runtime.file_pages.lock().contains_key(&0));
-    assert!(guard.handle_page_fault(runtime.start, PageFaultFlags::WRITE).is_resolved());
+    guard
+        .protect(runtime.start, PAGE_SIZE_4K, MappingFlags::WRITE)
+        .expect("restore first VMA write access");
+    assert!(
+        guard
+            .handle_page_fault(runtime.start, PageFaultFlags::WRITE)
+            .is_resolved()
+    );
     assert!(runtime.file_pages.lock().is_empty());
-    assert!(runtime.anon.page_at(0).expect("private write after failed protect").is_exclusive());
+    assert!(
+        runtime
+            .anon
+            .page_at(0)
+            .expect("private write after failed protect")
+            .is_exclusive()
+    );
     guard.clear();
 }
 

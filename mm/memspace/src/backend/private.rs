@@ -528,8 +528,8 @@ pub fn map_existing_private_object_page(
     Ok(ExistingPrivatePageResult::Resolved)
 }
 
-/// Detaches one private-anon object range, tears down the corresponding PTEs,
-/// and releases frames whose last object reference disappeared.
+/// Tears down a private-anon PTE range, finishes TLB invalidation, then
+/// releases object slots and last-reference frames without a temporary list.
 pub fn unmap_private_object_range(
     object: &Arc<AnonPrivateObject>,
     object_start: u64,
@@ -537,20 +537,20 @@ pub fn unmap_private_object_range(
     size: PageSize,
     pgtbl: &mut PageTableMut,
 ) -> KResult {
-    let detached = object.detach_range(object_start, range.size());
     pgtbl
         .unmap_sparse_region(range.start, range.size(), size)
         .map_err(super::map_paging_err)?;
     pgtbl.finish();
-    release_private_object_pages(detached.finalize_release());
+    object.release_range_after_unmap(object_start, range.size(), |page| {
+        dealloc_frame(page.phys_addr(), page.page_size());
+    });
     Ok(())
 }
 
 /// Discards one private-anon object range for `MADV_DONTNEED`.
 ///
-/// The object loses ownership before the visible PTEs are removed, but the
-/// detached frame releases are finalized only after the page table flush. The
-/// final object-side invalidation keeps registered aliases consistent.
+/// Object slots and last-reference frames are released after the page table
+/// flush. The final object-side invalidation keeps registered aliases consistent.
 pub fn discard_private_object_range(
     object: &Arc<AnonPrivateObject>,
     object_start: u64,

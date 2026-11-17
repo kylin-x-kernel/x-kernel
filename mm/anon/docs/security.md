@@ -43,6 +43,16 @@ Invariants:
   ownership from ad hoc runtime-local frame tables when an explicit
   `Anon*Object` is available.
 
+## Post-unmap release contract
+
+`release_range_after_unmap` requires the owning runtime to exclude concurrent
+faults/fork and to finish PTE teardown and TLB invalidation before removing
+slots. Each object-owned page reference is released once; the last-reference
+frame callback runs outside the page-map lock. This avoids temporary range
+allocations during OOM exit. Calling it before invalidation would free memory
+still reachable through a stale translation. This is a trusted runtime contract,
+not an operation exposed directly to userspace.
+
 ## First-COW Publication Boundary
 
 The runtime callback of `commit_after` must leave the original PTE unchanged when it returns an error. The re-check that the object slot is empty, the PTE compare/replace, and the publication of the owned anonymous page are all covered by the same object lock; on failure, the target frame is not taken over. A file-cache pin must not take part in exclusivity decisions for an anonymous slot or in reclaiming anonymous frames.
