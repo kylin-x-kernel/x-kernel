@@ -214,19 +214,11 @@ pub fn simple_getattr(
 /// It updates inode size without reacquiring cache locks or waiting for I/O.
 pub fn simple_write_end(mapping: &AddressSpace, request: WriteEndRequest) -> VfsResult<usize> {
     let copied = request.copied();
-    let inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-    let old_size = inode.size();
-    let last_pos = request
-        .pos()
-        .checked_add(copied as u64)
-        .ok_or(VfsError::InvalidInput)?;
-
-    let new_size = if copied == 0 {
-        old_size
-    } else {
-        old_size.max(last_pos)
-    };
-    mapping.write_end_set_size(new_size)?;
+    if copied == 0 {
+        return Ok(0);
+    }
+    let last_pos = request.pos() + copied as u64;
+    mapping.write_end_set_size(last_pos)?;
     Ok(copied)
 }
 

@@ -598,7 +598,10 @@ impl AddressSpaceOperations for GrowingReadOps {
         // size. The filesystem has initialized both the data and zero tail.
         folio.data().fill(0);
         folio.data()[..17].fill(0x6b);
-        mapping.write_end_set_size(PAGE_SIZE_4K as u64)?;
+        mapping
+            .inode()
+            .ok_or(crate::VfsError::InvalidInput)?
+            .set_size(PAGE_SIZE_4K as u64);
         folio.complete(Ok(()))
     }
 }

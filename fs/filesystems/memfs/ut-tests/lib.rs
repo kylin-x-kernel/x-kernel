@@ -2,6 +2,8 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use alloc::vec;
+
 use linux_raw_sys::general::{O_CREAT, O_EXCL, O_RDWR, O_WRONLY};
 use unittest::{assert, assert_eq, def_test};
 
@@ -340,6 +342,30 @@ fn tmpfs_write_end_updates_vfs_inode_size() {
     assert_eq!(file.write_from(b"hello", &mut pos).unwrap(), 5);
     assert_eq!(file.path().getattr().unwrap().size, 5);
     assert_eq!(file.inode().size(), 5);
+}
+
+#[def_test]
+fn tmpfs_growth_and_overwrite_publish_the_accepted_size_and_contents() {
+    let fs = shmem::new_tmpfs(SuperBlockFlags::empty()).unwrap();
+    let root = Mount::new_root(&fs).root_path();
+    let file = create_copy_test_file(&root, "growth");
+    assert_eq!(file.write_from(b"old", &mut 0), Ok(3));
+
+    let mut expected = vec![0x51; 2 * memaddr::PAGE_SIZE_4K];
+    assert_eq!(file.write_from(&expected, &mut 0), Ok(expected.len()));
+    assert_eq!(file.inode().size(), expected.len() as u64);
+    assert_eq!(file.path().getattr().unwrap().size, expected.len() as u64);
+    let mut output = vec![0; expected.len() + 1];
+    assert_eq!(file.read_from(&mut output, &mut 0), Ok(expected.len()));
+    assert_eq!(&output[..expected.len()], expected.as_slice());
+
+    let overwrite = vec![0x62; memaddr::PAGE_SIZE_4K];
+    assert_eq!(file.write_from(&overwrite, &mut 0), Ok(overwrite.len()));
+    expected[..overwrite.len()].copy_from_slice(&overwrite);
+    assert_eq!(file.inode().size(), expected.len() as u64);
+    assert_eq!(file.path().getattr().unwrap().size, expected.len() as u64);
+    assert_eq!(file.read_from(&mut output, &mut 0), Ok(expected.len()));
+    assert_eq!(&output[..expected.len()], expected.as_slice());
 }
 
 #[def_test]

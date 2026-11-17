@@ -1062,6 +1062,16 @@ A per-folio write-end of a block-device filesystem publishes the accepted `i_siz
 within the same generic-write data-lock and copied-folio-lock critical section, instead of disguising ext4 semantics as a
 libfs helper. Batched tail release publishes no size because a batched run never extends the visible size.
 
+`WriteEndRequest` contains the matching `WriteBeginRequest` range and copied
+byte count. The generic writer validates the range's exclusive end before
+admission, and copying is bounded by the range length. `write_end_set_size`
+compares the accepted end against the inode's current size under the caller's
+inode data lock and publishes growth.
+The hook returns at most the copied count and publishes a nonempty accepted
+prefix before returning success. The generic writer can then advance its local
+EOF bound for cache preparation and batch admission. Zero-byte cancellation
+preserves the file length.
+
 `AddressSpace` itself holds the object-id, the mapped views, the statically shared `AddressSpaceOperations` and
 `i_pages: MappingPages`. This field embeds the cache container directly without a separate `Arc` allocation, corresponding to Linux
 `address_space::i_pages`; Folio uses `Arc<Folio>` to keep the physical page, the stable identity and the internal page-lock lifetime together.

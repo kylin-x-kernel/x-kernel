@@ -1783,6 +1783,15 @@ copied folio lock for a single-page write; a batched run settles through the
 releasing only the reservation units that `batch_write_begin` newly created. Its
 fast path takes no cache/lifecycle wait. Short-accept and copy-failure rollback
 waits happen after that lock is released.
+Complete writes and complete batched runs return from reservation settlement
+before resolving the filesystem-private inode, superblock, mount or block size;
+those objects are needed only to release an unaccepted reservation tail.
+Single-page completion passes the nonempty accepted end to the address-space
+size helper, which reads the inode's current size and publishes growth under the
+inode data lock. The completion request contains only its prepared range and
+copied count. The generic writer validates the range's exclusive end before
+admission, and completion counts stay within that range. Short writes and
+cancellation release only their token-owned unaccepted tail.
 Generic scans sample live EOF per folio and charge attempted work independently
 of completion prefixes. Existing inode, extent and queued-I/O lifetime owners
 remain unchanged.

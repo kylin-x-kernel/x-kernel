@@ -1117,31 +1117,33 @@ fn reserve_delalloc_range(
 /// Releases a buffered write's unaccepted tail: the reservation this write
 /// still owns beyond the accepted prefix.
 ///
-/// - `ext4`: mount holding the delayed-allocation accounting.
-/// - `inode`: regular file receiving the write.
+/// - `mapping`: address space whose inode owns the reservation; its filesystem
+///   context is resolved only when the accepted prefix leaves a tail to settle.
 /// - `pos`: write or run start byte offset.
 /// - `len`: reserved byte count of the write or run.
 /// - `accepted`: bytes accepted (per-folio) or published (batched), at most
 ///   `len`.
 /// - `reservation`: byte ranges the matching admission newly reserved; ranges
 ///   it does not list belong to earlier writes and stay reserved.
-/// - `block_size`: filesystem block size in bytes.
 ///
 /// Errors: accounting-invariant and overflow errors propagate unchanged.
 ///
 /// Locking: takes the mount read guard and the inode-state lock per release.
 fn finish_delalloc_write(
-    ext4: &Ext4Mount,
-    inode: &Ext4Inode,
+    mapping: &AddressSpace,
     pos: u64,
     len: usize,
     accepted: usize,
     reservation: &WriteReservation,
-    block_size: u64,
 ) -> VfsResult<()> {
     if accepted >= len {
         return Ok(());
     }
+    let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
+    let inode = vfs_inode.private::<Ext4Inode>()?;
+    let super_block = vfs_inode.super_block()?;
+    let ext4 = ext4_private(&super_block)?;
+    let block_size = super_block.block_size();
     let Some((first, requested_blocks)) = logical_block_range(pos, len, block_size)? else {
         return Ok(());
     };
@@ -1151,9 +1153,7 @@ fn finish_delalloc_write(
     let release_start = if accepted == 0 {
         first
     } else {
-        let accepted_end = pos
-            .checked_add(accepted as u64)
-            .ok_or(VfsError::InvalidInput)?;
+        let accepted_end = pos + accepted as u64;
         first_logical_block_after_len(accepted_end, block_size)
     };
     if release_start >= requested_end {
@@ -1755,38 +1755,9 @@ impl AddressSpaceOperations for Ext4AddressSpaceOperations {
         request: WriteEndRequest,
         reservation: &WriteReservation,
     ) -> VfsResult<usize> {
-        let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-        let inode = vfs_inode.private::<Ext4Inode>()?;
-        let super_block = vfs_inode.super_block()?;
-        let ext4 = ext4_private(&super_block)?;
-        let block_size = super_block.block_size();
         let accepted = request.copied();
-        let accepted_end = match request.pos().checked_add(accepted as u64) {
-            Some(end) => end,
-            None => {
-                // Nothing is accepted, so the whole reservation this write
-                // created is released; reservations of earlier writes stay owned.
-                finish_delalloc_write(
-                    ext4,
-                    inode,
-                    request.pos(),
-                    request.len(),
-                    0,
-                    reservation,
-                    block_size,
-                )?;
-                return Err(VfsError::InvalidInput);
-            }
-        };
-        finish_delalloc_write(
-            ext4,
-            inode,
-            request.pos(),
-            request.len(),
-            accepted,
-            reservation,
-            block_size,
-        )?;
+        let accepted_end = request.pos() + accepted as u64;
+        finish_delalloc_write(mapping, request.pos(), request.len(), accepted, reservation)?;
         if accepted != 0 {
             // The accepted prefix may still be dirty if size publication fails.
             mapping.write_end_set_size(accepted_end)?;
@@ -1838,21 +1809,15 @@ impl BatchedWriteOperations for Ext4AddressSpaceOperations {
         tail: BatchWriteRunTail,
         reservation: &WriteReservation,
     ) -> VfsResult<()> {
-        let vfs_inode = mapping.inode().ok_or(VfsError::InvalidInput)?;
-        let inode = vfs_inode.private::<Ext4Inode>()?;
-        let super_block = vfs_inode.super_block()?;
-        let ext4 = ext4_private(&super_block)?;
         // Published bytes are final; only the reservation tail inside this
         // run's token is released, and no size is published (the run never
         // grows past the visible size).
         finish_delalloc_write(
-            ext4,
-            inode,
+            mapping,
             tail.pos(),
             tail.len_bytes(),
             tail.published(),
             reservation,
-            super_block.block_size(),
         )
     }
 }

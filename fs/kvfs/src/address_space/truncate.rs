@@ -48,6 +48,13 @@ impl AddressSpace {
     /// between the old EOF and the completed write. This is the Rust
     /// equivalent of an aops `write_end` implementation doing
     /// `i_size_write(mapping->host, len)`.
+    ///
+    /// `len` is the nonempty accepted prefix's end in bytes. This helper reads
+    /// the owning inode's current size under the caller's inode data lock and
+    /// publishes `len` only for growth.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` if the owning inode cannot be resolved.
     pub fn write_end_set_size(&self, len: u64) -> VfsResult<()> {
         let inode = self.inode().ok_or(VfsError::InvalidInput)?;
         if len > inode.size() {

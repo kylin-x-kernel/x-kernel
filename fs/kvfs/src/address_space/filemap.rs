@@ -448,10 +448,9 @@ impl AddressSpace {
 
     /// Copies one page step and completes the backend hook for a single folio.
     ///
-    /// - `folio`: caller-locked write target covering `[pos, pos + step)`.
+    /// - `folio`: caller-locked write target covering `range`.
     /// - `page_off`: byte offset of the step inside the page.
-    /// - `step`: request length, never past the page end.
-    /// - `pos`: file byte offset of the step.
+    /// - `range`: matching write-begin range, never past the page end.
     /// - `reservation`: admission token from the matching `write_begin`.
     /// - `iter`: source; advanced by exactly the copied prefix.
     ///
@@ -466,17 +465,16 @@ impl AddressSpace {
         &self,
         folio: &mut FolioGuard<'_>,
         page_off: usize,
-        step: usize,
-        pos: u64,
+        range: WriteBeginRequest,
         reservation: &WriteReservation,
         iter: &mut IovIterSource<'_>,
     ) -> FolioWriteResult {
-        match self.copy_and_dirty(folio, page_off, step, iter) {
+        match self.copy_and_dirty(folio, page_off, range.len(), iter) {
             Ok(copied) => FolioWriteResult::Copied {
                 copied,
                 completion: self.ops.write_end(
                     self,
-                    WriteEndRequest::new(pos, step, copied),
+                    WriteEndRequest::new(range, copied),
                     reservation,
                 ),
             },
@@ -488,7 +486,7 @@ impl AddressSpace {
     ///
     /// - `pos`: file byte offset of the step.
     /// - `iter`: source iterator; rewound by the unaccepted tail.
-    /// - `copied`: bytes actually copied into the folio.
+    /// - `copied`: bytes copied into the folio, bounded by the validated step.
     /// - `accepted`: bytes the backend accepted; must not exceed `copied`.
     /// - `grew_cache`: whether the step extended the visible size.
     /// - `prepared_end`: EOF prepared by this step.
@@ -514,9 +512,7 @@ impl AddressSpace {
         if accepted < copied {
             iter.revert(copied - accepted)?;
         }
-        let accepted_end = pos
-            .checked_add(accepted as u64)
-            .ok_or(VfsError::InvalidInput)?;
+        let accepted_end = pos + accepted as u64;
         if grew_cache && accepted_end < prepared_end {
             self.i_pages
                 .resize_cached_folios(prepared_end, accepted_end)?;
@@ -682,8 +678,8 @@ impl AddressSpace {
     /// Returns: the accepted length paired with the EOF published by this step.
     ///
     /// Errors: the backend `write_end` error after iterator and cache rollback,
-    /// `InvalidInput` if a backend accepts more than was copied or on offset
-    /// overflow. The caller reports any already-committed prefix.
+    /// `InvalidInput` if a backend accepts more than was copied. The caller
+    /// reports any already-committed prefix.
     ///
     /// Locking: caller holds the inode data lock and no folio lock.
     fn finish_page_write(
@@ -748,16 +744,15 @@ impl AddressSpace {
         iter: &mut IovIterSource<'_>,
     ) -> VfsResult<(usize, u64)> {
         let prepared_end = pos.checked_add(step as u64).ok_or(VfsError::InvalidInput)?;
-        let reservation = self
-            .ops
-            .write_begin(self, WriteBeginRequest::new(pos, step))?;
+        let range = WriteBeginRequest::new(pos, step);
+        let reservation = self.ops.write_begin(self, range)?;
         let grew_cache = prepared_end > visible_len;
         if grew_cache {
             self.i_pages
                 .resize_cached_folios(visible_len, prepared_end)?;
         }
         let folio_step = self.with_folio_or_create(index, |folio| {
-            Ok(self.copy_and_complete_folio(folio, page_off, step, pos, &reservation, iter))
+            Ok(self.copy_and_complete_folio(folio, page_off, range, &reservation, iter))
         });
         match folio_step {
             Ok(FolioWriteResult::Copied { copied, completion }) => self.finish_page_write(
@@ -772,38 +767,22 @@ impl AddressSpace {
                 iter,
             ),
             Ok(FolioWriteResult::Failed(failure)) => self.cancel_page_write(
-                pos,
-                step,
+                range,
                 failure.copied,
                 failure.error,
-                grew_cache,
-                prepared_end,
                 visible_len,
                 &reservation,
                 iter,
             ),
-            Err(error) => self.cancel_page_write(
-                pos,
-                step,
-                0,
-                error,
-                grew_cache,
-                prepared_end,
-                visible_len,
-                &reservation,
-                iter,
-            ),
+            Err(error) => self.cancel_page_write(range, 0, error, visible_len, &reservation, iter),
         }
     }
 
     /// Reverts a page step whose copy or dirty publication failed.
     ///
-    /// - `pos`: file byte offset of the step.
-    /// - `step`: requested length of the step.
+    /// - `range`: matching write-begin range to cancel.
     /// - `copied`: bytes consumed from the source before the failure.
     /// - `error`: failure to report once rollback completes.
-    /// - `grew_cache`: whether the step extended the visible size.
-    /// - `prepared_end`: EOF prepared by this step.
     /// - `visible_len`: EOF before this step, restored after rollback.
     /// - `reservation`: admission token of this step; cancels its tail.
     /// - `iter`: source iterator; rewound by `copied`.
@@ -815,19 +794,11 @@ impl AddressSpace {
     /// a cache-shrink failure.
     ///
     /// Locking: caller holds the inode data lock and no folio lock.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "CG-024-lint-exceptions: clippy::too_many_arguments: mirrors the step fields the \
-                  caller already owns"
-    )]
     fn cancel_page_write(
         &self,
-        pos: u64,
-        step: usize,
+        range: WriteBeginRequest,
         copied: usize,
         error: VfsError,
-        grew_cache: bool,
-        prepared_end: u64,
         visible_len: u64,
         reservation: &WriteReservation,
         iter: &mut IovIterSource<'_>,
@@ -837,11 +808,16 @@ impl AddressSpace {
         let revert_error = iter.revert(copied).err();
         if let Err(cancel_error) =
             self.ops
-                .write_end(self, WriteEndRequest::new(pos, step, 0), reservation)
+                .write_end(self, WriteEndRequest::new(range, 0), reservation)
         {
-            log::warn!("failed to cancel buffered write at {pos} (len {step}): {cancel_error:?}");
+            log::warn!(
+                "failed to cancel buffered write at {} (len {}): {cancel_error:?}",
+                range.pos(),
+                range.len()
+            );
         }
-        let resize_error = if grew_cache {
+        let prepared_end = range.pos() + range.len() as u64;
+        let resize_error = if prepared_end > visible_len {
             self.i_pages
                 .resize_cached_folios(prepared_end, visible_len)
                 .err()

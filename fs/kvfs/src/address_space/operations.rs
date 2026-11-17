@@ -20,6 +20,9 @@ pub struct WriteBeginRequest {
 
 impl WriteBeginRequest {
     /// Creates a request for a buffered-write byte range.
+    ///
+    /// The caller must validate that the range's exclusive end fits in `u64`
+    /// before passing it to a write-begin hook.
     pub const fn new(pos: u64, len: usize) -> Self {
         Self { pos, len }
     }
@@ -40,33 +43,36 @@ impl WriteBeginRequest {
     }
 }
 
-/// Buffered write completion request.
+/// Buffered write completion for a previously prepared byte range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WriteEndRequest {
-    pos: u64,
-    len: usize,
+    range: WriteBeginRequest,
     copied: usize,
 }
 
 impl WriteEndRequest {
-    /// Creates a request for a buffered-write byte range.
-    pub const fn new(pos: u64, len: usize, copied: usize) -> Self {
-        Self { pos, len, copied }
+    /// Creates a completion for the matching write-begin range.
+    ///
+    /// `range` must be the admitted range with its end already validated.
+    /// `copied` is the byte count copied into the cache, at most `range.len()`;
+    /// zero cancels the prepared write without publishing a new file size.
+    pub const fn new(range: WriteBeginRequest, copied: usize) -> Self {
+        Self { range, copied }
     }
 
     /// Returns the starting file byte offset.
     pub const fn pos(self) -> u64 {
-        self.pos
+        self.range.pos()
     }
 
     /// Returns the requested byte count.
     pub const fn len(self) -> usize {
-        self.len
+        self.range.len()
     }
 
     /// Returns whether the requested byte range is empty.
     pub const fn is_empty(self) -> bool {
-        self.len == 0
+        self.range.is_empty()
     }
 
     /// Returns the number of bytes copied into the cache.
@@ -188,8 +194,8 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// Prepares a per-folio buffered write and reports what this call newly
     /// reserved.
     ///
-    /// - `request`: the byte range the generic path intends to copy, never
-    ///   past one page; batched runs use
+    /// - `request`: the byte range the generic path intends to copy, with a
+    ///   validated exclusive end and never past one page; batched runs use
     ///   [`BatchedWriteOperations::batch_write_begin`] instead.
     ///
     /// Returns: a [`WriteReservation`] listing the half-open byte ranges this
@@ -221,9 +227,13 @@ pub trait AddressSpaceOperations: Send + Sync + 'static {
     /// The hook releases the unaccepted tail strictly inside `reservation`:
     /// ranges that reservation does not list belong to earlier writes and their
     /// dirty data must keep their space and quota guarantees. When accepting
-    /// bytes that extend the file, the implementation must publish the new
-    /// visible size with [`AddressSpace::write_end_set_size`]. Batched runs do
-    /// not reach this hook; they release their unaccepted tail through
+    /// bytes, return at most [`WriteEndRequest::copied`]. Before returning
+    /// success for a nonempty accepted prefix, publish its end with
+    /// [`AddressSpace::write_end_set_size`]; that helper owns the growth check
+    /// against the inode's current size. Zero accepted bytes must not grow the
+    /// file. The caller holds the inode data lock and advances its write cursor
+    /// assuming the accepted size is already published. Batched runs do not
+    /// reach this hook; they release their unaccepted tail through
     /// [`BatchedWriteOperations::release_write_run_tail`], whose return type
     /// cannot change a published byte count.
     fn write_end(

@@ -194,6 +194,50 @@ fn overwrite_fixture_with_len(len: usize) -> (Arc<SuperBlock>, Arc<VfsFile>, Arc
 }
 
 #[def_test]
+fn buffered_growth_and_overwrite_preserve_eof_contents_and_reservations() {
+    let (mount, file, _device) = overwrite_fixture_with_len(3);
+    let private = file.inode().private::<Ext4Inode>().unwrap();
+    assert_eq!(file.inode().size(), 3);
+    assert_eq!(private.reserved_data_blocks(), 0);
+
+    let mut expected = vec![0x51; 2 * PAGE_SIZE_4K];
+    assert_eq!(file.write_from(&expected, &mut 0), Ok(expected.len()));
+    assert_eq!(file.inode().size(), expected.len() as u64);
+    assert_eq!(private.reserved_data_blocks(), 1);
+    assert_eq!(
+        private.reserved_delalloc_in_range(LogicalBlock::new(1), 1),
+        Ok(1)
+    );
+    let mut output = vec![0; expected.len() + 1];
+    assert_eq!(file.read_from(&mut output, &mut 0), Ok(expected.len()));
+    assert_eq!(&output[..expected.len()], expected.as_slice());
+
+    let overwrite = vec![0x62; PAGE_SIZE_4K];
+    assert_eq!(file.write_from(&overwrite, &mut 0), Ok(overwrite.len()));
+    expected[..overwrite.len()].copy_from_slice(&overwrite);
+    assert_eq!(file.inode().size(), expected.len() as u64);
+    assert_eq!(private.reserved_data_blocks(), 1);
+    assert_eq!(
+        private.reserved_delalloc_in_range(LogicalBlock::new(1), 1),
+        Ok(1)
+    );
+    assert_eq!(file.read_from(&mut output, &mut 0), Ok(expected.len()));
+    assert_eq!(&output[..expected.len()], expected.as_slice());
+
+    file.fsync(false).unwrap();
+    assert_eq!(private.disk_size(), expected.len() as u64);
+    assert_eq!(private.reserved_data_blocks(), 0);
+    assert_eq!(
+        ext4_private(&mount)
+            .unwrap()
+            .read()
+            .read_at(private, 0, &mut output),
+        Ok(expected.len())
+    );
+    assert_eq!(&output[..expected.len()], expected.as_slice());
+}
+
+#[def_test]
 fn cached_buffered_overwrite_does_not_wait_for_mount_persistence() {
     let (mount, file, device) = overwrite_fixture_with_pages(1);
     let input = vec![0x71; PAGE_SIZE_4K];

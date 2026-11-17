@@ -966,3 +966,12 @@ while retaining writer data serialization. Writeback samples live EOF only
 after taking the same folio lock. Attempted work and filesystem declines share
 one pagecache-owned control; completion never retains it. This does not replace
 shared-PTE dirty rearming/invalidation.
+
+Buffered completion requests describe only the prepared range and copied count;
+the range's exclusive end is validated before admission, and the copy count is
+bounded by its length. The size-publication helper compares the accepted end
+against the owning inode's current size while the inode data lock excludes
+competing writes and truncate. Hooks must accept at most the copied count and
+publish a nonempty accepted prefix before returning success. Cancellation
+preserves the file length. Writeback continues to sample live EOF under its own
+folio-lock protocol.

@@ -17,7 +17,9 @@ use super::{
     super::{AddressSpace, AddressSpaceOperations, BatchedWriteOperations, WritebackControl},
     TruncateOps,
 };
-use crate::{NodeFlags, NodePermission, NodeType, Umode, VfsError, VfsInode, VfsInodeInit, VfsResult};
+use crate::{
+    NodeFlags, NodePermission, NodeType, Umode, VfsError, VfsInode, VfsInodeInit, VfsResult,
+};
 
 /// Source that serves `limit` bytes and then faults, modelling a bad user buffer.
 struct FailingSource {
@@ -73,8 +75,7 @@ impl AddressSpaceOperations for PrefixWriteOps {
         request: crate::WriteEndRequest,
         _reservation: &crate::WriteReservation,
     ) -> VfsResult<usize> {
-        mapping.write_end_set_size(request.pos() + request.copied() as u64)?;
-        Ok(request.copied())
+        crate::libfs::simple_write_end(mapping, request)
     }
 
     fn batched_write_ops(&self) -> Option<&'static dyn BatchedWriteOperations> {
@@ -377,6 +378,103 @@ fn resident_two_page_file(
     (inode, mapping)
 }
 
+fn growing_write_inode(size: u64) -> Arc<VfsInode> {
+    VfsInode::new_file_with_address_space_and_flags(
+        Arc::new(TruncateOps),
+        NodeFlags::ALWAYS_CACHE,
+        &PREFIX_WRITE_OPERATIONS,
+        VfsInodeInit::new(
+            22,
+            size,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    )
+}
+
+#[def_test(serial)]
+fn write_growth_then_truncate_and_overwrite_preserves_the_current_eof() {
+    let inode = growing_write_inode(17);
+    let mapping = inode.address_space();
+    let total = 2 * PAGE_SIZE_4K + 13;
+    let mut source = FailingSource {
+        total,
+        limit: total,
+        written: 0,
+    };
+    let mut iter = iov_iter_source(&mut source);
+    {
+        let _data_guard = inode.lock_data();
+        assert_eq!(mapping.perform_write(0, &mut iter, total), Ok(total));
+    }
+    assert_eq!(inode.size(), total as u64);
+    inode.set_len(7).unwrap();
+    let mut source = FailingSource {
+        total: 1,
+        limit: 1,
+        written: 0,
+    };
+    let mut iter = iov_iter_source(&mut source);
+    {
+        let _data_guard = inode.lock_data();
+        assert_eq!(mapping.perform_write(1, &mut iter, 1), Ok(1));
+    }
+    assert_eq!(inode.size(), 7, "an overwrite must not republish the old EOF");
+}
+
+#[def_test]
+fn failed_growth_cancellation_preserves_the_file_length() {
+    let inode = growing_write_inode(17);
+    let mapping = inode.address_space();
+    let mut source = FailingSource {
+        total: PAGE_SIZE_4K,
+        limit: 0,
+        written: 0,
+    };
+    let mut iter = iov_iter_source(&mut source);
+    let result = {
+        let _data_guard = inode.lock_data();
+        mapping.perform_write((2 * PAGE_SIZE_4K) as u64, &mut iter, PAGE_SIZE_4K)
+    };
+    assert!(result.is_err());
+    assert_eq!(iter.count(), PAGE_SIZE_4K);
+    assert_eq!(inode.size(), 17, "zero accepted bytes must not grow a hole");
+}
+
+#[def_test]
+fn short_growth_publishes_only_the_accepted_prefix() {
+    let inode = VfsInode::new_file_with_address_space_and_flags(
+        Arc::new(TruncateOps),
+        NodeFlags::ALWAYS_CACHE,
+        &SHORT_ACCEPT_OPERATIONS,
+        VfsInodeInit::new(
+            23,
+            0,
+            Umode::new(NodeType::RegularFile, NodePermission::default()),
+        ),
+    );
+    let mapping = inode.address_space();
+    let mut source = FailingSource {
+        total: 2 * PAGE_SIZE_4K,
+        limit: 2 * PAGE_SIZE_4K,
+        written: 0,
+    };
+    let mut iter = iov_iter_source(&mut source);
+    {
+        let _data_guard = inode.lock_data();
+        assert_eq!(
+            mapping.perform_write(0, &mut iter, 2 * PAGE_SIZE_4K),
+            Ok(PAGE_SIZE_4K - 1)
+        );
+    }
+    assert_eq!(inode.size(), (PAGE_SIZE_4K - 1) as u64);
+    assert_eq!(iter.count(), PAGE_SIZE_4K + 1);
+    mapping
+        .with_folio(0, |folio| {
+            assert_eq!(folio.unwrap().data()[PAGE_SIZE_4K - 1], 0);
+        })
+        .unwrap();
+}
+
 /// Collects the folio indices one writeback pass charges.
 ///
 /// - `mapping`: address space to scan.
@@ -624,8 +722,7 @@ impl AddressSpaceOperations for ReleaseFailureOps {
         request: crate::WriteEndRequest,
         _reservation: &crate::WriteReservation,
     ) -> VfsResult<usize> {
-        mapping.write_end_set_size(request.pos() + request.copied() as u64)?;
-        Ok(request.copied())
+        crate::libfs::simple_write_end(mapping, request)
     }
 
     fn batched_write_ops(&self) -> Option<&'static dyn BatchedWriteOperations> {
