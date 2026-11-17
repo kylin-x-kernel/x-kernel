@@ -476,8 +476,18 @@ INPUT acceptance. Unmatched loopback UDP keeps its `PreparedUdpPacket` in the
 deferred queue and resumes local delivery without evaluating or counting INPUT
 again, including across a table replacement. `PacketBuf` carries no filter progress.
 Interface-name updates take Router before ingress; packet matching takes ingress
-before the filter read lock and never calls back into Router. OUTPUT and FORWARD
-are not connected to packet processing yet.
+before the filter read lock and never calls back into Router. FORWARD is not
+connected to packet processing yet.
+
+### Local IPv4 output
+
+Router applies OUTPUT to local IPv4 datagrams after route selection and header
+finalization, before fragmentation or device transmission, including loopback
+and control replies. Broadcast copies are checked per output device.
+TX queues and dispatch budgets count complete datagrams; queue rejection precedes
+OUTPUT, and fragments or device retries do not repeat evaluation or counting.
+Queued packets use the table current at dispatch time; a later DROP is not
+reported to the sending socket.
 
 ### Legacy IPv4 Table Compatibility
 
@@ -1434,7 +1444,7 @@ Sources: [`poller`](../src/runtime/poller.rs), [`Service`](../src/runtime/servic
 
 ### TX Routing
 
-UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smoltcp. UDP sends routed to loopback bypass the poller TX queue. Other UDP sends enter the data queue after fragmentation and capacity checks. smoltcp output enters the data queue, including loopback traffic, while generated ICMPv4 errors use the control queue. AF_PACKET sends link frames through Router directly to the selected device.
+UDP builds IPv4 packets in knet; TCP and raw sockets submit packets through smoltcp. UDP sends routed to loopback bypass the poller TX queue. Other UDP sends enter the data queue as complete datagrams after size and capacity checks. smoltcp output enters the data queue, including loopback traffic, while generated ICMPv4 errors use the control queue. AF_PACKET sends link frames through Router directly to the selected device.
 
 TCP connection setup and UDP connect/send resolve IPv4 endpoints through the
 same output lookup used by route queries. Its result carries the effective
@@ -1457,14 +1467,14 @@ wildcard bind addresses retain their listening meaning.
 | 3 | &emsp;check broadcast permission and select an active output route |
 | 4 | &emsp;source = bound_source if set, otherwise route-selected source |
 | 5 | &emsp;**if** output device is not loopback: |
-| 6 | &emsp;&emsp;check data-queue capacity for the expected packet count |
+| 6 | &emsp;&emsp;check data-queue capacity for one datagram |
 | 7 | &emsp;build UDP checksum and IPv4 header |
 | 8 | &emsp;choose DF from `IP_MTU_DISCOVER` and route MTU |
-| 9 | &emsp;fragment oversized IPv4 output; return `EMSGSIZE` if DF forbids it |
+| 9 | &emsp;check output size; return `EMSGSIZE` if DF forbids fragmentation |
 | 10 | &emsp;**if** output device is loopback: |
-| 11 | &emsp;&emsp;dispatch fragments immediately |
+| 11 | &emsp;&emsp;dispatch the complete datagram immediately |
 | 12 | &emsp;**else**: |
-| 13 | &emsp;&emsp;enqueue all fragments with the bound interface, or return `WouldBlock` |
+| 13 | &emsp;&emsp;enqueue the complete datagram with the bound interface, or return `WouldBlock` |
 | 14 | &emsp;release Router |
 | 15 | &emsp;network_poller().notify(Tx); network_poller().assist_once() |
 | 16 | **Procedure** `dispatch_budgeted(tx_budget)` |
@@ -1474,11 +1484,11 @@ wildcard bind addresses retain their listening meaning.
 | 20 | &emsp;&emsp;**if** IPv4: |
 | 21 | &emsp;&emsp;&emsp;prepare IPv4 length/checksum fields |
 | 22 | &emsp;&emsp;&emsp;**if** limited broadcast: |
-| 23 | &emsp;&emsp;&emsp;&emsp;validate source and replicate to interfaces allowed by binding |
+| 23 | &emsp;&emsp;&emsp;&emsp;validate source; run OUTPUT and fragment for each interface allowed by binding |
 | 24 | &emsp;&emsp;&emsp;**else**: |
 | 25 | &emsp;&emsp;&emsp;&emsp;look up longest-prefix route |
 | 26 | &emsp;&emsp;&emsp;&emsp;validate bound interface and local source |
-| 27 | &emsp;&emsp;&emsp;&emsp;send through route device to gateway or destination |
+| 27 | &emsp;&emsp;&emsp;&emsp;run OUTPUT, then fragment and send through route device to gateway or destination |
 | 28 | &emsp;&emsp;**else if** IPv6 multicast: |
 | 29 | &emsp;&emsp;&emsp;replicate to all devices |
 | 30 | &emsp;&emsp;**else if** IPv6 unicast: |

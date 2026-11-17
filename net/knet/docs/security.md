@@ -146,6 +146,10 @@ queue lock and before disabling BH. NetRx never acquires the filter's sleepable 
 through table changes. Ingress resumes that delivery without another INPUT
 check; ordinary network input still evaluates the current table.
 
+Local IPv4 OUTPUT runs in task context with Router held and must accept the
+packet before fragmentation, loopback receive, or device transmission.
+Filter publication never waits for Router while holding the configuration lock.
+
 Entry decoding bounds every record by `next_offset`, keeps extensions before the
 target, and checks their aligned sizes before slicing. Each decode allocates at
 most 16 extension values and fixed-width names. Unsupported conditions are

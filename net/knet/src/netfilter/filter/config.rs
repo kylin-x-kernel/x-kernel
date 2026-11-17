@@ -158,6 +158,11 @@ impl FilterConfig {
         self.evaluate_ipv4(FilterHook::LocalIn, packet, indev, "") == Ok(Verdict::Accept)
     }
 
+    /// Applies OUTPUT to a finalized local IPv4 datagram before fragmentation.
+    pub(crate) fn accept_output(&self, packet: &PacketBuf, outdev: &str) -> bool {
+        self.evaluate_ipv4(FilterHook::LocalOut, packet, "", outdev) == Ok(Verdict::Accept)
+    }
+
     /// Evaluates a normalized IPv4 packet against one complete generation.
     ///
     /// Matched rules and chain completions count the IPv4 length without padding.
