@@ -3,10 +3,23 @@
 // See LICENSES for license details.
 
 //! VirtIO device probing and HAL integration.
-use alloc::{boxed::Box, sync::Arc};
+#[cfg(any(
+    feature = "virtio-net",
+    feature = "virtio-socket",
+    feature = "virtio-9p"
+))]
+use alloc::boxed::Box;
+#[cfg(feature = "virtio-rng")]
+use alloc::sync::Arc;
 use core::ptr::NonNull;
 
 use cfg_if::cfg_if;
+#[cfg(any(
+    feature = "virtio-net",
+    feature = "virtio-socket",
+    feature = "virtio-9p",
+    feature = "virtio-rng"
+))]
 use driver_base::DriverResult;
 use driver_os_api::{DmaAllocation, DmaDirection, DmaMapping, DmaOp, DmaSpec, MmioOp, MmioRegion};
 use virtio::{BufferDirection, PhysAddr, VirtIoHal};

@@ -76,6 +76,14 @@ struct VirtioDriver {
 }
 
 enum VirtioBindingData {
+    #[cfg(any(
+        feature = "virtio-net",
+        feature = "virtio-socket",
+        feature = "virtio-9p",
+        feature = "virtio-rng",
+        feature = "virtio-gpu",
+        feature = "virtio-input",
+    ))]
     NoPrivateState,
     #[cfg(feature = "virtio-blk")]
     Block(block::BlockActivation),

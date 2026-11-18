@@ -80,6 +80,11 @@ categories = ["os", "no-std"]
 
 # Lint levels; lint parameters live in clippy.toml.
 [workspace.lints.rust]
+# Keep the production build warning-free: clippy runs with `--cfg unittest`
+# and cannot see dead code that only the production build removes, so a plain
+# `make build` is the gate for these. Fix with cfg(unittest), an
+# architecture/feature cfg, or an `expect` carrying a CG-024 reason.
+warnings = "deny"
 unreachable_pub = "warn"
 unsafe_op_in_unsafe_fn = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(unittest)"] }

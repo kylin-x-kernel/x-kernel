@@ -9,8 +9,13 @@ lint 已强制的规则不再写进 `docs/ai/skills/code-guidelines/`。
 ## 等级与检查范围
 
 - MUST 对应 `deny`，SHOULD 对应 `warn`；`make clippy` 带 `-D warnings`，两者都阻塞合入。
+- `make build` 也以 `[workspace.lints.rust] warnings = "deny"` 把 workspace 成员的 warning 当错误：
+  `make clippy` 只覆盖 `--cfg unittest` 的依赖图，生产构建里只被 ut-tests 使用的 dead code
+  会在这里暴露。修法是 `#[cfg(unittest)]`、按 target/feature 收窄，或带 CG-024 reason 的
+  `expect`；不要全局放宽 lint。
 - `make clippy` 带 `--cfg unittest` 检查选定平台的依赖图（本地库、proc-macro、host `build.rs`），
-  不带 `--all-targets`。因此 `cfg(not(unittest))` 代码、未选中的测试/bench target 从不被 lint。
+  不带 `--all-targets`。因此 `cfg(not(unittest))` 代码、未选中的测试/bench target 不被 clippy
+  检查，由 `make build` 的 warning 门禁覆盖。
 - `--cfg unittest` 不会启用 Cargo 的 `unittest` feature，也不会选择测试专用 optional 依赖。
   CI 的 AArch64 `qemu_defconfig` lint 阶段额外执行 `make UNITTEST=y clippy` 和
   `make UNITTEST=y dylint`，覆盖该测试依赖图；普通配置检查仍保留。

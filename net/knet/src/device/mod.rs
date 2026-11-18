@@ -193,6 +193,7 @@ pub(crate) trait NetDevice: Send + Sync {
     fn link_send_snapshot(&self) -> LinkSendSnapshot;
 
     /// Device-model ID for driver-backed devices.
+    #[cfg(unittest)]
     fn device_id(&self) -> Option<kdevice::DeviceId> {
         None
     }

@@ -10,7 +10,9 @@
 
 use alloc::sync::{Arc, Weak};
 
-use intrusive_collections::{LinkedList, LinkedListAtomicLink, intrusive_adapter};
+#[cfg(any(target_arch = "x86_64", unittest))]
+use intrusive_collections::LinkedList;
+use intrusive_collections::{LinkedListAtomicLink, intrusive_adapter};
 
 use super::state::{IRQ_STATE, IrqLine};
 use crate::Virq;
@@ -28,6 +30,8 @@ pub trait IrqLineRetirementObserver: Send + Sync {
 }
 
 pub(super) struct RetirementSlot {
+    /// Only the x86 MSI retirement path notifies observers.
+    #[cfg(any(target_arch = "x86_64", unittest))]
     pub(super) observer: Weak<dyn IrqLineRetirementObserver>,
     pub(super) link: LinkedListAtomicLink,
 }
@@ -66,9 +70,12 @@ pub(super) fn subscribe(
     observer: Weak<dyn IrqLineRetirementObserver>,
 ) -> Result<IrqLineRetirementSubscription, crate::IrqDescError> {
     let slot = Arc::new(RetirementSlot {
+        #[cfg(any(target_arch = "x86_64", unittest))]
         observer,
         link: LinkedListAtomicLink::new(),
     });
+    #[cfg(not(any(target_arch = "x86_64", unittest)))]
+    let _ = observer;
     {
         let state = IRQ_STATE.lock();
         if !state
@@ -89,6 +96,7 @@ pub(super) fn subscribe(
     })
 }
 
+#[cfg(any(target_arch = "x86_64", unittest))]
 pub(super) fn notify_retirements(virq: Virq, mut slots: LinkedList<RetirementAdapter>) {
     while let Some(slot) = slots.pop_front() {
         if let Some(observer) = slot.observer.upgrade() {

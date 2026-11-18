@@ -964,6 +964,7 @@ impl IrqStateDesc {
         }
     }
 
+    #[cfg(any(target_arch = "x86_64", unittest))]
     pub(super) fn take_retirements(&mut self) -> LinkedList<RetirementAdapter> {
         core::mem::replace(
             &mut self.retirement_slots,

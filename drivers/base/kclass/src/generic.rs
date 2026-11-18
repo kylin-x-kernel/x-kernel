@@ -146,11 +146,11 @@ impl<T> ClassDevice<T> {
 
     /// Fixture/test constructor that reads the parent's current binding slot.
     ///
-    /// Production publication must use [`Self::try_new_with_binding`] with the
-    /// handle captured by `binding_ref_for_lifecycle_write()`: a raw stable
-    /// object can be held long after its binding was replaced, and reading the
-    /// slot here would silently attribute the handle to whichever binding is
-    /// current at construction time.
+    /// Production publication uses [`Self::try_new_for_publication`] with the
+    /// binding captured in the driver context: a raw stable object can be held
+    /// long after its binding was replaced, and reading the slot here would
+    /// silently attribute the handle to whichever binding is current at
+    /// construction time.
     #[cfg(unittest)]
     pub(crate) fn try_new_with_class_metadata(
         parent: Arc<DeviceObject>,
@@ -173,6 +173,7 @@ impl<T> ClassDevice<T> {
     /// context (probe/remove/adoption), so the class identity is pinned to
     /// exactly the binding that is publishing it, never to a later replacement
     /// in the parent's slot.
+    #[cfg(unittest)]
     pub(crate) fn try_new_with_binding(
         parent: Arc<DeviceObject>,
         binding: BindingRef,

@@ -1136,6 +1136,7 @@ impl NetDeviceOps for EthernetDevice {
         }
     }
 
+    #[cfg(unittest)]
     fn device_id(&self) -> Option<kdevice::DeviceId> {
         Some(self.inner.id())
     }

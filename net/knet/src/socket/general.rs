@@ -249,6 +249,7 @@ impl GeneralOptions {
     }
 
     /// Poll for send readiness and run the provided operation.
+    #[cfg(feature = "vsock")]
     pub(crate) fn send_poller<P: Pollable, F: FnMut() -> KResult<T>, T>(
         &self,
         pollable: &P,
