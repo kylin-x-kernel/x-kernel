@@ -6256,6 +6256,8 @@ name = "vsock"
 version = "0.3.0-dev"
 dependencies = [
  "driver_base",
+ "kspin",
+ "unittest",
 ]
 
 [[package]]

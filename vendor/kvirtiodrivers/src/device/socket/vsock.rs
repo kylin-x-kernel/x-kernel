@@ -39,11 +39,36 @@ const EVENT_QUEUE_IDX: u16 = 2;
 ///
 /// Matches the 128-entry depth exposed by QEMU's vhost-vsock device and used
 /// by the Linux guest driver.
-pub(crate) const QUEUE_SIZE: usize = 128;
+pub const QUEUE_SIZE: usize = 128;
+/// Size in bytes of the virtio-vsock header shared by RX and TX packets.
+pub const VSOCK_HEADER_SIZE: usize = size_of::<VirtioVsockHdr>();
+
 const SUPPORTED_FEATURES: Feature = Feature::RING_EVENT_IDX
     .union(Feature::RING_INDIRECT_DESC)
     .union(Feature::VERSION_1)
     .union(Feature::ACCESS_PLATFORM);
+
+/// The virtio-vsock operation encoded in an outgoing packet.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum VsockTxPacketKind {
+    /// A data packet carrying `payload_len` body bytes.
+    Data {
+        /// Number of payload bytes following the header.
+        payload_len: u32,
+    },
+    /// A connection request.
+    Request,
+    /// A connection response.
+    Response,
+    /// A connection reset or rejection.
+    Reset,
+    /// A shutdown request carrying the given stream hints.
+    Shutdown(StreamShutdown),
+    /// An updated advertised receive window.
+    CreditUpdate,
+    /// A request for the peer's current credit.
+    CreditRequest,
+}
 
 /// Information about a particular vsock connection.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -390,6 +415,113 @@ impl<H: Hal, T: Transport, const RX_BUFFER_SIZE: usize> VirtIOSocket<H, T, RX_BU
         self.guest_cid
     }
 
+    /// Encodes the virtio-vsock header for an outgoing packet.
+    ///
+    /// `packet` must contain exactly the header followed by the payload bytes described by `kind`.
+    /// This helper keeps the wire layout in the device crate while allowing callers to own packet
+    /// storage for asynchronous transmission.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SocketError::BufferTooShort`] or [`SocketError::BufferTooLong`] when `packet`
+    /// does not have exactly the length required by `kind`.
+    pub fn prepare_tx_packet(
+        &self,
+        kind: VsockTxPacketKind,
+        connection_info: &ConnectionInfo,
+        packet: &mut [u8],
+    ) -> Result {
+        let (op, payload_len, flags, expected_len) = match kind {
+            VsockTxPacketKind::Data { payload_len } => (
+                VirtioVsockOp::Rw,
+                payload_len,
+                0,
+                VSOCK_HEADER_SIZE
+                    .checked_add(payload_len as usize)
+                    .ok_or(SocketError::InvalidNumber)?,
+            ),
+            VsockTxPacketKind::Request => {
+                (VirtioVsockOp::Request, 0, 0, VSOCK_HEADER_SIZE)
+            }
+            VsockTxPacketKind::Response => {
+                (VirtioVsockOp::Response, 0, 0, VSOCK_HEADER_SIZE)
+            }
+            VsockTxPacketKind::Reset => {
+                (VirtioVsockOp::Rst, 0, 0, VSOCK_HEADER_SIZE)
+            }
+            VsockTxPacketKind::Shutdown(hints) => {
+                (VirtioVsockOp::Shutdown, 0, hints.bits(), VSOCK_HEADER_SIZE)
+            }
+            VsockTxPacketKind::CreditUpdate => {
+                (VirtioVsockOp::CreditUpdate, 0, 0, VSOCK_HEADER_SIZE)
+            }
+            VsockTxPacketKind::CreditRequest => {
+                (VirtioVsockOp::CreditRequest, 0, 0, VSOCK_HEADER_SIZE)
+            }
+        };
+
+        if packet.len() < expected_len {
+            return Err(SocketError::BufferTooShort.into());
+        }
+        if packet.len() > expected_len {
+            return Err(SocketError::BufferTooLong(packet.len(), expected_len).into());
+        }
+
+        let header = VirtioVsockHdr {
+            op: op.into(),
+            len: payload_len.into(),
+            flags: flags.into(),
+            ..connection_info.new_header(self.guest_cid)
+        };
+        packet[..VSOCK_HEADER_SIZE].copy_from_slice(header.as_bytes());
+        Ok(())
+    }
+
+    /// Returns the number of available TX descriptors.
+    pub fn available_tx_descriptors(&self) -> usize {
+        self.tx.available_desc()
+    }
+
+    /// Submits a fully encoded packet to the TX virtqueue and notifies the device.
+    ///
+    /// This returns without waiting for completion. The returned token must eventually be passed
+    /// to [`Self::transmit_complete`] with the exact same packet.
+    ///
+    /// # Safety
+    ///
+    /// `packet` must remain valid and must not be accessed until the matching
+    /// [`Self::transmit_complete`] call succeeds.
+    pub unsafe fn transmit_begin(&mut self, packet: &[u8]) -> Result<u16> {
+        if packet.len() < VSOCK_HEADER_SIZE {
+            return Err(SocketError::BufferTooShort.into());
+        }
+        // SAFETY: The caller guarantees that `packet` remains valid until completion.
+        let token = unsafe { self.tx.add(&[packet], &mut []) }?;
+        if self.tx.should_notify() {
+            self.transport.notify(TX_QUEUE_IDX);
+        }
+        Ok(token)
+    }
+
+    /// Returns the token of the next completed TX descriptor, without consuming it.
+    pub fn poll_transmit(&self) -> Option<u16> {
+        self.tx.peek_used()
+    }
+
+    /// Reclaims a completed TX descriptor.
+    ///
+    /// # Safety
+    ///
+    /// `packet` must be the exact buffer that was submitted with `token` by
+    /// [`Self::transmit_begin`], and `token` must be the next completed descriptor returned by
+    /// [`Self::poll_transmit`].
+    pub unsafe fn transmit_complete(&mut self, token: u16, packet: &[u8]) -> Result {
+        // SAFETY: The caller guarantees that `packet` matches the descriptor identified by
+        // `token`, and that `token` is the next completed entry.
+        unsafe { self.tx.pop_used(token, &[packet], &mut [])? };
+        Ok(())
+    }
+
     /// Sends a request to connect to the given destination.
     ///
     /// This returns as soon as the request is sent; you should wait until `poll` returns a
@@ -585,13 +717,13 @@ fn read_header_and_body(buffer: &[u8]) -> Result<(VirtioVsockHdr, &[u8])> {
     let body_length = header.len() as usize;
 
     // This could fail if the device returns an unreasonably long body length.
-    let data_end = size_of::<VirtioVsockHdr>()
+    let data_end = VSOCK_HEADER_SIZE
         .checked_add(body_length)
         .ok_or(SocketError::InvalidNumber)?;
     // This could fail if the device returns a body length longer than buffer used length it
     // returned.
     let data = buffer
-        .get(size_of::<VirtioVsockHdr>()..data_end)
+        .get(VSOCK_HEADER_SIZE..data_end)
         .ok_or(SocketError::BufferTooShort)?;
     Ok((header, data))
 }
@@ -916,8 +1048,10 @@ mod tests {
         connection
     }
 
-    #[test]
-    fn config() {
+    fn test_socket() -> (
+        VirtIOSocket<FakeHal, FakeTransport<VirtioVsockConfig>>,
+        Arc<Mutex<State<VirtioVsockConfig>>>,
+    ) {
         let config_space = VirtioVsockConfig {
             guest_cid_low: ReadOnly::new(66),
             guest_cid_high: ReadOnly::new(0),
@@ -938,6 +1072,19 @@ mod tests {
         };
         let socket =
             VirtIOSocket::<FakeHal, FakeTransport<VirtioVsockConfig>>::new(transport).unwrap();
+        (socket, state)
+    }
+
+    fn test_connection(peer_buf_alloc: u32) -> ConnectionInfo {
+        let mut connection = ConnectionInfo::new(VsockAddr { cid: 2, port: 1234 }, 4321);
+        connection.buf_alloc = 1024;
+        connection.set_peer_buf_alloc(peer_buf_alloc);
+        connection
+    }
+
+    #[test]
+    fn config() {
+        let (socket, _) = test_socket();
         assert_eq!(socket.guest_cid(), 0x00_0000_0042);
     }
 
@@ -1190,5 +1337,67 @@ mod tests {
             state.lock().unwrap().status_history.last().copied(),
             Some(DeviceStatus::empty())
         );
+    }
+
+    #[test]
+    fn tx_primitives_submit_and_complete_encoded_packet() {
+        let (mut socket, state) = test_socket();
+        let connection = test_connection(1024);
+        let mut packet = vec![0; VSOCK_HEADER_SIZE];
+        packet.extend_from_slice(b"hello");
+        socket
+            .prepare_tx_packet(
+                VsockTxPacketKind::Data { payload_len: 5 },
+                &connection,
+                &mut packet,
+            )
+            .unwrap();
+
+        // SAFETY: `packet` remains alive and unmodified until its matching completion.
+        let token = unsafe { socket.transmit_begin(&packet) }.unwrap();
+        assert_eq!(socket.available_tx_descriptors(), QUEUE_SIZE - 1);
+        assert_eq!(socket.poll_transmit(), None);
+
+        let transmitted = state
+            .lock()
+            .unwrap()
+            .read_from_queue::<QUEUE_SIZE>(TX_QUEUE_IDX);
+        assert_eq!(transmitted, packet);
+        assert_eq!(socket.poll_transmit(), Some(token));
+
+        // SAFETY: `packet` is the exact buffer submitted above and `token` is the next completed
+        // descriptor.
+        unsafe { socket.transmit_complete(token, &packet) }.unwrap();
+        assert_eq!(socket.available_tx_descriptors(), QUEUE_SIZE);
+    }
+
+    #[test]
+    fn shutdown_packet_encodes_flags() {
+        let (socket, state) = test_socket();
+        let connection = test_connection(1024);
+        let mut packet = vec![0; VSOCK_HEADER_SIZE];
+        socket
+            .prepare_tx_packet(
+                VsockTxPacketKind::Shutdown(StreamShutdown::SEND),
+                &connection,
+                &mut packet,
+            )
+            .unwrap();
+        assert_eq!(
+            VirtioVsockHdr::read_from_bytes(&packet).unwrap(),
+            VirtioVsockHdr {
+                op: VirtioVsockOp::Shutdown.into(),
+                flags: StreamShutdown::SEND.bits().into(),
+                src_cid: 66u64.into(),
+                dst_cid: 2u64.into(),
+                src_port: 4321u32.into(),
+                dst_port: 1234u32.into(),
+                buf_alloc: 1024u32.into(),
+                ..Default::default()
+            }
+        );
+        assert!(!state.lock().unwrap().queues[TX_QUEUE_IDX as usize]
+            .notified
+            .load(core::sync::atomic::Ordering::Relaxed));
     }
 }

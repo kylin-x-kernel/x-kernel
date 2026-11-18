@@ -659,8 +659,8 @@ pub use virtio::Virtio9pDevice;
 /// Re-export VSOCK device trait and address/connection types.
 #[cfg(feature = "vsock")]
 pub use vsock::{
-    VsockAddr, VsockConnId, VsockConnectionInfo, VsockDevice, VsockTransportEvent,
-    VsockTransportEventKind,
+    TX_MAX_PAYLOAD_SIZE, VsockAddr, VsockConnId, VsockConnectionInfo, VsockDevice,
+    VsockTransportEvent, VsockTransportEventKind, VsockTxBuf,
 };
 
 trait ClassRuntimeMetadata {
@@ -977,8 +977,24 @@ impl VsockDevice for ClassDevice<VsockDeviceImpl> {
         self.with(|device| device.force_close(info))
     }
 
-    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> DriverResult<usize> {
-        self.with(|device| device.send(info, buf))
+    fn alloc_tx_buf(&self) -> DriverResult<VsockTxBuf> {
+        self.with(|device| device.alloc_tx_buf())
+    }
+
+    fn submit_tx_buf(&self, info: &VsockConnectionInfo, tx_buf: VsockTxBuf) -> DriverResult<()> {
+        self.with(|device| device.submit_tx_buf(info, tx_buf))
+    }
+
+    fn request_credit(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+        self.with(|device| device.request_credit(info))
+    }
+
+    fn can_send(&self) -> bool {
+        self.with(|device| device.can_send())
+    }
+
+    fn recycle_tx(&self) -> DriverResult<usize> {
+        self.with(|device| device.recycle_tx())
     }
 
     fn shutdown(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
@@ -1196,13 +1212,13 @@ pub mod prelude {
     pub use crate::{HwrngDevice, HwrngDeviceImpl};
     #[cfg(feature = "net")]
     pub use crate::{NetBufHandle, NetDevice, NetDeviceImpl, NetRxScheduler};
-    #[cfg(feature = "virtio-9p")]
-    pub use crate::{Virtio9pDevice, Virtio9pDeviceImpl};
     #[cfg(feature = "vsock")]
     pub use crate::{
-        VsockAddr, VsockConnId, VsockConnectionInfo, VsockDevice, VsockDeviceImpl,
-        VsockTransportEvent, VsockTransportEventKind,
+        TX_MAX_PAYLOAD_SIZE, VsockAddr, VsockConnId, VsockConnectionInfo, VsockDevice,
+        VsockDeviceImpl, VsockTransportEvent, VsockTransportEventKind, VsockTxBuf,
     };
+    #[cfg(feature = "virtio-9p")]
+    pub use crate::{Virtio9pDevice, Virtio9pDeviceImpl};
 }
 
 /// Test-only activation trigger for a bound VSOCK fixture.

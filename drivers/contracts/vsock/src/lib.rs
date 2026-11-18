@@ -7,8 +7,13 @@
 #![no_std]
 #![cfg_attr(doc, feature(doc_cfg))]
 
+extern crate alloc;
+
 #[doc(no_inline)]
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
+
+mod tx_buf;
+pub use self::tx_buf::{TX_MAX_PAYLOAD_SIZE, VsockTxBuf, VsockTxBufPool};
 
 /// Vsock address.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -75,8 +80,8 @@ impl VsockConnectionInfo {
 
     /// Returns the available peer buffer space in bytes.
     pub fn peer_free(&self) -> u32 {
-        self.peer_buf_alloc
-            .wrapping_sub(self.tx_cnt.wrapping_sub(self.peer_fwd_cnt))
+        let outstanding = self.tx_cnt.wrapping_sub(self.peer_fwd_cnt);
+        self.peer_buf_alloc.saturating_sub(outstanding)
     }
 }
 
@@ -111,11 +116,33 @@ pub trait VsockDevice: Device {
     /// carries `buf_alloc` and `fwd_cnt` even in RST packets.
     fn force_close(&self, info: &VsockConnectionInfo) -> DriverResult<()>;
 
-    /// Send a packet body to the peer.
+    /// Allocates one TX buffer from the transport.
     ///
-    /// Returns the number of bytes sent, or [`DriverError::WouldBlock`] if the
-    /// peer has no credit available.
-    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> DriverResult<usize>;
+    /// The returned buffer reserves space for the transport's protocol header. The caller writes
+    /// at most [`VsockTxBuf::payload_capacity`] payload bytes, sets the payload length, and then
+    /// passes ownership to [`Self::submit_tx_buf`].
+    ///
+    /// Returns [`DriverError::WouldBlock`] when all non-reserved TX buffers are in flight.
+    fn alloc_tx_buf(&self) -> DriverResult<VsockTxBuf>;
+
+    /// Submits a populated TX buffer without waiting for device completion.
+    ///
+    /// The transport accepts either the complete payload or no payload at all. If peer credit,
+    /// descriptor capacity, or the transport packet limit cannot cover the whole buffer, it
+    /// returns [`DriverError::WouldBlock`] without submitting any payload bytes.
+    ///
+    /// Ownership of `tx_buf` passes to the transport: it is retained until completion or returned
+    /// to the transport free list on failure.
+    fn submit_tx_buf(&self, info: &VsockConnectionInfo, tx_buf: VsockTxBuf) -> DriverResult<()>;
+
+    /// Requests an updated peer credit advertisement.
+    fn request_credit(&self, info: &VsockConnectionInfo) -> DriverResult<()>;
+
+    /// Whether the transport can currently accept another TX packet.
+    fn can_send(&self) -> bool;
+
+    /// Reclaims completed TX packets and returns how many were released.
+    fn recycle_tx(&self) -> DriverResult<usize>;
 
     /// Request a clean shutdown of the connection.
     ///

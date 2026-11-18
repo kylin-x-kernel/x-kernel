@@ -19,7 +19,10 @@ pub use connectionmanager::VsockConnectionManager;
 pub use error::SocketError;
 pub use protocol::{StreamShutdown, VMADDR_CID_HOST, VsockAddr};
 #[cfg(feature = "alloc")]
-pub use vsock::{ConnectionInfo, DisconnectReason, VirtIOSocket, VsockEvent, VsockEventType};
+pub use vsock::{
+    ConnectionInfo, DisconnectReason, QUEUE_SIZE, VirtIOSocket, VSOCK_HEADER_SIZE, VsockEvent,
+    VsockEventType, VsockTxPacketKind,
+};
 
 /// The size in bytes of each buffer used in the RX virtqueue. This must be bigger than
 /// `size_of::<VirtioVsockHdr>()`.

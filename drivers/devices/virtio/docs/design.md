@@ -247,7 +247,7 @@ Free ──alloc_tx_buf──> Allocated ──send──> InFlight ──recycl
 
 ### Vsock Connection State
 
-This adapter keeps no vsock connection state; `listen()` and `unlisten()` are no-ops. The connection state machine (listen, connect, accept, close) is owned by `VSOCK_CONN_MANAGER` in `net/knet`, which drives this adapter's packet-level methods (`connect`, `accept`, `send`, `shutdown`, `force_close`, `credit_update`).
+This adapter keeps no vsock connection state; `listen()` and `unlisten()` are no-ops. The connection state machine (listen, connect, accept, close) is owned by `VSOCK_CONN_MANAGER` in `net/knet`, which drives this adapter's packet-level methods (`connect`, `accept`, `submit_tx_buf`, `shutdown`, `force_close`, `credit_update`).
 
 > Vsock connection state is owned by `VSOCK_CONN_MANAGER` in `net/knet`, not by this module. This module only fetches raw events through `poll_event()` and translates them into `VsockTransportEvent`.
 
@@ -513,9 +513,12 @@ implements X-Kernel's `VsockDevice` trait and provides packet-level
 virtio-vsock operations:
 
 - `connect` / `accept`: send connection-request or response control packets.
-- `send` / `shutdown` / `force_close`: send data, perform graceful shutdown, or
-  send a forced reset.
-- `credit_update`: send a credit update.
+- `shutdown` / `force_close`: perform graceful shutdown or send a forced reset.
+- `alloc_tx_buf` / `submit_tx_buf`: obtain a TX buffer, then submit one
+  complete data packet without waiting for completion; `can_send()` reports
+  whether the transport can currently accept another submission.
+- `recycle_tx` / `request_credit` / `credit_update`: reclaim completed TX
+  descriptors, request updated peer credit, and advertise local credit.
 - `poll_event`: remove one raw event from the RX virtqueue and pass its event
   type and payload to the caller.
 - `guest_cid`: return the configured guest CID.
@@ -538,19 +541,52 @@ maximum payload of 8148 bytes.
 
 1. `try_new(transport)` calls `VirtIOSocket::new(transport)` to negotiate
    features and allocate VirtIO queues.
-2. It returns `VirtIoVsockDev`, which uses `SpinNoIrq` to serialize access to
-   `VirtIOSocket`.
+2. It creates a `VsockTxBufPool` from `drivers/contracts/vsock` with
+   `QUEUE_SIZE` fixed-size slots in one contiguous allocation, each large
+   enough for the 44-byte virtio-vsock header plus a 64 KiB payload. The
+   contract owns the generic buffer/pool abstraction; the virtio adapter
+   chooses the queue-sized slot count and packet geometry.
+3. It preallocates every slot into `VsockTxBufState::free_tx_bufs`. The
+   `SpinNoPreempt<VsockTxBufState<QUEUE_SIZE>>` lock owns the free list,
+   the `tx_bufs[token]` in-flight table, and the `pending_controls` deferred-control queue.
+4. It returns `VirtIoVsockDev`, which uses `SpinNoIrq` to serialize access to
+   `VirtIOSocket`. When both locks are needed, the order is `bufs -> inner`.
 
-**Packet paths:**
+**Transmit:**
 
-1. Transmit: `send(info, buf)` converts `VsockConnectionInfo` into the lower
-   layer's `ConnectionInfo` and calls `inner.send(buf, &mut ci)`.
-2. Receive: `poll_event(handler)` calls `inner.poll()`, translates the
-   `VsockEvent` into a `VsockTransportEvent` plus payload, and invokes
-   `handler`.
-3. Control actions: while handling an event, `handler` may call `VsockDevice`
-   methods such as `accept`, `force_close`, and `credit_update` to send response
-   packets. The callback runs after the virtqueue lock is released.
+1. The connection manager calls `alloc_tx_buf()`, fills at most
+   `payload_capacity()` bytes, sets the payload length, and calls
+   `submit_tx_buf()`. Submission is all-or-nothing: peer credit and transport
+   capacity must cover the complete payload, up to `TX_MAX_PAYLOAD_SIZE`
+   (64 KiB). One buffer and one TX descriptor stay reserved for credit or
+   connection-control packets.
+
+   The all-or-nothing model requires the peer (host) to advertise a receive
+   buffer of at least 64 KiB.  Linux hosts default to 256 KiB
+   (`SO_VM_SOCKETS_BUFFER_SIZE`), satisfying this requirement.  Shrinking the
+   host buffer below 64 KiB is not supported and will cause stream sends to
+   stall permanently.
+2. `submit_tx_buf()` encodes the virtio-vsock header into the owned slot.
+   `transmit_begin()` submits the complete packet without waiting for
+   completion, and the buffer moves into `tx_bufs[token]` so its storage
+   remains valid while the device owns the descriptor.
+3. Control operations (`connect`, `accept`, `force_close`, `shutdown`,
+   `credit_update`, and `request_credit`) use the same buffer path with a
+   header-only packet.  When the TX pool is saturated, control packets are
+   enqueued into `pending_controls` instead of returning `WouldBlock`, so RX
+   event handlers never lose a control response.
+4. `recycle_tx()` first drains the pending-control queue, then reclaims
+   completed tokens from `poll_transmit()`, calls `transmit_complete()`, and
+   returns each buffer to the free list. The vsock polling path calls it before
+   draining RX events and wakes TX waiters when it releases capacity.
+
+**Receive:**
+
+1. `poll_event(handler)` calls `inner.poll()`, translates the `VsockEvent` into
+   a `VsockTransportEvent` plus payload, and invokes `handler`.
+2. While handling an event, `handler` may call `VsockDevice` methods such as
+   `accept`, `force_close`, and `credit_update` to send response packets. The
+   callback runs after the virtqueue lock is released.
 
 **Connection-state ownership:**
 

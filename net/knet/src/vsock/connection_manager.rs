@@ -359,6 +359,12 @@ impl VsockConnectionManager {
         self.raw_transport.clone()
     }
 
+    fn wake_tx_waiters(&self) {
+        for connection in self.connections.values() {
+            connection.lock().tx_wait_queue().notify_all(false);
+        }
+    }
+
     /// Detach the raw transport so that subsequent socket operations
     /// (connect, send, poll, etc.) return `BadState` rather than trying
     /// to use a device that has been unregistered.
@@ -791,7 +797,6 @@ impl VsockConnectionManager {
     }
 
     /// Add `len` bytes to the connection's transmitted-byte counter.
-    #[cfg(feature = "vsock_tipc_bridge")]
     pub(crate) fn add_tx_bytes(&self, conn_id: VsockConnId, len: usize) {
         if let Some(conn) = self.connections.get(&conn_id) {
             conn.lock().add_tx_bytes(len);
@@ -1016,6 +1021,17 @@ fn poll_vsock_devices() -> KResult<bool> {
         return Ok(false);
     };
 
+    let tx_reclaimed = match transport.recycle_tx() {
+        Ok(reclaimed) => reclaimed,
+        Err(error) => {
+            error!("vsock recycle_tx error: {:?}", error);
+            0
+        }
+    };
+    if tx_reclaimed > 0 {
+        VSOCK_CONN_MANAGER.lock().wake_tx_waiters();
+    }
+
     // Drain all pending events from the RX virtqueue in one go, mirroring
     // the loop in the old two-layer architecture. This avoids per-event
     // overhead of the poll-task loop, block_on wrapper, and adaptive
@@ -1040,7 +1056,7 @@ fn poll_vsock_devices() -> KResult<bool> {
             }
         }
     }
-    Ok(had_event)
+    Ok(had_event || tx_reclaimed > 0)
 }
 
 // ------------------------------------------------------------------
@@ -1065,13 +1081,43 @@ pub(crate) fn vsock_connect(conn_id: VsockConnId) -> KResult<()> {
     })
 }
 
-/// Send `buf` on `conn_id`, blocking on the connection's TX wait queue when
-/// the peer has no credit.
+/// Copies and submits one complete vsock packet.
 ///
-/// The raw transport is all-or-nothing: it either queues the whole packet or
-/// returns [`DriverError::WouldBlock`], so there is no point in retrying with
-/// a smaller chunk. For blocking sockets the caller waits on the TX wait queue
-/// until the peer advertises enough credit or the connection is closed;
+/// The operation is all-or-nothing for `buf`: if peer credit cannot cover the whole packet, no
+/// bytes are submitted and the caller observes `WouldBlock`.
+fn submit_tx_bytes(
+    transport: &(dyn VsockDevice + Send + Sync),
+    info: &VsockConnectionInfo,
+    buf: &[u8],
+) -> DriverResult<usize> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    if buf.len() > TX_MAX_PAYLOAD_SIZE {
+        return Err(DriverError::InvalidInput);
+    }
+    let peer_free = usize::try_from(info.peer_free()).map_err(|_| DriverError::InvalidInput)?;
+    if peer_free < buf.len() {
+        transport.request_credit(info)?;
+        return Err(DriverError::WouldBlock);
+    }
+
+    let mut tx_buf = transport.alloc_tx_buf()?;
+    debug_assert!(tx_buf.payload_capacity() >= buf.len());
+    if tx_buf.payload_capacity() < buf.len() {
+        return Err(DriverError::InvalidInput);
+    }
+    tx_buf.set_payload_len(buf.len())?;
+    tx_buf.payload_mut().copy_from_slice(buf);
+    transport.submit_tx_buf(info, tx_buf)?;
+    Ok(buf.len())
+}
+
+/// Send `buf` on `conn_id`, blocking on the connection's TX wait queue when
+/// the peer has no credit or the transport has no descriptor capacity.
+///
+/// The operation is all-or-nothing: peer credit and transport capacity must cover the whole
+/// packet. For blocking sockets the caller waits on the TX wait queue until credit is available;
 /// for non-blocking sockets [`KError::WouldBlock`] is returned immediately.
 pub(crate) fn vsock_send(
     conn_id: VsockConnId,
@@ -1095,8 +1141,9 @@ pub(crate) fn vsock_send(
                 .map_err(map_dev_err)?;
             (transport, info)
         };
-        match transport.send(&info, buf) {
+        match submit_tx_bytes(transport.as_ref(), &info, buf) {
             Ok(len) => {
+                VSOCK_CONN_MANAGER.lock().add_tx_bytes(conn_id, len);
                 return Ok(len);
             }
             Err(DriverError::WouldBlock) if nonblocking => {
@@ -1113,9 +1160,11 @@ pub(crate) fn vsock_send(
                         None => true, // connection removed → treat as closed
                         Some(c) => {
                             let c = c.lock();
+                            let peer_can_cover = usize::try_from(c.info.peer_free())
+                                .is_ok_and(|free| free >= buf.len());
                             c.state() != ConnectionState::Connected
                                 || c.tx_closed()
-                                || c.info.peer_free() as usize >= buf.len()
+                                || (transport.can_send() && peer_can_cover)
                         }
                     }
                 });
@@ -1213,17 +1262,19 @@ pub(crate) fn create_bridge_connection(
 /// whole buffer has been sent, or an error if the transport cannot accept
 /// more data.
 ///
-/// The underlying transport is all-or-nothing (see [`VsockDevice::send`]), so
-/// a single call either queues the entire buffer or returns
-/// [`DriverError::WouldBlock`].  The loop only retries after a credit-update
-/// wake-up when the peer's buffer was full.
+/// Records larger than one transport packet are split into at most `TX_MAX_PAYLOAD_SIZE` chunks.
+/// Each chunk is all-or-nothing, and the loop waits for credit or TX capacity between chunks.
 #[cfg(feature = "vsock_tipc_bridge")]
 pub(crate) fn send_bridge(conn_id: VsockConnId, buf: &[u8]) -> DriverResult<usize> {
     if buf.is_empty() {
         return Ok(0);
     }
 
+    let mut total_sent = 0;
     loop {
+        if total_sent == buf.len() {
+            return Ok(total_sent);
+        }
         let (transport, info, tx_wait_queue) = {
             let manager = VSOCK_CONN_MANAGER.lock();
             let conn = manager
@@ -1236,10 +1287,19 @@ pub(crate) fn send_bridge(conn_id: VsockConnId, buf: &[u8]) -> DriverResult<usiz
             let transport = manager.clone_raw_transport().ok_or(DriverError::BadState)?;
             (transport, info, tx_wait_queue)
         };
-        match transport.send(&info, buf) {
+        let remaining = &buf[total_sent..];
+        let chunk_len = remaining.len().min(TX_MAX_PAYLOAD_SIZE);
+        let chunk = &remaining[..chunk_len];
+        match submit_tx_bytes(transport.as_ref(), &info, chunk) {
             Ok(sent) => {
+                if sent != chunk_len {
+                    return Err(DriverError::Io);
+                }
                 VSOCK_CONN_MANAGER.lock().add_tx_bytes(conn_id, sent);
-                return Ok(sent);
+                total_sent = total_sent
+                    .checked_add(sent)
+                    .filter(|total| *total <= buf.len())
+                    .ok_or(DriverError::Io)?;
             }
             Err(DriverError::WouldBlock) => {
                 // Use wait_until to close the lost-wakeup window.
@@ -1252,9 +1312,11 @@ pub(crate) fn send_bridge(conn_id: VsockConnId, buf: &[u8]) -> DriverResult<usiz
                         None => true, // connection removed → treat as closed
                         Some(c) => {
                             let c = c.lock();
+                            let peer_can_cover = usize::try_from(c.info.peer_free())
+                                .is_ok_and(|free| free >= chunk_len);
                             c.state() != ConnectionState::Connected
                                 || c.tx_closed()
-                                || c.info.peer_free() as usize >= buf.len()
+                                || (transport.can_send() && peer_can_cover)
                         }
                     }
                 });
@@ -1464,8 +1526,24 @@ impl VsockDevice for RawTransportWrapper {
         self.with_device(|t| t.force_close(info))
     }
 
-    fn send(&self, info: &VsockConnectionInfo, buf: &[u8]) -> DriverResult<usize> {
-        self.with_device(|t| t.send(info, buf))
+    fn alloc_tx_buf(&self) -> DriverResult<VsockTxBuf> {
+        self.with_device(|t| t.alloc_tx_buf())
+    }
+
+    fn submit_tx_buf(&self, info: &VsockConnectionInfo, tx_buf: VsockTxBuf) -> DriverResult<()> {
+        self.with_device(|t| t.submit_tx_buf(info, tx_buf))
+    }
+
+    fn request_credit(&self, info: &VsockConnectionInfo) -> DriverResult<()> {
+        self.with_device(|t| t.request_credit(info))
+    }
+
+    fn can_send(&self) -> bool {
+        self.with_device(|t| t.can_send())
+    }
+
+    fn recycle_tx(&self) -> DriverResult<usize> {
+        self.with_device(|t| t.recycle_tx())
     }
 
     fn shutdown(&self, info: &VsockConnectionInfo) -> DriverResult<()> {

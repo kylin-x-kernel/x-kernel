@@ -96,6 +96,7 @@ type ConfigHandler = dyn Fn(u8, u8, usize) -> u8 + Send + Sync;
 
 pub struct MockTransport {
     pub device_type: DeviceType,
+    pub max_queue_size: u32,
     /// Optional selector-aware config-space responder for multi-query probes.
     pub config_handler: Option<Arc<ConfigHandler>>,
     pub status: RefCell<DeviceStatus>,
@@ -126,6 +127,7 @@ impl MockTransport {
     pub fn new_with_type(device_type: DeviceType) -> Self {
         Self {
             device_type,
+            max_queue_size: 256,
             config_handler: None,
             status: RefCell::new(DeviceStatus::empty()),
             status_history: Arc::new(kspin::SpinNoIrq::new(alloc::vec::Vec::new())),
@@ -158,8 +160,8 @@ impl Transport for MockTransport {
 
     fn max_queue_size(&mut self, _queue: u16) -> u32 {
         // Large enough for every device implementation under test; for example
-        // the vsock queues are 128 entries.
-        256
+        // the vsock queues are 128 entries. Tests may lower this per transport.
+        self.max_queue_size
     }
 
     fn notify(&mut self, _queue: u16) {}

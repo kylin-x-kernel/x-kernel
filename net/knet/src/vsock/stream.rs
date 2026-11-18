@@ -3,8 +3,9 @@
 // See LICENSES for license details.
 
 //! Vsock stream socket implementation.
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
+use kclass::TX_MAX_PAYLOAD_SIZE;
 use kerrno::{KError, KResult, k_bail, k_err_type};
 use kio::prelude::*;
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
@@ -19,17 +20,72 @@ use crate::{
     vsock::{VsockAddr, VsockConnId, VsockTransport, VsockTransportOps},
 };
 
+/// Maximum payload coalesced into one stream send.
+///
+/// This matches the virtio-vsock data packet limit. Keeping a socket-local
+/// reusable buffer avoids the generic I/O stack-buffer path, which would split
+/// every large write into [`kio::DEFAULT_BUF_SIZE`] fragments.
+const VSOCK_SEND_CHUNK_SIZE: usize = TX_MAX_PAYLOAD_SIZE;
+
+/// Returns the per-send chunk size, clamped to the peer's advertised buffer.
+///
+/// When the peer has not advertised any buffer (`peer_buf_alloc == 0`) the
+/// chunk is clamped to 1 so the send enters the normal credit-wait path
+/// rather than returning `Ok(0)` (which looks like EOF).
+fn effective_send_chunk(peer_buf_alloc: u32) -> usize {
+    VSOCK_SEND_CHUNK_SIZE.min(peer_buf_alloc as usize).max(1)
+}
 pub struct VsockStreamTransport {
     conn_id: Mutex<Option<VsockConnId>>,
     connection: Mutex<Option<Arc<Mutex<Connection>>>>,
-    /// Serializes concurrent sends on the same socket, mirroring Linux's
-    /// `lock_sock(sk)` in `vsock_connectible_sendmsg`. This prevents TOCTOU
-    /// credit races where two threads snapshot the same `tx_cnt` and both
-    /// believe there is enough peer credit. The connection manager never takes
-    /// this lock, so no deadlock is possible.
-    tx_lock: Mutex<()>,
+    /// Serializes concurrent sends and owns their reusable transfer buffer.
+    ///
+    /// This mirrors Linux's `lock_sock(sk)` in `vsock_connectible_sendmsg` and
+    /// prevents TOCTOU credit races where two threads snapshot the same
+    /// `tx_cnt`. The connection manager never takes this lock.
+    tx_lock: Mutex<TxState>,
     state: StateLock,
     general: GeneralOptions,
+}
+
+struct TxState {
+    buffer: Vec<u8>,
+}
+
+impl TxState {
+    const fn new() -> Self {
+        Self { buffer: Vec::new() }
+    }
+}
+
+fn read_tx_chunk<R: Read + IoBuf>(
+    src: &mut R,
+    tx_state: &mut TxState,
+    max_len: usize,
+) -> KResult<usize> {
+    let chunk_len = src.remaining().min(max_len);
+    if chunk_len == 0 {
+        return Ok(0);
+    }
+
+    if tx_state.buffer.len() < chunk_len {
+        tx_state
+            .buffer
+            .try_reserve_exact(chunk_len - tx_state.buffer.len())
+            .map_err(|_| KError::NoMemory)?;
+        tx_state.buffer.resize(chunk_len, 0);
+    }
+
+    src.read(&mut tx_state.buffer[..chunk_len])
+}
+
+fn send_tx_chunk(chunk: &[u8], mut send: impl FnMut(&[u8]) -> KResult<usize>) -> KResult<usize> {
+    match send(chunk) {
+        Ok(count) if count == chunk.len() => Ok(count),
+        Ok(0) => Err(KError::Io),
+        Ok(_) => Err(KError::InvalidInput),
+        Err(error) => Err(error),
+    }
 }
 
 impl VsockStreamTransport {
@@ -37,7 +93,7 @@ impl VsockStreamTransport {
         Self {
             conn_id: Mutex::new(None),
             connection: Mutex::new(None),
-            tx_lock: Mutex::new(()),
+            tx_lock: Mutex::new(TxState::new()),
             state: StateLock::new(State::Idle),
             general: GeneralOptions::new(),
         }
@@ -139,7 +195,7 @@ impl VsockTransportOps for VsockStreamTransport {
                 let new_transport = VsockStreamTransport {
                     conn_id: Mutex::new(Some(conn_id)),
                     connection: Mutex::new(Some(conn)),
-                    tx_lock: Mutex::new(()),
+                    tx_lock: Mutex::new(TxState::new()),
                     state: StateLock::new(State::Connected),
                     general: GeneralOptions::default(),
                 };
@@ -232,7 +288,7 @@ impl VsockTransportOps for VsockStreamTransport {
         // Serialize concurrent sends on the same socket to prevent TOCTOU
         // credit races. Mirrors Linux's lock_sock(sk) in
         // vsock_connectible_sendmsg. The manager never takes this lock.
-        let _tx_guard = self.tx_lock.lock();
+        let mut tx_guard = self.tx_lock.lock();
 
         let conn = self.get_connection()?;
         let conn_guard = conn.lock();
@@ -248,13 +304,18 @@ impl VsockTransportOps for VsockStreamTransport {
         let conn_id = self.conn_id.lock().ok_or(KError::NotConnected)?;
         let nonblocking = self.general.nonblocking() || options.flags.nonblocking();
         let tx_wait_queue = conn_guard.tx_wait_queue();
+        let effective_chunk = effective_send_chunk(conn_guard.info.peer_buf_alloc);
         drop(conn_guard);
 
-        let result = src.write_to(&mut kio::write_fn(|buf| {
+        let count = read_tx_chunk(&mut src, &mut tx_guard, effective_chunk)?;
+        if count == 0 {
+            return Ok(0);
+        }
+
+        let tx_state = &tx_guard;
+        send_tx_chunk(&tx_state.buffer[..count], |buf| {
             vsock_send(conn_id, buf, nonblocking, &tx_wait_queue)
-        }));
-        conn.lock().add_tx_bytes(result.unwrap_or(0));
-        result
+        })
     }
 
     fn recv(&self, mut dst: impl Write, options: RecvOptions) -> KResult<usize> {
@@ -462,3 +523,5 @@ impl Drop for VsockStreamTransport {
         }
     }
 }
+
+unittest::path_mod_test!(tests, "../../ut-tests/vsock/stream/tests.rs");
