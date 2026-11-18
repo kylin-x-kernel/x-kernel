@@ -31,6 +31,24 @@ Stop (one slot per RQ) -> Deadline CBS+EDF -> RT FIFO/RR -> Fair EEVDF -> Idle
 
 ## External boundary / attack surface
 
+PELT is advisory history, not admission or scheduling authority. Its entity
+cells use the existing owning-RQ token; `task_pelt` must not inspect an entity
+under another CPU's scheduler lock. `detach_blocked_pelt` accepts only blocked
+PELT residency and is called under the source owner lock before its owner CPU
+changes. Runnable removals detach through dequeue/steal, and migration/exit
+of the current task detach through the leave path. Class changes, including
+PI, remove Fair history before another class can accumulate execution.
+
+Blocked aggregates retain numeric history only, so neither sleeping-task scans
+nor additional task-reference lifetimes are introduced. Time jumps backwards
+are handled without unsigned underflow; forward gaps use bounded table lookup.
+Non-zero nice weights and an internal non-zero divider make divisions total.
+Saturating sums/subtraction and minimum-divider floors protect aggregation
+against overflow and independent entity/queue rounding. No unsafe operation
+or allocation is added. Capacity/frequency invariance and IRQ-time exclusion
+are not provided; the resulting samples must not be treated as normalized
+hardware utilization or a hard capacity guarantee.
+
 `SharedOwner<T>` is an unsafe implementation boundary. An implementation must
 keep a stable address for the same value. `Clone` creates an independent
 owner. A raw round trip neither releases nor increments the count. Recovering

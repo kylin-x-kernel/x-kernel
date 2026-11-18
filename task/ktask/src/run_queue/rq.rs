@@ -750,6 +750,12 @@ impl RunQueue {
         kind: EnqueueKind,
         now_ns: u64,
     ) -> Result<Decision, KtaskRef> {
+        // Blocked histories stay on their old queue until wake placement.
+        // Remove them before taking the destination lock, preserving RQ order.
+        #[cfg(feature = "smp")]
+        if matches!(kind, EnqueueKind::Wake { .. }) && task.cpu_id() != self.cpu_id {
+            with_owner_sched(&task, |sched| sched.detach_blocked_pelt(&task, now_ns));
+        }
         let _elapsed = Self::advance_account_epoch(&self.last_accounted_ns, now_ns);
         self.with_sched_rank(|s| {
             // Entity lock after the RQ lock. `cpu_id` changes here, still

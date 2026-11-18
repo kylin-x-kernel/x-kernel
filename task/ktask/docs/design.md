@@ -15,6 +15,19 @@ under exclusion guards, the BH-disabled preparation fixture and the abandoned
 RCU reader's sentinel also use NOWAIT. Entry flags do not grant those callers
 permission to sleep or change the existing stack/bookkeeping allocations.
 
+## Fair PELT wake migration
+
+PELT state and arithmetic belong to ksched. Existing scheduler entries update
+the history while holding the owning RQ lock; ktask keeps no duplicate PELT
+clock or atomic load averages. Placement still uses its previous metrics.
+
+Before a Wake publish changes CPU ownership, `publish_task` visits the old
+owner with `with_owner_sched` and calls `detach_blocked_pelt`. That guard ends
+before the destination scheduler lock is taken. Sleeping history is thereby
+removed once even if affinity rejects the destination and publication retries.
+Same-CPU wake remains attached, and ready migration already detaches through
+dequeue/steal or migrate_current. New task publication needs no old-owner query.
+
 ## Priority inheritance
 
 `pi::TaskPiHost` binds `krtmutex` to `KtaskRef` and the `PiTaskNode` embedded

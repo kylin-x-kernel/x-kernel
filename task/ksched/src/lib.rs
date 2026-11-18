@@ -11,6 +11,7 @@ mod config;
 mod entity;
 mod fair_tree;
 mod owner;
+mod pelt;
 mod policy;
 mod ready_list;
 mod scheduler;
@@ -34,5 +35,6 @@ pub use config::{
 };
 pub use entity::{KernelClass, SchedTask};
 pub use owner::SharedOwner;
+pub use pelt::PeltAvg;
 pub use policy::{DlParams, Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy};
 pub use scheduler::Scheduler;

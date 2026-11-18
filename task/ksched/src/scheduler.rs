@@ -20,6 +20,7 @@ use crate::{
     clock::RqClock,
     entity::{QueueSeat, RqLocked, SchedTask},
     owner::SharedOwner,
+    pelt::{LoadState, PeltAvg},
     policy::{RtPrio, SchedAttr, SchedClass, SchedError},
 };
 
@@ -92,7 +93,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
                 stop: StopClass::new(),
                 deadline: DeadlineClass::new(),
                 rt: RtClass::new(),
-                fair: FairClass::new(),
+                fair: FairClass::new(now_ns),
                 idle: IdleClass::new(idle),
             },
         }
@@ -119,6 +120,11 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
     /// `RqClock::advance`. Class `advance` and a later `account` /
     /// `pick_next` must not see a different `now_ns`/`last_ns`.
     fn advance_classes(&mut self, clock: &RqClock, tok: RqLocked) {
+        self.classes.fair.update_pelt(
+            clock.now_ns(),
+            Self::curr_for(&self.curr, SchedClass::Fair),
+            tok,
+        );
         for class in self.classes.iter_by_rank_mut() {
             class.advance(clock, tok);
         }
@@ -257,6 +263,51 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> Scheduler<T, Owner> {
     /// Current runner, if any.
     pub fn current(&self) -> Option<&Owner> {
         self.curr.as_ref()
+    }
+
+    /// Fair queue PELT at the last clock update, including blocked history.
+    ///
+    /// Read under this RQ's lock. `update(now_ns, UpdateKind::Account)` refreshes
+    /// the queue first when a current sample is needed. No CPU/frequency/IRQ
+    /// normalization is applied, and higher classes do not hide this history.
+    pub fn fair_pelt(&self) -> PeltAvg {
+        self.classes.fair.pelt_avg()
+    }
+
+    /// Refresh a task's lazy Fair history under its owning RQ lock.
+    ///
+    /// Does not advance the RQ clock. Sleeping and waiting tasks are updated
+    /// to the last queue sample. Never call under a different RQ's lock.
+    pub fn task_pelt(&self, task: &SchedTask<T>) -> PeltAvg {
+        let tok = Self::token();
+        let mut load = task.fair().load.get(tok);
+        let is_curr = self
+            .curr
+            .as_deref()
+            .is_some_and(|curr| core::ptr::eq(curr, task));
+        load.update(
+            self.clock.now_ns(),
+            u64::from(task.fair().weight.get(tok)),
+            is_curr,
+        );
+        task.fair().load.set(load, tok);
+        load.pelt.avg
+    }
+
+    /// Remove a sleeping task's retained Fair history before moving its owner.
+    ///
+    /// Caller holds only the old owner RQ lock. Ready migration already detaches
+    /// through `dequeue`/`steal`; this handles wake placement onto another CPU.
+    /// The destination must enqueue only after this method returns and the
+    /// source lock is released. Runnable tasks are left untouched.
+    pub fn detach_blocked_pelt(&mut self, task: &SchedTask<T>, now_ns: u64) {
+        let tok = Self::token();
+        let _ = self.charge(now_ns, tok);
+        if task.fair().load.get(tok).state == LoadState::Blocked {
+            self.classes
+                .fair
+                .detach_pelt(task, self.clock.now_ns(), tok);
+        }
     }
 
     /// RT placement rank of this run queue, read under its scheduler lock.

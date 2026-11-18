@@ -14,6 +14,7 @@ use intrusive_collections::RBTreeAtomicLink;
 
 use crate::{
     fair_tree::FairLink,
+    pelt::EntityLoad,
     policy::{Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy},
     ready_list::{ReadyItem, ReadyLinks},
 };
@@ -139,6 +140,7 @@ const _: () = {
 /// writes it. Links are prepared here so enqueue does not allocate an
 /// index node.
 pub(crate) struct FairEntity {
+    pub(crate) load: RqCell<EntityLoad>,
     pub(crate) vruntime: RqCell<i64>,
     pub(crate) deadline: RqCell<i64>,
     pub(crate) vlag: RqCell<i64>,
@@ -224,6 +226,7 @@ impl DeadlineEntity {
 impl FairEntity {
     const fn new(request_ns: u64) -> Self {
         Self {
+            load: RqCell::new(EntityLoad::new()),
             vruntime: RqCell::new(0),
             deadline: RqCell::new(0),
             vlag: RqCell::new(0),

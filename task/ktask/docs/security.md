@@ -1,5 +1,16 @@
 # ktask — Security and reliability
 
+## Fair PELT ownership
+
+Remote wake placement removes retained Fair history under the source RQ and
+entity guards before taking the destination RQ lock. The owner helper retries
+if cpu_id changes; destination publication still checks affinity before moving
+ownership. No source/destination scheduler locks overlap, and affinity retry
+cannot subtract a contribution twice because the entity becomes Detached.
+This adds no raw pointer, allocation, retained task reference or timer callback.
+The old-owner query applies only to cross-CPU Wake publication; it does not
+require a prepared new task to have a registered source queue.
+
 ## Priority inheritance
 
 `TaskPiHost` uses counted task references and pointer identity. Graph-held

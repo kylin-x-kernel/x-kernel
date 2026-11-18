@@ -25,6 +25,7 @@ use crate::{
     entity::{QueueSeat, RqLocked, SchedTask},
     fair_tree::{DeadlineKey, FairLink, FairTree, FairTreeAdapter},
     owner::{OwnerPointerOps, SharedOwner},
+    pelt::{LoadState, Pelt, PeltAvg},
     policy::{NICE_0_WEIGHT, SchedAttr, SchedClass, SchedError},
 };
 
@@ -155,6 +156,7 @@ unsafe impl<T, Owner: SharedOwner<SchedTask<T>>> FairTreeAdapter for FairAdapter
 /// pick and preemption take it as `curr` when **V** must include it. Putting the runner back before a preemption probe lets the
 /// two swap on deadline repeatedly.
 pub(crate) struct FairClass<T, Owner: SharedOwner<SchedTask<T>>> {
+    pelt: Pelt,
     ready: FairTree<FairAdapter<T, Owner>>,
     /// Cached minimum: finding the leftmost node itself takes O(log N).
     first_deadline: Option<Owner>,
@@ -178,8 +180,9 @@ pub(crate) struct FairClass<T, Owner: SharedOwner<SchedTask<T>>> {
 }
 
 impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(now_ns: u64) -> Self {
         Self {
+            pelt: Pelt::new(now_ns),
             ready: FairTree::new(FairAdapter::NEW),
             first_deadline: None,
             queued: 0,
@@ -232,6 +235,77 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
             Some(curr) => self.total_weight + Self::weight(curr, tok),
             None => self.total_weight,
         }
+    }
+
+    pub(crate) fn pelt_avg(&self) -> PeltAvg {
+        self.pelt.avg
+    }
+
+    pub(crate) fn update_pelt(&mut self, now_ns: u64, curr: Option<&SchedTask<T>>, tok: RqLocked) {
+        let nr_running = self.queued + usize::from(curr.is_some());
+        self.pelt.update(
+            now_ns,
+            self.load(curr, tok) as u64,
+            nr_running as u64,
+            curr.is_some(),
+            1,
+        );
+        if let Some(curr) = curr {
+            Self::sync_pelt(curr, now_ns, true, tok);
+        }
+    }
+
+    fn sync_pelt(task: &SchedTask<T>, now_ns: u64, running: bool, tok: RqLocked) {
+        task.fair().load.update(tok, |mut load| {
+            load.update(now_ns, Self::weight(task, tok) as u64, running);
+            load
+        });
+    }
+
+    fn activate_pelt(&mut self, task: &SchedTask<T>, now_ns: u64, tok: RqLocked) {
+        let weight = Self::weight(task, tok) as u64;
+        let mut load = task.fair().load.get(tok);
+        load.update(now_ns, weight, false);
+        if !load.is_attached() {
+            if load.state == LoadState::New {
+                load.pelt.seed(&self.pelt, weight);
+            }
+            load.pelt.align(&self.pelt, weight);
+            self.pelt.attach(&load.pelt, weight);
+        }
+        load.state = LoadState::Runnable;
+        task.fair().load.set(load, tok);
+    }
+
+    pub(crate) fn detach_pelt(&mut self, task: &SchedTask<T>, now_ns: u64, tok: RqLocked) {
+        let weight = Self::weight(task, tok) as u64;
+        let mut load = task.fair().load.get(tok);
+        load.update(now_ns, weight, false);
+        if load.is_attached() {
+            self.pelt.detach(&load.pelt, weight);
+            load.state = LoadState::Detached;
+        }
+        task.fair().load.set(load, tok);
+    }
+
+    fn reweight_pelt(
+        &mut self,
+        task: &SchedTask<T>,
+        old_weight: u64,
+        now_ns: u64,
+        is_curr: bool,
+        tok: RqLocked,
+    ) {
+        let mut load = task.fair().load.get(tok);
+        load.update(now_ns, old_weight, is_curr);
+        if load.is_attached() {
+            self.pelt.detach(&load.pelt, old_weight);
+        }
+        load.pelt.reweight(Self::weight(task, tok) as u64);
+        if load.is_attached() {
+            self.pelt.attach(&load.pelt, Self::weight(task, tok) as u64);
+        }
+        task.fair().load.set(load, tok);
     }
 
     /// Open a request of `request_ns` at `vruntime` (`vd = ve + r/w`).
@@ -603,9 +677,10 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for FairClass<T, Ow
         task: Owner,
         kind: EnqueueKind,
         curr: Option<&SchedTask<T>>,
-        _clk: &RqClock,
+        clk: &RqClock,
         tok: RqLocked,
     ) {
+        self.activate_pelt(&task, clk.now_ns(), tok);
         match kind {
             EnqueueKind::New => {
                 self.place_new_entity(&task, curr, tok);
@@ -626,17 +701,19 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for FairClass<T, Ow
         &mut self,
         task: &Owner,
         curr: Option<&SchedTask<T>>,
-        _clk: &RqClock,
+        clk: &RqClock,
         tok: RqLocked,
     ) -> Option<Owner> {
-        self.dequeue_with_lag(task, curr, tok)
+        let removed = self.dequeue_with_lag(task, curr, tok)?;
+        self.detach_pelt(&removed, clk.now_ns(), tok);
+        Some(removed)
     }
 
     fn steal(
         &mut self,
         want: &mut dyn FnMut(&SchedTask<T>) -> bool,
         curr: Option<&SchedTask<T>>,
-        _clk: &RqClock,
+        clk: &RqClock,
         tok: RqLocked,
     ) -> Option<Owner> {
         let key = self
@@ -646,15 +723,18 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for FairClass<T, Ow
             .map(|task| Self::deadline_key(task, tok))?;
         // Removal transfers the tree's owner directly; rejected candidates
         // never create a temporary owner or change a reference count.
-        self.dequeue_key_with_lag(key, curr, tok)
+        let removed = self.dequeue_key_with_lag(key, curr, tok)?;
+        self.detach_pelt(&removed, clk.now_ns(), tok);
+        Some(removed)
     }
 
-    fn pick_next(&mut self, _clk: &RqClock, tok: RqLocked) -> Option<Owner> {
+    fn pick_next(&mut self, clk: &RqClock, tok: RqLocked) -> Option<Owner> {
         if self.ready.is_empty() {
             self.clear_buddy();
             return None;
         }
         if let Some(picked) = self.pick_buddy(tok) {
+            self.activate_pelt(&picked, clk.now_ns(), tok);
             return Some(picked);
         }
         let avg = self.avg_vruntime(None, tok);
@@ -680,10 +760,12 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for FairClass<T, Ow
             .dequeue_entity(key, tok)
             .expect("pick key is in the ready tree");
         self.clear_buddy_if(&picked);
+        self.activate_pelt(&picked, clk.now_ns(), tok);
         Some(picked)
     }
 
-    fn set_curr(&mut self, task: &SchedTask<T>, _clk: &RqClock, tok: RqLocked) {
+    fn set_curr(&mut self, task: &SchedTask<T>, clk: &RqClock, tok: RqLocked) {
+        self.activate_pelt(task, clk.now_ns(), tok);
         // Constructor zeros mean the entity was never placed. A runner that
         // already has saved lag must not be re-placed as new.
         if Self::is_unplaced(task, tok) {
@@ -692,13 +774,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for FairClass<T, Ow
         self.update_min_vruntime(Some(task), tok);
     }
 
-    fn put_prev(
-        &mut self,
-        prev: Owner,
-        reason: LeaveReason,
-        _clk: &RqClock,
-        tok: RqLocked,
-    ) -> bool {
+    fn put_prev(&mut self, prev: Owner, reason: LeaveReason, clk: &RqClock, tok: RqLocked) -> bool {
         self.clear_buddy_if(&prev);
         self.update_min_vruntime(Some(&prev), tok);
         match reason {
@@ -723,14 +799,23 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for FairClass<T, Ow
                 self.requeue_prev(prev, tok);
                 true
             }
-            LeaveReason::Block | LeaveReason::Migrate => {
-                // Both deactivate without requeue and arm PLACE_LAG. Migrate
-                // stays its own reason so a sleep-only path cannot treat a
-                // task that is about to run on another CPU as blocked.
+            LeaveReason::Block => {
+                prev.fair().load.update(tok, |mut load| {
+                    load.state = LoadState::Blocked;
+                    load
+                });
                 self.update_entity_lag(&prev, tok);
                 false
             }
-            LeaveReason::Exit => false,
+            LeaveReason::Migrate => {
+                self.detach_pelt(&prev, clk.now_ns(), tok);
+                self.update_entity_lag(&prev, tok);
+                false
+            }
+            LeaveReason::Exit => {
+                self.detach_pelt(&prev, clk.now_ns(), tok);
+                false
+            }
         }
     }
 
@@ -800,10 +885,11 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for FairClass<T, Ow
         task: &Owner,
         old: SchedAttr,
         is_curr: bool,
-        _clk: &RqClock,
+        clk: &RqClock,
         tok: RqLocked,
     ) {
         let old_weight = i64::from(old.nice.weight());
+        self.reweight_pelt(task, old_weight as u64, clk.now_ns(), is_curr, tok);
         if is_curr {
             Self::rescale_deadline(task, old_weight, tok);
             return;
@@ -831,7 +917,8 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> ClassOps<T, Owner> for FairClass<T, Ow
         Ok(())
     }
 
-    fn switched_from(&mut self, task: &SchedTask<T>, is_curr: bool, _clk: &RqClock, tok: RqLocked) {
+    fn switched_from(&mut self, task: &SchedTask<T>, is_curr: bool, clk: &RqClock, tok: RqLocked) {
+        self.detach_pelt(task, clk.now_ns(), tok);
         if is_curr {
             self.update_entity_lag(task, tok);
             self.update_min_vruntime(None, tok);
