@@ -382,6 +382,15 @@ access and truncation invalidate derived offsets, checksum state and UDP metadat
 Fragment data does not imply a complete transport header. ICMP quotes permit
 truncated payloads; unfinished output derives its length from packet storage.
 
+### IPv4 Forwarding Preparation
+
+`network/ipv4/forward.rs` owns unicast forwarding admission, TTL updates,
+fragmentation, and ICMP failure preparation. Its input is already normalized by
+IPv4 ingress. It preserves remote endpoints and inherited fragment fields;
+failures retain the original header for a separately routed ICMP reply.
+Routing and scheduling remain caller responsibilities; live ingress is not
+connected to forwarding in this stage.
+
 ### IPv4 Filter Table Model
 
 `netfilter/filter` stores IPv4 filtering policies as immutable ordered rules

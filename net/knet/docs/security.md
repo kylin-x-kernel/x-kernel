@@ -137,6 +137,11 @@ fit a NUL-terminated ABI field, and conditions whose meaning would change in the
 legacy format. The output buffer may be partially written on failure and must
 be discarded. The encoder receives kernel values and does not access user memory.
 
+Forwarding admission rejects invalid unicast endpoints, unsupported options,
+and malformed fragment geometry after IPv4 checksum and length validation.
+TTL/DF failures retain the original packet and use the existing ICMP suppression
+rules. Forwarding preparation does not transmit packets or select reply sources.
+
 INPUT runs on complete, validated local IPv4 datagrams before transport delivery
 or protocol/port-unreachable replies. Fragment queues do not evaluate partial datagrams.
 Unknown input interfaces and invalid match contexts drop the packet. Interface

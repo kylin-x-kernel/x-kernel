@@ -67,6 +67,9 @@ pub(crate) enum Icmpv4Error {
     ProtocolUnreachable,
     PortUnreachable,
     FragmentReassemblyTimeout,
+    TimeExceeded,
+    NetworkUnreachable,
+    FragmentationNeeded { mtu: u16 },
 }
 
 /// Borrowed IPv4 header bytes, including options.
@@ -208,6 +211,18 @@ pub(crate) fn build_icmpv4_error_packet(
     packet_type: PacketType,
     offending_packet: &[u8],
 ) -> Option<Vec<u8>> {
+    let source = Ipv4Header::parse_header_only(offending_packet)
+        .ok()?
+        .dst_addr();
+    build_icmpv4_error_packet_from(error, packet_type, offending_packet, source)
+}
+
+pub(super) fn build_icmpv4_error_packet_from(
+    error: Icmpv4Error,
+    packet_type: PacketType,
+    offending_packet: &[u8],
+    source: Ipv4Address,
+) -> Option<Vec<u8>> {
     let offending_header = Ipv4Header::parse_header_only(offending_packet).ok()?;
     if !can_send_icmpv4_error(packet_type, offending_header, offending_packet) {
         return None;
@@ -222,7 +237,7 @@ pub(crate) fn build_icmpv4_error_packet(
 
     write_ipv4_header(
         &mut packet[..IPV4_MIN_HEADER_LEN],
-        offending_header.dst_addr(),
+        source,
         offending_header.src_addr(),
         PROTOCOL_ICMP,
         IPV4_DEFAULT_TTL,
@@ -237,6 +252,17 @@ pub(crate) fn build_icmpv4_error_packet(
         }
         Icmpv4Error::PortUnreachable => {
             Icmpv4Type::DestinationUnreachable(DestUnreachableHeader::Port)
+        }
+        Icmpv4Error::NetworkUnreachable => {
+            Icmpv4Type::DestinationUnreachable(DestUnreachableHeader::Network)
+        }
+        Icmpv4Error::FragmentationNeeded { mtu } => {
+            Icmpv4Type::DestinationUnreachable(DestUnreachableHeader::FragmentationNeeded {
+                next_hop_mtu: mtu,
+            })
+        }
+        Icmpv4Error::TimeExceeded => {
+            Icmpv4Type::TimeExceeded(TimeExceededCode::TtlExceededInTransit)
         }
         Icmpv4Error::FragmentReassemblyTimeout => {
             Icmpv4Type::TimeExceeded(TimeExceededCode::FragmentReassemblyTimeExceeded)
@@ -285,6 +311,26 @@ pub(crate) fn fragment_output_packet(
     path_mtu: usize,
     identification: u16,
 ) -> Result<Vec<Vec<u8>>, Ipv4FragmentError> {
+    let header = Ipv4Header::parse_header_only(packet).map_err(|_| Ipv4FragmentError::Malformed)?;
+    if header.is_fragmented() && packet.len() > path_mtu {
+        return Err(Ipv4FragmentError::Malformed);
+    }
+    fragment_packet(packet, path_mtu, identification)
+}
+
+pub(super) fn fragment_forward_packet(
+    packet: &[u8],
+    path_mtu: usize,
+) -> Result<Vec<Vec<u8>>, Ipv4FragmentError> {
+    let header = Ipv4Header::parse_header_only(packet).map_err(|_| Ipv4FragmentError::Malformed)?;
+    fragment_packet(packet, path_mtu, header.identification())
+}
+
+fn fragment_packet(
+    packet: &[u8],
+    path_mtu: usize,
+    identification: u16,
+) -> Result<Vec<Vec<u8>>, Ipv4FragmentError> {
     if packet.len() > usize::from(u16::MAX) {
         return Err(Ipv4FragmentError::Malformed);
     }
@@ -294,9 +340,6 @@ pub(crate) fn fragment_output_packet(
     }
     if header.dont_fragment() {
         return Err(Ipv4FragmentError::DontFragment);
-    }
-    if header.is_fragmented() {
-        return Err(Ipv4FragmentError::Malformed);
     }
 
     // The caller supplies the route-selected path MTU and the IPv4
@@ -450,14 +493,15 @@ fn build_ipv4_fragment(
         .checked_add(fragment_payload_len)
         .and_then(|len| u16::try_from(len).ok())
         .ok_or(Ipv4FragmentError::Malformed)?;
-    let offset_units = offset / IPV4_FRAGMENT_OFFSET_UNIT;
+    let offset_units =
+        usize::from(header.fragment_offset.value()) + offset / IPV4_FRAGMENT_OFFSET_UNIT;
     let fragment_offset =
         IpFragOffset::try_new(offset_units as u16).map_err(|_| Ipv4FragmentError::Malformed)?;
 
     ether_header.total_len = total_len;
     ether_header.identification = identification;
     ether_header.dont_fragment = false;
-    ether_header.more_fragments = more_fragments;
+    ether_header.more_fragments = more_fragments || header.more_fragments;
     ether_header.fragment_offset = fragment_offset;
     ether_header.header_checksum = ether_header.calc_header_checksum();
 
