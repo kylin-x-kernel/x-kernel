@@ -569,6 +569,18 @@ impl Process {
         self.pdeath_signal.store(signo, Ordering::Relaxed);
     }
 
+    /// The exec-time auxiliary vector as flattened `(type, value)` words,
+    /// trailing NULL last. Empty until the first exec commits it.
+    pub fn saved_aux(&self) -> Arc<Vec<u64>> {
+        self.saved_aux.lock().clone()
+    }
+
+    /// Replaces the exec-time auxiliary vector.
+    pub fn set_saved_aux(&self, saved_aux: Vec<u64>) {
+        let saved_aux = Arc::new(saved_aux);
+        *self.saved_aux.lock() = saved_aux;
+    }
+
     /// The exit code of the [`Process`].
     pub fn exit_code(&self) -> i32 {
         self.group_exit.lock().exit_code

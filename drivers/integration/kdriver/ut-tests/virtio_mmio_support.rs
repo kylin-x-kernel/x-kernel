@@ -20,7 +20,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     ptr::NonNull,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use driver_base::{DriverError, DriverResult};
@@ -53,6 +53,10 @@ static SHARE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static UNSHARE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static ALLOC_FAILURES: AtomicUsize = AtomicUsize::new(0);
 static SHARE_FAILURES: AtomicUsize = AtomicUsize::new(0);
+/// Serializes fixture scenarios. `def_test(serial)` only orders tests inside
+/// one worker group; claim and match tests can otherwise overlap and share the
+/// process-wide HAL counters above.
+static SCENARIO_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Clears this scenario's counts.
 pub(super) fn reset_counts() {
@@ -224,6 +228,12 @@ pub(super) fn install(
     words[2] = device_id;
     words[STATUS_WORD] = INITIAL_STATUS;
 
+    while SCENARIO_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
     let header = Arc::new(Mutex::new(Header { words }));
     let opens = Arc::new(AtomicUsize::new(0));
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -252,6 +262,7 @@ pub(super) fn install(
         status_after_identify,
         status_at_open,
         status_history,
+        scenario_active: true,
     }
 }
 
@@ -268,6 +279,7 @@ pub(super) struct FixtureHandle {
     status_after_identify: Arc<Mutex<Vec<u32>>>,
     status_at_open: Arc<Mutex<Vec<u32>>>,
     status_history: Arc<kspin::SpinNoIrq<Vec<DeviceStatus>>>,
+    scenario_active: bool,
 }
 
 impl FixtureHandle {
@@ -299,6 +311,14 @@ impl FixtureHandle {
     /// Every status written to the opened transport, in order.
     pub(super) fn status_history(&self) -> Vec<DeviceStatus> {
         self.status_history.lock().clone()
+    }
+}
+
+impl Drop for FixtureHandle {
+    fn drop(&mut self) {
+        if self.scenario_active {
+            SCENARIO_ACTIVE.store(false, Ordering::Release);
+        }
     }
 }
 

@@ -618,6 +618,9 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
         if let Err(err) = process.exit_fs() {
             error!("exit_fs on process exit failed: {err:?}");
         }
+        // Release the namespace proxy in the exiting task's context. Leaving
+        // it for ProcessRuntime::drop can run netns teardown from IRQ/reclaim
+        // context after the task object is freed.
         if let Err(err) = process.exit_namespaces() {
             error!("exit_namespaces on process exit failed: {err:?}");
         }

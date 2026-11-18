@@ -9,7 +9,7 @@
 //! - Process resource limits (prlimit, etc.)
 //! - Process information queries
 
-use core::ffi::c_char;
+use core::{ffi::c_char, mem::size_of};
 
 use kcred::{CAP_LAST_CAP, CapSet, CapSets};
 use kerrno::{KError, KResult};
@@ -260,6 +260,29 @@ pub(crate) fn sys_prctl(
             let mut buf = [0; 16];
             buf[..len].copy_from_slice(&name.as_bytes()[..len]);
             write_vm_mem(arg2 as _, &buf)?;
+        }
+        PR_GET_AUXV => {
+            // Linux `prctl_get_auxv()`: arg4/arg5 must be zero, copy the
+            // saved vector into the caller's buffer (at most `arg3` bytes),
+            // and return the full vector size in bytes.
+            if arg4 != 0 || arg5 != 0 {
+                return Err(KError::InvalidInput);
+            }
+            // Linux `mm->saved_auxv` is a fixed `AT_VECTOR_SIZE` array. The
+            // syscall reports that full size even when the live vector is
+            // shorter, and zero-fills the unused tail.
+            const AT_VECTOR_SIZE: usize = 44;
+            let auxv = kprocess::current_user_process().saved_aux();
+            let mut bytes = alloc::vec![0u8; AT_VECTOR_SIZE * size_of::<u64>()];
+            for (index, word) in auxv.iter().take(AT_VECTOR_SIZE).enumerate() {
+                bytes[index * size_of::<u64>()..(index + 1) * size_of::<u64>()]
+                    .copy_from_slice(&word.to_ne_bytes());
+            }
+            let copy_len = arg3.min(bytes.len());
+            if copy_len != 0 {
+                write_vm_mem(arg2 as _, &bytes[..copy_len])?;
+            }
+            return Ok(bytes.len() as isize);
         }
         PR_SET_SECCOMP => {
             // Linux `prctl_set_seccomp` is the `seccomp(2)` install path with

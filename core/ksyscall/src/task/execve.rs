@@ -323,6 +323,11 @@ fn load_exec_image(
 ///
 /// `absolute_path` and `entry_name` describe the image for process metadata and
 /// the task name; the argument vector is read from `request`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: the exec transaction keeps exchange, credential commit, \
+              image installation and aux publication in one ordered sequence"
+)]
 fn exec_request(
     uctx: &mut UserContext,
     request: ExecRequest,
@@ -433,6 +438,10 @@ fn exec_request(
         process.commit_exec_parent_contract();
     }
     thread.reset_user_state_after_exec();
+    // Capture the exec-time auxv before the prepared image is consumed; it is
+    // committed with the new image so `prctl(PR_GET_AUXV)` reports the vector
+    // the program entry actually received.
+    let exec_saved_aux = prepared.saved_aux_words();
     // Keep every fallible post-exchange operation inside this fatal boundary.
     // The closure releases temporary MM owners and locks before do_exit.
     let committed: KResult<_> = (|| {
@@ -441,6 +450,7 @@ fn exec_request(
             probe.on_activated()?;
         }
         let image = load_exec_image(&process, prepared)?;
+        process.set_saved_aux(exec_saved_aux);
         curr.set_name(entry_name.as_str());
         let updated = thread.apply_exec_update(exec_update);
         #[cfg(unittest)]

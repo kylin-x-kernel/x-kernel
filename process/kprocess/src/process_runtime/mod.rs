@@ -640,6 +640,10 @@ pub(crate) fn fork_process_runtime<R>(
         config.parent,
         config.exit_signal,
     )?;
+    // CLONE_PARENT changes the tree parent, but the new mm (and therefore the
+    // exec-time auxv) comes from the caller. Overwrite the tree-parent copy
+    // with the actual runtime donor.
+    process.set_saved_aux(parent.process().saved_aux().as_ref().clone());
     // Linux `copy_process()`: the process that receives number 1 in its
     // namespace becomes that namespace's child reaper (`is_child_reaper()` in
     // `kernel/fork.c`) — the fallback adoption target of `find_child_reaper`.

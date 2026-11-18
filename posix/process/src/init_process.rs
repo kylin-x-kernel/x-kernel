@@ -135,6 +135,7 @@ pub fn spawn_init_process(
         cred.clone(),
     ))
     .unwrap_or_else(|e| panic!("Failed to prepare init image: {e}"));
+    let exec_saved_aux = prepared.saved_aux_words();
     let (entry_vaddr, ustack_top) = load_init_image(&uspace, prepared);
 
     let uctx = UserContext::new(entry_vaddr.into(), ustack_top, 0);
@@ -142,6 +143,7 @@ pub fn spawn_init_process(
 
     let fs_context = copy_init_fs_struct();
     let process = kprocess::Process::new_init_with_task_number(pid_handle.clone());
+    process.set_saved_aux(exec_saved_aux);
     assert!(
         process.is_init(),
         "spawned init process must register as INIT_PROC"

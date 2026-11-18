@@ -6,11 +6,23 @@
 
 use kerrno::{KError, KResult};
 use khal::time::monotonic_time;
-use ktime_types::{ClockId, SystemTime, TimeSpan};
+use ktime_types::{ClockId, SystemTime, TimeSpan, TimeSpec};
 use linux_raw_sys::general::{__kernel_clockid_t, timespec, timeval, timezone};
 use posix_types::{SystemTimeLike, TimeSpanLike, UserConstPtr, UserPtr};
 
 use super::clock_id::{parse_clock_id, parse_query_clock_id};
+
+/// Applies a time-namespace offset to a non-negative clock reading.
+///
+/// A negative offset may move the reading before the clock's origin, so the
+/// result is a signed timestamp. Values outside the representable range fail
+/// rather than wrapping.
+fn offset_clock(span: TimeSpan, offset: TimeSpec) -> KResult<timespec> {
+    offset
+        .adjust_span(span)
+        .map(timespec::from_system_time)
+        .ok_or(KError::OutOfRange)
+}
 
 /// Returns the current time from the specified clock.
 pub(crate) fn sys_clock_gettime(
@@ -21,14 +33,22 @@ pub(crate) fn sys_clock_gettime(
         warn!("Called sys_clock_gettime for unsupported clock {clock_id}");
         KError::InvalidInput
     })?;
+    let time_ns = kprocess::current_user_process()
+        .nsproxy()?
+        .time_ns()
+        .clone();
     let value = match clock {
         ClockId::Realtime | ClockId::RealtimeCoarse => {
             timespec::from_system_time(ktime::realtime())
         }
-        ClockId::Boottime => timespec::from_time_span(ktime::boottime().span_since_origin()),
-        ClockId::Monotonic | ClockId::MonotonicRaw | ClockId::MonotonicCoarse => {
-            timespec::from_time_span(monotonic_time().span_since_origin())
-        }
+        ClockId::Boottime => offset_clock(
+            ktime::boottime().span_since_origin(),
+            time_ns.boottime_offset(),
+        )?,
+        ClockId::Monotonic | ClockId::MonotonicRaw | ClockId::MonotonicCoarse => offset_clock(
+            monotonic_time().span_since_origin(),
+            time_ns.monotonic_offset(),
+        )?,
         ClockId::ProcessCpu => {
             timespec::from_time_span(kprocess::current_user_process().process_cpu_time())
         }

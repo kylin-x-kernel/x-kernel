@@ -360,6 +360,19 @@ impl PreparedExecImage {
     pub fn auxv_bytes(&self) -> &[u8] {
         &self.auxv
     }
+
+    /// Returns the exec-time auxv as the flat `(type, value)` word sequence
+    /// reported by `/proc/<pid>/auxv` and `PR_GET_AUXV`.
+    pub fn saved_aux_words(&self) -> Vec<u64> {
+        self.auxv
+            .chunks_exact(core::mem::size_of::<u64>())
+            .map(|chunk| {
+                u64::from_ne_bytes([
+                    chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+                ])
+            })
+            .collect()
+    }
 }
 
 struct PreparedElfImage {
@@ -699,6 +712,10 @@ fn initial_aux_vector(
         // paths from it. Omitting it makes every reader see "no optional
         // features", and a JIT that still emits a feature-gated path faults.
         AuxEntry::new(AuxType::HWCAP, khal::cpu_hwcap()),
+        // Linux `create_elf_tables()` also publishes the secondary mask and
+        // the `times(2)` clock tick rate. Advertise a baseline HWCAP2 until
+        // the architecture HAL exposes a separate bitmap.
+        AuxEntry::new(AuxType::HWCAP2, 0),
     ];
     if let Some(interpreter_bias) = layout.interpreter_bias() {
         auxv.push(AuxEntry::new(AuxType::BASE, interpreter_bias));

@@ -232,6 +232,28 @@ fn prctl_capbset_read_rejects_unknown_capability_with_einval() {
 }
 
 #[def_test(user, serial)]
+fn prctl_capbset_drop_removes_the_capability_from_the_bounding_set() {
+    // CAP_NET_RAW = 13 is in the initial bounding set.
+    assert_eq!(sys_prctl(PR_CAPBSET_READ, 13, 0, 0, 0), Ok(1));
+    assert_eq!(sys_prctl(PR_CAPBSET_DROP, 13, 0, 0, 0), Ok(0));
+    // Dropping is one-way: the capability no longer reads back as present.
+    assert_eq!(sys_prctl(PR_CAPBSET_READ, 13, 0, 0, 0), Ok(0));
+    // Re-dropping an already-dropped capability is a successful no-op.
+    assert_eq!(sys_prctl(PR_CAPBSET_DROP, 13, 0, 0, 0), Ok(0));
+    assert_eq!(sys_prctl(PR_CAPBSET_READ, 13, 0, 0, 0), Ok(0));
+    // Dropping one capability leaves the others untouched.
+    assert_eq!(sys_prctl(PR_CAPBSET_READ, 12, 0, 0, 0), Ok(1));
+}
+
+#[def_test(user, serial)]
+fn prctl_capbset_drop_rejects_unknown_capability_with_einval() {
+    assert_eq!(
+        sys_prctl(PR_CAPBSET_DROP, 9999, 0, 0, 0),
+        Err(KError::InvalidInput)
+    );
+}
+
+#[def_test(user, serial)]
 fn prctl_cap_ambient_is_set_reports_unset() {
     assert_eq!(
         sys_prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET as usize, 0, 0, 0),
@@ -743,4 +765,74 @@ mod capabilities {
         );
         assert_eq!(is_set(), Ok(0));
     }
+}
+
+#[def_test(user, serial)]
+fn prctl_get_auxv_copies_the_saved_vector() {
+    use unittest_support::TestUserArray;
+
+    // The kernel retains the exec-time vector per process. The unittest
+    // fixture is created without an `execve`, so publish a known vector
+    // first; that also mirrors Linux's save-at-exec contract.
+    let process = kprocess::current_user_process();
+    process.set_saved_aux(alloc::vec![6, 4096, 17, 100, 0, 0]);
+    let buffer = TestUserArray::<u8, 1024>::new().unwrap();
+    let size = sys_prctl(PR_GET_AUXV, buffer.as_user_ptr() as usize, 1024, 0, 0).unwrap();
+    // Linux returns the size of the whole saved vector; the exact value is
+    // an implementation detail (this kernel stores it densely).
+    assert!(size as usize >= 2 * core::mem::size_of::<usize>());
+    let bytes = buffer.read();
+    // Walk the (type, value) pairs and require the Linux-required entries and
+    // the trailing AT_NULL terminator.
+    let words = size as usize / core::mem::size_of::<usize>();
+    let mut found_pagesz = false;
+    let mut found_clktck = false;
+    let mut found_null = false;
+    let mut index = 0;
+    while index + 1 < words {
+        let kind = usize::from_ne_bytes(
+            bytes[index * size_of::<usize>()..(index + 1) * size_of::<usize>()]
+                .try_into()
+                .unwrap(),
+        );
+        let value = usize::from_ne_bytes(
+            bytes[(index + 1) * size_of::<usize>()..(index + 2) * size_of::<usize>()]
+                .try_into()
+                .unwrap(),
+        );
+        match kind {
+            6 => {
+                assert_eq!(value, 4096);
+                found_pagesz = true;
+            }
+            17 => {
+                assert_eq!(value, 100);
+                found_clktck = true;
+            }
+            0 => {
+                found_null = true;
+                break;
+            }
+            _ => {}
+        }
+        index += 2;
+    }
+    assert!(found_pagesz);
+    assert!(found_clktck);
+    assert!(found_null);
+}
+
+#[def_test(user, serial)]
+fn prctl_get_auxv_rejects_nonzero_arg4_or_arg5() {
+    use unittest_support::TestUserArray;
+
+    let buffer = TestUserArray::<u8, 64>::new().unwrap();
+    assert_eq!(
+        sys_prctl(PR_GET_AUXV, buffer.as_user_ptr() as usize, 64, 1, 0),
+        Err(KError::InvalidInput)
+    );
+    assert_eq!(
+        sys_prctl(PR_GET_AUXV, buffer.as_user_ptr() as usize, 64, 0, 1),
+        Err(KError::InvalidInput)
+    );
 }

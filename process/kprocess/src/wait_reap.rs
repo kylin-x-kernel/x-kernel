@@ -54,6 +54,10 @@ pub fn try_reap_zombie_process(process: &Arc<Process>) -> bool {
         return false;
     }
     lookup::unpublish_process_if_matches(process);
+    // Namespace ownership is deliberately retained through the zombie window
+    // so /proc/<pid>/ns/* can pin a container init's namespaces. Releasing it
+    // here runs in the waiting/reaping task context, not in IRQ context.
+    let _ = process.exit_namespaces();
     true
 }
 
@@ -86,10 +90,12 @@ pub fn scan_waitable_child(
 pub fn reap_exited_process(process: &Arc<Process>) {
     if process.detach_dead_from_parent() {
         lookup::unpublish_process_if_matches(process);
+        let _ = process.exit_namespaces();
     }
 }
 
 /// Removes a process identity after the process-domain relation was already detached.
 pub fn reap_detached_process_identity(process: &Arc<Process>) {
     lookup::unpublish_process_if_matches(process);
+    let _ = process.exit_namespaces();
 }
