@@ -476,7 +476,12 @@ impl Inode {
             uid,
             gid,
             size: 0,
-            block_size: 0,
+            // The inode I/O block size is the superblock block size (PAGE_SIZE_4K,
+            // installed in new_with_name_superblock_flags_root_metadata_and_accounting),
+            // mirroring Linux tmpfs where inode->i_blkbits = sb->s_blocksize_bits.
+            // Leaving this 0 collapsed st_blksize to 1 through inode_blkbits() and
+            // forced byte-at-a-time userspace reads (e.g. GNU cmp on /tmp).
+            block_size: memaddr::PAGE_SIZE_4K as u64,
             blocks: 0,
             rdev,
             atime: SystemTime::UNIX_EPOCH,
