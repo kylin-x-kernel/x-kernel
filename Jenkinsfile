@@ -62,6 +62,8 @@ pipeline {
             steps {
                 script {
                     withFloatingCiDocker {
+                        // Replay builds lose Gitee webhook env; restore before checkout/description.
+                        restoreReplayGiteeEnv()
                         currentBuild.description = env.giteePullRequestIid?.trim()
                             ? "PR#${env.giteePullRequestIid}"
                             : "${env.DEFAULT_BRANCH} (manual)"
