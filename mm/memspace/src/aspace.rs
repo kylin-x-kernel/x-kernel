@@ -533,28 +533,30 @@ impl MmSpace {
 
     fn remove_mapping_range(&mut self, start: VirtAddr, size: usize) -> KResult {
         let range = VirtAddrRange::from_start_size(start, size);
-        let overlapped_vmas = self.vmas.collect_overlapping(range);
-        let operations = overlapped_vmas
-            .iter()
-            .map(|vma| {
-                let overlap = VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
-                let runtime = vma.runtime().cloned().ok_or(KError::BadAddress)?;
-                Ok((overlap, runtime))
-            })
-            .collect::<KResult<Vec<_>>>()?;
+        // The VMA set stays in place until `vmas.unmap` below, so every pass
+        // can borrow the overlapping VMAs instead of snapshotting them into a
+        // vector sized by the number of mappings. A VMA without a runtime
+        // object would leave the range half torn down, so runtimes are
+        // resolved before the page table is touched.
+        for vma in self.vmas.overlapping(range) {
+            vma.runtime().ok_or(KError::BadAddress)?;
+        }
         {
             let mut modify = self.pgtbl.modify();
-            for (overlap, runtime) in &operations {
-                runtime.unmap(*overlap, &mut modify)?;
+            for vma in self.vmas.overlapping(range) {
+                let overlap = VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
+                vma.runtime()
+                    .ok_or(KError::BadAddress)?
+                    .unmap(overlap, &mut modify)?;
             }
             modify.finish();
         }
-        for (overlap, runtime) in &operations {
-            runtime.on_invalidate_complete(*overlap);
-        }
-        for vma in &overlapped_vmas {
+        for vma in self.vmas.overlapping(range) {
+            let overlap = VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
+            vma.runtime()
+                .ok_or(KError::BadAddress)?
+                .on_invalidate_complete(overlap);
             if vma.is_accounted() {
-                let overlap = VirtAddrRange::new(start.max(vma.start()), range.end.min(vma.end()));
                 commit::uncharge(overlap.size());
             }
         }
@@ -995,10 +997,6 @@ impl MmSpace {
 
         let vmas = self.clone_vmas(overlapped_vmas.iter())?;
         Ok(vmas.into_iter().zip(overlaps).collect())
-    }
-
-    fn clone_all_vmas(&self) -> KResult<Vec<VmArea>> {
-        self.clone_vmas(self.vmas.iter())
     }
 
     fn relocated_mapping_from_snapshot(
@@ -2037,16 +2035,19 @@ impl MmSpace {
         let mut guard = new_aspace.lock();
         guard.copy_kernel_mappings()?;
 
-        let vmas = self.clone_all_vmas()?;
-        let operations = vmas
-            .iter()
-            .map(|vma| {
-                let runtime = self.runtime_for_vma(vma).ok_or(KError::BadAddress)?;
-                Ok((vma.clone(), runtime))
-            })
-            .collect::<KResult<Vec<_>>>()?;
+        // Resolve every parent VMA before either page table is touched, so a
+        // VMA whose runtime handle drifted from its backing description fails
+        // the fork instead of leaving a half prepared parent.
+        for vma in self.vmas.iter() {
+            self.runtime_for_vma(vma).ok_or(KError::BadAddress)?;
+        }
         let mut self_modify = self.pgtbl.modify();
-        for (vma_meta, runtime) in &operations {
+        // Inherit by walking the parent VMA set in place; it is not modified
+        // here, so no vector sized by the number of mappings is needed. The
+        // runtime comes from the borrowed VMA because `self_modify` already
+        // borrows the parent page table.
+        for vma_meta in self.vmas.iter() {
+            let runtime = vma_meta.runtime().ok_or(KError::BadAddress)?;
             let mut child_vma = vma_meta.clone();
             let charge = Self::charge_vma(&mut child_vma)?;
             let invalidate = Some(guard.invalidate_handle(&new_aspace_clone));

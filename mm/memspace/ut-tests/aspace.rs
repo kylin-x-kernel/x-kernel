@@ -301,6 +301,100 @@ fn private_fork_after_vma_split_keeps_child_cow_object_offset() {
 }
 
 #[def_test]
+fn fork_and_unmap_across_vmas_with_holes_preserves_remaining_mappings() {
+    let start = VirtAddr::from_usize(0x70_0000);
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    let mut parent =
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 8).expect("allocate parent address space");
+    // Three mappings with holes between them, so an unmapping request spans
+    // partial VMAs at both ends, a whole VMA, and the holes in between.
+    for page in [0, 3, 6] {
+        let address = start + page * PAGE_SIZE_4K;
+        parent
+            .map(
+                address,
+                PAGE_SIZE_4K * 2,
+                flags,
+                false,
+                VmRuntimeRef::new_anon_private(address, PageSize::Size4K),
+            )
+            .expect("map private range");
+    }
+
+    let child = parent.try_clone().expect("fork spanning VMAs");
+    parent
+        .unmap(start + PAGE_SIZE_4K, PAGE_SIZE_4K * 6)
+        .expect("unmap across VMAs and holes");
+
+    for page in 0..8 {
+        let address = start + page * PAGE_SIZE_4K;
+        assert_eq!(
+            parent.find_vma(address).is_some(),
+            page == 0 || page == 7,
+            "parent page {page}"
+        );
+        assert_eq!(
+            child.lock().find_vma(address).is_some(),
+            page != 2 && page != 5,
+            "child page {page}"
+        );
+    }
+}
+
+#[def_test]
+fn unmap_entirely_inside_a_hole_leaves_the_neighbouring_mappings() {
+    let start = VirtAddr::from_usize(0x70_0000);
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    let mut parent =
+        MmSpace::new_empty_user(start, PAGE_SIZE_4K * 8).expect("allocate parent address space");
+    parent
+        .map(
+            start,
+            PAGE_SIZE_4K * 2,
+            flags,
+            false,
+            VmRuntimeRef::new_anon_private(start, PageSize::Size4K),
+        )
+        .expect("map the lower range");
+    let upper = start + PAGE_SIZE_4K * 6;
+    parent
+        .map(
+            upper,
+            PAGE_SIZE_4K * 2,
+            flags,
+            false,
+            VmRuntimeRef::new_anon_private(upper, PageSize::Size4K),
+        )
+        .expect("map the upper range");
+
+    // The request is shorter than the hole it sits in, so the next VMA starts
+    // beyond its end address. Unmapping it touches no mapping at all.
+    let hole = start + PAGE_SIZE_4K * 3;
+    parent
+        .unmap(hole, PAGE_SIZE_4K)
+        .expect("unmap a hole without neighbours in range");
+
+    assert_eq!(
+        parent
+            .find_vma(start + PAGE_SIZE_4K)
+            .map(|vma| vma.start())
+            .unwrap_or_else(|| VirtAddr::from_usize(0)),
+        start
+    );
+    assert_eq!(
+        parent
+            .find_vma(upper + PAGE_SIZE_4K)
+            .map(|vma| vma.start())
+            .unwrap_or_else(|| VirtAddr::from_usize(0)),
+        upper
+    );
+    assert!(
+        parent.find_vma(hole).is_none(),
+        "the hole stays unmapped"
+    );
+}
+
+#[def_test]
 fn futex_backing_rejects_unaligned_or_unmapped_addresses() {
     let aspace = new_test_aspace();
     assert!(matches!(

@@ -1042,6 +1042,27 @@ impl VmAreaSet {
             .or_else(|| self.areas.range(addr..).next().map(|(_, area)| area))
     }
 
+    /// Iterates over the VMAs overlapping `range` in ascending address order.
+    ///
+    /// The VMAs are borrowed from the set, so a caller that keeps the set
+    /// stable while it works needs no storage proportional to the number of
+    /// overlapping VMAs. Use [`Self::collect_overlapping`] instead when the
+    /// walk itself has to change the set.
+    pub(crate) fn overlapping(&self, range: VirtAddrRange) -> impl Iterator<Item = &VmArea> {
+        // Only the VMA containing `range.start` can begin before it; every
+        // other overlap starts inside the range. Clamping the window start to
+        // `range.end` covers "no candidate", "candidate beyond the range" and
+        // "empty range" with one degenerate window instead of a second
+        // iterator, and a request that lies inside a hole longer than itself
+        // finds its next candidate past `range.end`: that window has to be
+        // clamped, because `BTreeMap::range` rejects a reversed one.
+        let first = match self.find_at_or_after(range.start) {
+            Some(area) if !range.is_empty() => area.start().min(range.end),
+            _ => range.end,
+        };
+        self.areas.range(first..range.end).map(|(_, area)| area)
+    }
+
     /// Returns whether `range` overlaps any existing VMA.
     pub fn overlaps(&self, range: VirtAddrRange) -> bool {
         if let Some(area) = self
@@ -1091,34 +1112,12 @@ impl VmAreaSet {
     }
 
     /// Collects cloned VMAs overlapping `range` in ascending address order.
+    ///
+    /// The clone is what lets a caller mutate the set while acting on the
+    /// result; a caller that keeps the set stable should borrow through
+    /// [`Self::overlapping`] and allocate nothing.
     pub fn collect_overlapping(&self, range: VirtAddrRange) -> Vec<VmArea> {
-        let mut overlapped = Vec::new();
-        if let Some(area) = self
-            .areas
-            .range(..=range.start)
-            .next_back()
-            .map(|(_, area)| area)
-            && area.end() > range.start
-        {
-            overlapped.push(area.clone());
-        }
-        for area in self
-            .areas
-            .range(range.start..range.end)
-            .map(|(_, area)| area)
-        {
-            if area.start() >= range.end {
-                break;
-            }
-            if overlapped
-                .last()
-                .is_some_and(|last| last.start() == area.start())
-            {
-                continue;
-            }
-            overlapped.push(area.clone());
-        }
-        overlapped
+        self.overlapping(range).cloned().collect()
     }
 
     /// Finds a free range that can accommodate `size` bytes within `limit`.
