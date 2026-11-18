@@ -110,18 +110,18 @@ across its exit cleanup.
 
 ## Runtime and teardown flow
 
-`UserContext::run` owns the IRQ-masked user-transfer boundary. Its entry callback
-publishes user mode, then calls `krcu::enter_user_quiescent`; its return callback
-calls `krcu::exit_user_quiescent` with no accounting work. The entry callback
-publishes user mode as a single lock-free store, not a settlement, so the
-boundary never reads the clock or takes a lock. Kernel mode is published only
-after `run` returns, once the trap has actually been taken, so a timer tick that
-arrives from userspace settles the interrupted interval as user time. The return callback precedes architecture IRQ
-dispatch as well as syscall/fault processing in this loop. No RCU read scope or protected borrow may span user
-execution; retained task/thread references use independent ownership. RCU
-system state, GP service and private read-admission policy belong to `krcu`,
-with algorithms in `krcu-core`, not POSIX. `ktask` retains task reader storage
-and scheduler boundaries. No public consumer read interface is opened here.
+`UserContext::run` owns the IRQ-masked user-transfer boundary. The entry
+callback settles kernel CPU time and starts the user interval before calling
+`krcu::enter_user_quiescent`. The return callback restores RCU watching with
+`krcu::exit_user_quiescent`, then settles user CPU time and starts the kernel
+interval before IRQ dispatch or syscall and fault handling. Each accounting
+transition reads the monotonic clock under the thread's IRQ-safe accounting
+lock and defers preemption checks to the runtime's normal checkpoints.
+
+No RCU read scope or protected borrow may span user execution. Retained
+task and thread references use independent ownership. RCU system state,
+GP service and private read-admission policy belong to `krcu`, with algorithms
+in `krcu-core`. `ktask` retains task reader storage and scheduler boundaries.
 
 The loop alternates user execution, trap handling, kernel CPU accounting and
 signal checks. After the trap, one lock-free probe packs the independent

@@ -478,7 +478,7 @@ pub(crate) fn set_sched_deadline_ns(deadline_ns: Option<u64>) {
 
 /// Hardware-timer IRQ entry for scheduling and owned timers:
 ///
-/// - Invokes the existing user-runtime accounting hook on each timer IRQ.
+/// - Requests deferred user CPU-timer work when the periodic tick is due.
 /// - Accounts real runtime for the current task first (so wake handling is not
 ///   charged to the wrong task). A due schedule slot runs Linux `entity_tick`
 ///   (`check_preempt_tick`); other timer IRQs only account.
@@ -514,13 +514,11 @@ pub fn on_timer_fire() {
     crate::timers::run_timer_irq_note();
 
     let periodic_due = consume_periodic_tick(now_ns);
-    if let Some(current_task) = current_may_uninit()
+    if periodic_due
+        && let Some(current_task) = current_may_uninit()
         && let Some(runtime) = current_task.user_runtime()
     {
-        runtime.on_cpu_time_tick(now_ns);
-        if periodic_due {
-            runtime.on_periodic_tick();
-        }
+        runtime.on_periodic_tick();
     }
 
     let sched_due = {

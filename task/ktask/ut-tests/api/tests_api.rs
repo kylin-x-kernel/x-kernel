@@ -128,20 +128,15 @@ fn periodic_tick_survives_switches_and_stops_during_idle() {
 #[def_test(serial)]
 fn real_timer_irqs_preserve_the_periodic_deadline() {
     struct RuntimeProbe {
-        ticks: Arc<AtomicUsize>,
         periodic_ticks: Arc<AtomicUsize>,
         invalid_context: Arc<AtomicBool>,
     }
 
     impl crate::UserTaskRuntime for RuntimeProbe {
-        fn on_cpu_time_tick(&self, _now_ns: u64) {
+        fn on_periodic_tick(&self) {
             if karch::local_irq_enabled() || !kirq::context::is_in_hardirq() {
                 self.invalid_context.store(true, Ordering::Relaxed);
             }
-            self.ticks.fetch_add(1, Ordering::Release);
-        }
-
-        fn on_periodic_tick(&self) {
             self.periodic_ticks.fetch_add(1, Ordering::Release);
         }
 
@@ -150,7 +145,6 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
         }
     }
 
-    let ticks = Arc::new(AtomicUsize::new(0));
     let periodic_ticks = Arc::new(AtomicUsize::new(0));
     let invalid_context = Arc::new(AtomicBool::new(false));
     let checked_early_irq = Arc::new(AtomicBool::new(false));
@@ -159,7 +153,6 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
     let shared_deadline_consumed = Arc::new(AtomicBool::new(false));
     let shared_deadline_armed = Arc::new(AtomicBool::new(false));
     let runtime_ns = Arc::new(AtomicU64::new(0));
-    let worker_ticks = ticks.clone();
     let worker_periodic_ticks = periodic_ticks.clone();
     let worker_checked = checked_early_irq.clone();
     let worker_valid = early_irq_was_valid.clone();
@@ -171,19 +164,15 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
         crate::PreparedTaskEntry::new(move || {
             let delivered = Arc::new(AtomicBool::new(false));
             let fired_ns = Arc::new(AtomicU64::new(0));
-            let observed_ticks = Arc::new(AtomicUsize::new(0));
             let observed_periodic_ticks = Arc::new(AtomicUsize::new(0));
             let observed_deadline = Arc::new(AtomicU64::new(0));
             let handler_delivered = delivered.clone();
             let handler_fired_ns = fired_ns.clone();
-            let handler_ticks = worker_ticks.clone();
-            let handler_observed_ticks = observed_ticks.clone();
             let handler_periodic_ticks = worker_periodic_ticks.clone();
             let handler_observed_periodic_ticks = observed_periodic_ticks.clone();
             let handler_observed_deadline = observed_deadline.clone();
             let timer = crate::Timer::new(move |_: crate::TimerControl<'_>, _: crate::Expiration| {
                 handler_fired_ns.store(khal::time::monotonic_time_nanos(), Ordering::Relaxed);
-                handler_observed_ticks.store(handler_ticks.load(Ordering::Acquire), Ordering::Relaxed);
                 handler_observed_periodic_ticks.store(handler_periodic_ticks.load(Ordering::Acquire), Ordering::Relaxed);
                 handler_observed_deadline.store(NEXT_PERIODIC_TICK_NS.load_current(), Ordering::Relaxed);
                 handler_delivered.store(true, Ordering::Release);
@@ -198,15 +187,14 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
 
             let mut original_deadline_ns = 0;
             while khal::time::monotonic_time_nanos() < limit_ns {
-                let (before, before_periodic, deadline_ns, started) = {
+                let (before_periodic, deadline_ns, started) = {
                     let _guard = kspin::NoPreemptIrqSave::new();
                     let now_ns = khal::time::monotonic_time_nanos();
                     let deadline_ns = NEXT_PERIODIC_TICK_NS.load_current();
-                    let before = worker_ticks.load(Ordering::Acquire);
                     let before_periodic = worker_periodic_ticks.load(Ordering::Acquire);
                     let remaining_ns = deadline_ns.saturating_sub(now_ns);
                     if remaining_ns < PERIODIC_TICK_NS / 3 {
-                        (before, before_periodic, deadline_ns, false)
+                        (before_periodic, deadline_ns, false)
                     } else {
                         delivered.store(false, Ordering::Relaxed);
                         let at_ns = now_ns + remaining_ns / 4;
@@ -229,11 +217,11 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
                             rearm_local_timer();
                             shared_armed.store(true, Ordering::Release);
                         }
-                        (before, before_periodic, deadline_ns, started)
+                        (before_periodic, deadline_ns, started)
                     }
                 };
                 if !started {
-                    while worker_ticks.load(Ordering::Acquire) == before
+                    while worker_periodic_ticks.load(Ordering::Acquire) == before_periodic
                         && khal::time::monotonic_time_nanos() < limit_ns
                     {
                         core::hint::spin_loop();
@@ -249,8 +237,7 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
                     && fired_ns.load(Ordering::Relaxed) < deadline_ns
                 {
                     worker_valid.store(
-                        observed_ticks.load(Ordering::Relaxed) > before
-                            && observed_periodic_ticks.load(Ordering::Relaxed) == before_periodic
+                        observed_periodic_ticks.load(Ordering::Relaxed) == before_periodic
                             && observed_deadline.load(Ordering::Relaxed) == deadline_ns,
                         Ordering::Relaxed,
                     );
@@ -280,7 +267,6 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
         "periodic-tick-probe".into(),
         kidentity::allocate_root_pid_handle().expect("test task identity"),
         KBox::new(RuntimeProbe {
-            ticks: ticks.clone(),
             periodic_ticks: periodic_ticks.clone(),
             invalid_context: invalid_context.clone(),
         })
@@ -288,7 +274,6 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
     ));
     crate::activate_task(&task);
     assert_eq!(task.join(), 0);
-    assert!(ticks.load(Ordering::Acquire) >= 3);
     assert!(periodic_ticks.load(Ordering::Acquire) >= 2);
     assert!(!invalid_context.load(Ordering::Relaxed));
     assert!(checked_early_irq.load(Ordering::Acquire));

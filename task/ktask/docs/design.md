@@ -689,9 +689,8 @@ device and arbitrate by absolute-ns deadline:
 
 1. The IRQ entry first calls the `register_timer_irq_note` hook (watchdog
    hardlock heartbeat counts any timer IRQ, not only the 4s sample). The
-   existing user-runtime accounting hook runs on each timer IRQ; a due periodic
-   tick also requests the current runtime's deferred timer work. The handler
-   charges the current task from
+   handler requests deferred timer work from the current user runtime only
+   when the periodic tick is due. The handler charges the current task from
    `now - last_accounted_ns` (idle runtime is not charged; resched is
    requested only when the request is exhausted). The schedule deadline
    stays armed while idle when a class still reports a future event, so a

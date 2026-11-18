@@ -97,9 +97,7 @@ pub(crate) fn run_user_thread_loop(
         let _ = ktask::freezer::checkpoint();
         let reason = uctx.run(
             || {
-                // Publish user mode only; the interval is settled by the next
-                // tick, context switch or query, not on this boundary.
-                thr.record_cpu_time_mode(CpuTimeState::User);
+                thr.switch_cpu_time_mode(CpuTimeState::User);
                 // SAFETY: UserContext masks IRQs and performs only audited
                 // RCU-free architecture transfer after this callback. The loop
                 // holds no RCU scope; task/thread references have independent ownership.
@@ -110,11 +108,9 @@ pub(crate) fn run_user_thread_loop(
                 // with IRQs masked, before dispatching any returned trap. Restore
                 // watching before dispatching the trap.
                 unsafe { krcu::exit_user_quiescent() };
+                thr.switch_cpu_time_mode(CpuTimeState::Kernel);
             },
         );
-        // The trap has been taken; the rest of this iteration is kernel work.
-        // Publish it for the next tick so long kernel work settles as stime.
-        thr.record_cpu_time_mode(CpuTimeState::Kernel);
         let mut runtime_action = UserThreadRuntimeAction::Continue;
 
         match reason {

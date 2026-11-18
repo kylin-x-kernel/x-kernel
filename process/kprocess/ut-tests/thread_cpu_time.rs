@@ -11,7 +11,7 @@ fn at(ns: u64) -> MonotonicInstant {
     MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(ns))
 }
 
-fn sample_ns(time: &CpuTimeStatistics, ns: u64) -> (u64, u64) {
+fn sample_ns(time: &mut CpuTimeStatistics, ns: u64) -> (u64, u64) {
     let (user, kernel) = time.sample(at(ns));
     (
         user.as_nanos_u64_saturating(),
@@ -21,72 +21,49 @@ fn sample_ns(time: &CpuTimeStatistics, ns: u64) -> (u64, u64) {
 
 #[def_test]
 fn test_cpu_time_inactive_intervals_are_not_charged() {
-    let time = CpuTimeStatistics::new();
-    assert_eq!(sample_ns(&time, 100), (0, 0));
+    let mut time = CpuTimeStatistics::new();
+    assert_eq!(sample_ns(&mut time, 100), (0, 0));
 
     time.activate(at(100));
     time.deactivate(at(120));
-    assert_eq!(sample_ns(&time, 1000), (0, 20));
+    assert_eq!(sample_ns(&mut time, 1000), (0, 20));
 
     time.activate(at(2000));
-    assert_eq!(sample_ns(&time, 2010), (0, 30));
+    assert_eq!(sample_ns(&mut time, 2010), (0, 30));
 }
 
 #[def_test]
 fn test_cpu_time_samples_do_not_double_charge() {
-    let time = CpuTimeStatistics::new();
+    let mut time = CpuTimeStatistics::new();
     time.activate(at(10));
-    time.record_mode(CpuTimeState::User);
+    time.switch_mode(CpuTimeState::User, at(10));
 
-    assert_eq!(sample_ns(&time, 40), (30, 0));
-    assert_eq!(sample_ns(&time, 40), (30, 0));
-    assert_eq!(time.output(), (TimeSpan::from_nanos(30), TimeSpan::ZERO));
-}
-
-#[def_test]
-fn test_cpu_time_ticks_split_user_and_kernel_time() {
-    let time = CpuTimeStatistics::new();
-    time.activate(at(0));
-    time.record_mode(CpuTimeState::User);
-    time.settle(at(20));
-    time.record_mode(CpuTimeState::Kernel);
-    time.settle(at(30));
-
-    assert_eq!(
-        time.output(),
-        (TimeSpan::from_nanos(20), TimeSpan::from_nanos(10))
-    );
+    assert_eq!(sample_ns(&mut time, 40), (30, 0));
+    assert_eq!(sample_ns(&mut time, 40), (30, 0));
 }
 
 #[def_test]
 fn test_cpu_time_final_publication_drops_later_intervals() {
-    let time = CpuTimeStatistics::new();
+    let mut time = CpuTimeStatistics::new();
     time.activate(at(0));
-    assert!(!time.is_final());
     time.finalize(at(50));
-    assert!(time.is_final());
-    assert_eq!(time.output(), (TimeSpan::ZERO, TimeSpan::from_nanos(50)));
+    assert_eq!(sample_ns(&mut time, 50), (0, 50));
 
     // A switch-in after publication must not reopen the interval.
     time.activate(at(80));
-    time.settle(at(100));
-    assert_eq!(time.output(), (TimeSpan::ZERO, TimeSpan::from_nanos(50)));
+    assert_eq!(sample_ns(&mut time, 100), (0, 50));
 }
 
 #[def_test]
-fn test_cpu_time_boundary_only_publishes_mode() {
-    let time = CpuTimeStatistics::new();
+fn test_cpu_time_preserves_user_intervals_without_timer_ticks() {
+    let mut time = CpuTimeStatistics::new();
     time.activate(at(10));
-    // Rapid user/kernel flips without settlement do not charge anything.
-    time.record_mode(CpuTimeState::User);
-    time.record_mode(CpuTimeState::Kernel);
-    time.record_mode(CpuTimeState::User);
-    assert_eq!(time.output(), (TimeSpan::ZERO, TimeSpan::ZERO));
+    time.switch_mode(CpuTimeState::User, at(20));
+    time.switch_mode(CpuTimeState::Kernel, at(40));
+    time.switch_mode(CpuTimeState::User, at(50));
+    time.switch_mode(CpuTimeState::Kernel, at(80));
+    time.finalize(at(90));
 
-    // The next settlement charges the whole interval to the current mode.
-    time.settle(at(40));
-    assert_eq!(
-        time.output(),
-        (TimeSpan::from_nanos(30), TimeSpan::ZERO)
-    );
+    // A child may reach exit without any sample between its user-mode runs.
+    assert_eq!(sample_ns(&mut time, 100), (50, 30));
 }

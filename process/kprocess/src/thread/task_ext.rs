@@ -94,12 +94,6 @@ impl UserTaskRuntime for Thread {
         self.deactivate_cpu_time();
     }
 
-    fn on_cpu_time_tick(&self, now_ns: u64) {
-        self.settle_cpu_time_at(ktime_types::MonotonicInstant::from_span_since_origin(
-            ktime_types::TimeSpan::from_nanos(now_ns),
-        ));
-    }
-
     fn on_periodic_tick(&self) {
         self.request_cpu_timer_work();
     }

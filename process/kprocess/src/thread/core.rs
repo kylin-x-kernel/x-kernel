@@ -13,7 +13,7 @@ use ksignal::{SignalStack, api::ThreadSignalManager};
 use kspin::SpinNoIrq;
 use ksync::{Mutex, RwLock};
 use ktask::KtaskRef;
-use ktime_types::{MonotonicInstant, TimeSpan};
+use ktime_types::TimeSpan;
 #[cfg(feature = "tee")]
 use tee_task_iface::TeeSessionCtxTrait;
 
@@ -179,19 +179,18 @@ pub struct Thread {
     clear_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
     signal: Arc<ThreadSignalManager>,
-    time: CpuTimeStatistics,
+    time: SpinNoIrq<CpuTimeStatistics>,
     /// Coalesces periodic CPU-timer work requests until this task returns to
     /// userspace.
     ///
     /// Publication relationship covered by every ordering on this bit:
     /// producer is the local timer tick ([`Thread::request_cpu_timer_work`]),
-    /// whose `Release` store publishes the relaxed CPU-time settlements the
-    /// same tick just performed ([`CpuTimeStatistics`]) and the armed-gate
-    /// value it read. Observers are the user-return probe
+    /// whose `Release` store publishes a pending request after checking if
+    /// timers are armed. Observers are the user-return probe
     /// ([`Thread::has_pending_cpu_timer_work`], `Acquire` load) and the
     /// consumer in the return tail ([`Thread::take_cpu_timer_work`], `AcqRel`
     /// swap). Their `Acquire` side pairs with the tick's `Release`, so a poll
-    /// runs on samples at least as recent as the tick that requested it. The
+    /// observes the published request before sampling CPU time. The
     /// swap is a single `AcqRel` RMW: it consumes exactly one coalesced
     /// request even when a tick on the way to another return re-arms the bit
     /// concurrently, and its `Release` side orders that re-request after the
@@ -296,7 +295,7 @@ impl Thread {
                 cred: RwLock::new(cred),
                 clear_child_tid: AtomicUsize::new(0),
                 robust_list_head: AtomicUsize::new(0),
-                time: CpuTimeStatistics::new(),
+                time: SpinNoIrq::new(CpuTimeStatistics::new()),
                 cpu_timer_work_pending: AtomicBool::new(false),
                 nice: AtomicI32::new(NiceValue::default().as_i32()),
                 scheduler: Mutex::new(SchedulerState::default()),
@@ -763,36 +762,33 @@ impl Thread {
 
     /// Settles the elapsed interval and returns sampled user and kernel CPU time.
     ///
-    /// May sample another thread; settlement uses the lock-free accounting
-    /// atomics, so it is safe from any context that may read another thread.
+    /// May sample another thread. The accounting lock serializes the sample
+    /// with that thread's mode changes and context switches.
     pub fn sample_cpu_time(&self) -> (TimeSpan, TimeSpan) {
-        self.time.sample(khal::time::monotonic_time())
+        self.time.lock().sample(khal::time::monotonic_time())
     }
 
-    /// Publishes the CPU-accounting mode at a user/kernel boundary.
+    /// Settles the previous mode and starts the next user or kernel interval.
     ///
-    /// This is one relaxed store: the elapsed interval is settled later at a
-    /// timer tick, a context switch or a query. Keeping the boundary lock-free
-    /// and clock-free removes it from the syscall fast path.
-    pub fn record_cpu_time_mode(&self, state: CpuTimeState) {
-        self.time.record_mode(state);
-    }
-
-    /// Settles the unsettled interval up to the given monotonic timestamp.
-    ///
-    /// Called from the timer tick with the interrupted task's current mode.
-    pub fn settle_cpu_time_at(&self, now: MonotonicInstant) {
-        self.time.settle(now);
+    /// Call for the current thread with IRQs masked at the architecture
+    /// transfer boundary. Releasing the accounting lock defers preemption to
+    /// the runtime's normal checkpoints.
+    pub fn switch_cpu_time_mode(&self, state: CpuTimeState) {
+        ktask::with_preempt_check_deferred(|| {
+            self.time
+                .lock()
+                .switch_mode(state, khal::time::monotonic_time());
+        });
     }
 
     /// Starts a fresh accounting interval after this thread is switched in.
     pub fn activate_cpu_time(&self) {
-        self.time.activate(khal::time::monotonic_time());
+        self.time.lock().activate(khal::time::monotonic_time());
     }
 
     /// Settles and closes the accounting interval before this thread switches out.
     pub fn deactivate_cpu_time(&self) {
-        self.time.deactivate(khal::time::monotonic_time());
+        self.time.lock().deactivate(khal::time::monotonic_time());
     }
 
     /// Publishes the exit sample and refuses later switch-in intervals.
@@ -800,7 +796,7 @@ impl Thread {
     /// Distinct from [`Self::set_exit`]: that flag is visible to PI adoption
     /// while this thread can still be charged for cleanup.
     pub fn finalize_cpu_time(&self) {
-        self.time.finalize(khal::time::monotonic_time());
+        self.time.lock().finalize(khal::time::monotonic_time());
     }
 
     /// Requests a CPU-timer poll for this task at its next user return.

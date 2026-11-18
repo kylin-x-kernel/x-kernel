@@ -289,20 +289,14 @@ not return to the old image. The `stat`
 signal fields are a compatibility view: they expose only the low 31 bits, as
 Linux's obsolete `do_task_stat` fields do.
 
-CPU accounting uses `Inactive`, `Kernel`, and `User` states. The user/kernel
-boundary only publishes the current mode with one
-relaxed atomic store; it takes no lock and reads no clock, so the syscall fast
-path stays lock-free. Settlement instead happens at the local timer tick, at
-context switch (switch-in starts a fresh interval, switch-out settles it) and on
-demand when sampling. A settlement charges the unsettled interval to the mode
-that is current when it runs, so this is not Linux generic vtime or Linux's
-raw tick accounting; long kernel work still settles as kernel time because the trap path
-publishes `Kernel` for it. Settlement is a compare-exchange on `last_wall_ns`
-followed by an accumulator update. These operations are not a single snapshot:
-remote settlement may race finalization and thread-group transfer. The final
-accounting flag prevents restarting finalized accounting during cleanup;
-it is separate from the earlier exit flag. Separate IRQ/steal/guest
-accounting remains outside this model.
+CPU accounting uses `Inactive`, `Kernel`, and `User` states. A mode change
+settles elapsed time to the previous mode, so a user interval is counted even
+when no timer interrupt occurs. Switch-out closes the running interval,
+switch-in starts a kernel interval, and sampling settles time in the current
+mode. A per-thread IRQ-safe spinlock serializes these operations and protects
+both counters and the interval origin. Exit closes the last interval and
+prevents later switch-ins from restarting accounting. Separate IRQ, steal and
+guest accounting remain outside this model.
 
 The process CPU clock instead sums the scheduler runtime of its published and
 exiting members with the group's exited-runtime total. The membership lock
@@ -369,10 +363,9 @@ of an already Published identity leaves it published. Cleanup removes only the
 same slot when it is Vacant/Retired, protecting reused PID/TID bindings. A
 `PublishedUserTask` owns a rollback record until activation consumes it.
 
-Thread accounting uses Inactive/User/Kernel. A mode change only publishes the
-next state; elapsed time is charged to the mode current at the next tick,
-switch, or sample. Thread exit and no-new-privileges
-are separately published atomic flags. Group/session changes create or select a
+Thread accounting settles the elapsed interval before transitioning between
+`Inactive`, `User`, and `Kernel`. Thread exit and no-new-privileges are separately
+published atomic flags. Group/session changes create or select a
 group and publish group/session identity together; existing-group movement
 requires the same session. The syscall owner checks additional leader/ID rules.
 
