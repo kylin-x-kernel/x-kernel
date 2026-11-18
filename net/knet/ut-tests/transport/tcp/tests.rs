@@ -19,6 +19,15 @@ use super::*;
 const PORT_START: u16 = 0xc000;
 const PORT_END: u16 = 0xffff;
 
+#[def_test]
+fn tcp_info_reports_unsupported_instead_of_an_empty_snapshot() {
+    let socket = TcpSocket::new();
+    assert_eq!(
+        socket.get_option(GetSocketOption::TcpInfo(&mut ())),
+        Err(KError::OperationNotSupported)
+    );
+}
+
 #[derive(Default)]
 struct WakeCounter(AtomicUsize);
 

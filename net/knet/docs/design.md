@@ -1624,6 +1624,11 @@ The UDP socket lifecycle and local endpoint use separate `RwLock`s, while the pe
 
 ### TCP and Unix Stream Synchronization
 
+`TCP_INFO` queries return `EOPNOTSUPP` until a diagnostic snapshot is available.
+The error is returned before socket-option copyout, leaving the caller's output
+buffer and length unchanged. A successful zero-length result would leave
+applications interpreting their existing buffer contents as TCP statistics.
+
 TCP read and write waiters subscribe to separate socket-local `PollSet`s. Each set aggregates waiters behind smoltcp's single waker slot for that direction; data, transmit-buffer capacity, and protocol state changes wake only that socket's waiters. Local read shutdown wakes the read set, and entering `Listening` wakes existing interests so they can register for accept events. TCP readiness does not subscribe to device RX or global protocol-timer notifications: the network poller owns protocol progress independently of blocked socket operations.
 
 `LISTEN_TABLE` stores listeners in a `Mutex<HashMap<...>>`, and each listener entry uses its own mutex for the backlog queue. The entry's `accept_poll` sits outside that mutex. `register_accept_waker` only subscribes to `accept_poll`; callers recheck readiness after registration, as required by `Pollable`. It does not synchronously wake for an existing ready backlog, which would drain the one-shot subscription during edge rearm and leave later arrivals unobserved. Neither the socket-set lock nor the entry lock is needed for subscription.

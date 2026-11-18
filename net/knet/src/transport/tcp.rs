@@ -504,7 +504,9 @@ impl Configurable for TcpSocket {
                 **size = TCP_RX_BUF_LEN;
             }
             O::TcpInfo(_) => {
-                // TODO(mivik): implement TCP diagnostics
+                // No diagnostic snapshot is available. Success would leave
+                // callers interpreting their unchanged output as TCP metrics.
+                return Err(KError::OperationNotSupported);
             }
             _ => return Ok(OptionHandled::No),
         }

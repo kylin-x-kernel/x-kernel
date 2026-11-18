@@ -189,6 +189,7 @@ define_options! {
     // ---- TCP options ----
     NoDelay(bool),
     MaxSegment(usize),
+    /// TCP diagnostics are not available; queries return `OperationNotSupported`.
     TcpInfo(()),
     /// Seconds an idle connection waits before the first keep-alive probe.
     ///
