@@ -827,6 +827,14 @@ The provider retains neither the predicate nor DMA storage. Invalid context and
 preparation failures do not establish a device fault. Once the predicate is invoked,
 scoped registration and wakeup are allocation-free and cannot return registration errors.
 
+## MMIO test fixture lifetime
+
+MMIO test fixtures must not equate class withdrawal with final runtime release.
+External readers can outlive the registry entry. Fixture cleanup runs in
+sleepable context and waits for a completion signaled after transport and claim
+destruction before another scenario resets shared accounting. This test-only
+notification does not bypass the production claim or weaken DMA leak checks.
+
 ## VirtIO block binding data
 
 VirtIO block activation is owned by the block binding's typed `Data`, not by a

@@ -669,13 +669,23 @@ transports:
    mapping guard, so the region is unmapped only after the transport's last
    access and `Drop` reset, and the claim is released after the unmap;
    failed candidates drop the guard on return. Unmapping is not decided from
-   the dispatch result. Removing a published device drops its class runtime
-   first, so a VSOCK or sound device owner unsets its queues, resets the
+   the dispatch result. Removing a published device withdraws its class entry;
+   in-flight readers may retain the runtime until their last handle is dropped.
+   On final runtime drop, a VSOCK or sound device owner unsets its queues, resets the
    device, and releases RX mappings and queue rings before the transport (and
    therefore the claim) is dropped. GPU devres cleanup drains the active
    command, detaches the queues from callers and resets the device before
    withdrawing its IRQ handler. The teardown order and its evidence are described
    in `drivers/devices/virtio/docs/design.md`.
+
+   MMIO fixture tests serialize global registry/HAL-counter resets with a
+   sleepable mutex. Withdrawal alone is not a teardown barrier: the VSOCK
+   subscriber can leave a poller holding a runtime reference. Fixtures signal
+   a completion after their transport and real MMIO claim have dropped; tests
+   wait for it before checking exact DMA balances or resetting counters for
+   the next scenario. Cleanup also drains this completion on assertion-failure
+   exits. A retained-reader regression pins final release to the test CPU to
+   exercise progress without disabling preemption across the wait.
 3. **Dispatch**: `dispatch_virtio_try_new` dispatches on `DeviceKind`:
    - `DeviceKind::Net` → `VirtIoNet::try_new` → `kclass::publish_net`
    - `DeviceKind::Block` → `block::activate` → IRQ setup → `kclass::publish_block`

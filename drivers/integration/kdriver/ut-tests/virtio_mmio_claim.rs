@@ -19,7 +19,6 @@ use kdevice::{
     PlatformIdentity, ProbeOutcome, ProbeStats, ResourceDesc, ResourceSet, device_desc_add,
     probe_device_desc, register_driver_object, remove_device_managed,
 };
-use kspin::static_lock;
 use unittest::{assert, assert_eq, def_test};
 
 use super::{make_virtio_driver, virtio_mmio_support};
@@ -27,13 +26,6 @@ use crate::driver_registry::virtio::ids::{VIRTIO_MMIO_COMPATIBLE, virtio_type};
 
 const CLAIM_BASE: usize = 0x5a00_0000;
 const CLAIM_SIZE: usize = 0x200;
-
-// Both public scenarios install the same MMIO base and reset shared HAL
-// counters. Serialize them explicitly instead of relying on the harness
-// scheduling of `serial` tests across worker groups.
-static_lock! {
-    static CLAIM_TEST_LOCK: kspin::SpinNoPreempt<()> = kspin::SpinNoPreempt::new(());
-}
 
 /// Removes the published device and clears the fixture table on every exit.
 struct Cleanup {
@@ -56,8 +48,8 @@ impl Cleanup {
             }
             // Resetting the device registry cleared kclass's one-shot
             // `Removed` subscription, so the bridge cannot drop the class
-            // runtime here. Remove it explicitly to release the transport and
-            // its range claim.
+            // entry here. Withdraw it explicitly; fixture cleanup waits for
+            // any remaining readers to release the transport and range claim.
             kclass::remove_class_device_for_tests(id);
         }
     }
@@ -99,16 +91,26 @@ fn mmio_desc(bus_id: kdevice::BusId) -> kdevice::DeviceDesc {
 
 #[def_test(serial)]
 fn live_transport_keeps_the_range_claimed_until_removal() -> unittest::TestResult {
-    let _guard = CLAIM_TEST_LOCK.lock();
+    let _guard = virtio_mmio_support::MMIO_FIXTURE_LOCK.lock();
     run_live_transport_claim_scenario()
 }
 
-/// A live transport keeps the range claimed until its class runtime is
-/// removed; the range is claimable again afterwards.
+/// A live transport keeps the range claimed until its final runtime reader
+/// releases it after removal; the range is claimable again afterwards.
 ///
 /// Shared with the repeated/order test below, which runs this scenario more
 /// than once in the same kernel instance.
 pub(super) fn run_live_transport_claim_scenario() -> unittest::TestResult {
+    run_claim_scenario(false)
+}
+
+#[def_test(serial)]
+fn retained_reader_defers_transport_release_after_removal() -> unittest::TestResult {
+    let _guard = virtio_mmio_support::MMIO_FIXTURE_LOCK.lock();
+    run_claim_scenario(true)
+}
+
+fn run_claim_scenario(has_retained_reader: bool) -> unittest::TestResult {
     use super::virtio_mmio_support::{Event, INITIAL_STATUS};
 
     let (_bus_type, bus) = kdevice::reset_and_setup_platform_bus_for_tests("virtio-mmio-claim-bus");
@@ -274,12 +276,27 @@ pub(super) fn run_live_transport_claim_scenario() -> unittest::TestResult {
         Err(DriverError::ResourceBusy)
     ));
 
-    // Removing the class entry drops the transport, which releases the claim;
-    // the range must then be claimable again even though the descriptor still
-    // exists. `Cleanup::remove` also drops the class entry explicitly because
-    // the test registry reset cleared kclass's `Removed` subscription.
+    // Removing the class entry withdraws publication, but an in-flight reader
+    // can retain the transport and claim. Cleanup removes the entry explicitly
+    // because the test registry reset cleared kclass's `Removed` subscription.
+    let reader = has_retained_reader.then(|| {
+        kclass::vsock_devices()
+            .into_iter()
+            .find(|device| device.id() == device_id)
+            .expect("the available publication has a reader handle")
+    });
     drop(records);
     cleanup.remove();
+    if reader.is_some() {
+        assert!(matches!(
+            crate::resource::claim_mmio_region(
+                MmioRegion::new(CLAIM_BASE, CLAIM_SIZE),
+                "retained-reader-claim",
+            ),
+            Err(DriverError::ResourceBusy)
+        ));
+        assert_eq!(virtio_mmio_support::counts().unshare_calls, 0);
+    }
     assert_eq!(kclass::vsock_devices().len(), vsock_before);
     // Unbind keeps both stable objects and requeues their descriptors; only
     // unregister (or a registry reset) removes them.
@@ -300,13 +317,32 @@ pub(super) fn run_live_transport_claim_scenario() -> unittest::TestResult {
     assert!(kdevice::find_device(second.device_id()).is_some());
     assert!(driver.bound_devices_snapshot().is_empty());
 
-    // Removing the owner released every mapping through the real provider.
+    let reader_task = reader.map(|reader| {
+        // Model a poller preempted while retaining the old publication. Pin
+        // its final drop to this CPU so the waiter must allow scheduling.
+        let task = ktask::TaskInner::new_kthread(
+            move || drop(reader),
+            "mmio-retained-reader".into(),
+            0x8000,
+        )
+        .expect("test reader task allocation must succeed");
+        let mut mask = ktask::KCpuMask::new();
+        mask.set(khal::percpu::this_cpu_id().as_usize(), true);
+        task.set_cpumask(mask);
+        ktask::spawn_task(task)
+    });
+
+    handle.wait_released();
+    // Final transport release returned every mapping through the real provider.
     let hal_after_remove = virtio_mmio_support::counts();
     assert_eq!(hal_after_remove.unshare_calls, hal_after_remove.share_calls);
     assert_eq!(hal_after_remove.unshare_bytes, hal_after_remove.share_bytes);
     assert_eq!(hal_after_remove.dealloc_calls, hal_after_remove.alloc_calls);
     assert_eq!(hal_after_remove.share_failures, 0);
     assert_eq!(hal_after_remove.alloc_failures, 0);
+    if let Some(task) = reader_task {
+        task.join();
+    }
 
     let dma_after_remove = virtio_mmio_support::DmaSnapshot::capture();
     assert_eq!(dma_after_remove.active_mappings, dma_before.active_mappings);
@@ -354,7 +390,7 @@ pub(super) fn run_live_transport_claim_scenario() -> unittest::TestResult {
 #[cfg(feature = "virtio-rng")]
 #[def_test(serial)]
 fn scenarios_release_their_ranges_in_both_orders() -> unittest::TestResult {
-    let _guard = CLAIM_TEST_LOCK.lock();
+    let _guard = virtio_mmio_support::MMIO_FIXTURE_LOCK.lock();
     kclass::reinstall_event_bridge_for_tests();
     use super::virtio_mmio_match_unittest::run_wrong_candidate_scenario;
 

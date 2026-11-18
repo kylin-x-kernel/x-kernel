@@ -203,6 +203,7 @@ struct Header {
 }
 
 struct Spec {
+    released: Arc<kcompletion::Completion>,
     device_type: virtio::DeviceType,
     header: Arc<Mutex<Header>>,
     opens: Arc<AtomicUsize>,
@@ -214,6 +215,14 @@ struct Spec {
 
 static_lock! {
     static FIXTURES: Mutex<BTreeMap<usize, Spec>> = Mutex::new(BTreeMap::new());
+}
+
+// Every MMIO fixture scenario resets the global device registry and shared HAL
+// counters. The fixture table is keyed by base, but those resets are global, so
+// all scenarios (including the standalone match probes) must serialize. The
+// guard must allow sleeping while runtime readers release their last handles.
+static_lock! {
+    pub(super) static MMIO_FIXTURE_LOCK: Mutex<()> = Mutex::new(());
 }
 
 /// Registers a fixture at a descriptor's first MMIO base address.
@@ -235,6 +244,7 @@ pub(super) fn install(
         core::hint::spin_loop();
     }
     let header = Arc::new(Mutex::new(Header { words }));
+    let released = Arc::new(kcompletion::Completion::new());
     let opens = Arc::new(AtomicUsize::new(0));
     let events = Arc::new(Mutex::new(Vec::new()));
     let status_after_identify = Arc::new(Mutex::new(Vec::new()));
@@ -245,6 +255,7 @@ pub(super) fn install(
     FIXTURES.lock().insert(
         base,
         Spec {
+            released: released.clone(),
             device_type,
             header: header.clone(),
             opens: opens.clone(),
@@ -256,6 +267,7 @@ pub(super) fn install(
     );
 
     FixtureHandle {
+        released,
         header,
         opens,
         events,
@@ -266,13 +278,21 @@ pub(super) fn install(
     }
 }
 
-/// Removes every installed fixture.
+/// Drains opened transports before removing fixtures, including on test failure.
+/// Call after unpublishing devices and dropping test-owned reader handles.
 pub(super) fn clear() {
-    FIXTURES.lock().clear();
+    let fixtures = core::mem::take(&mut *FIXTURES.lock());
+    for spec in fixtures.values() {
+        if spec.opens.load(Ordering::SeqCst) != 0 {
+            ktask::completion::wait_for_completion(&spec.released)
+                .expect("MMIO fixture cleanup requires sleepable context");
+        }
+    }
 }
 
 /// Observable state of one installed fixture.
 pub(super) struct FixtureHandle {
+    released: Arc<kcompletion::Completion>,
     header: Arc<Mutex<Header>>,
     opens: Arc<AtomicUsize>,
     events: Arc<Mutex<Vec<Event>>>,
@@ -283,6 +303,13 @@ pub(super) struct FixtureHandle {
 }
 
 impl FixtureHandle {
+    /// Waits for queue cleanup and the final transport/claim drop, not unpublish.
+    /// The scenario must remove its device and release its reader handles first.
+    pub(super) fn wait_released(&self) {
+        ktask::completion::wait_for_completion(&self.released)
+            .expect("MMIO fixture teardown requires sleepable context");
+    }
+
     /// Number of transports opened by all candidates.
     pub(super) fn opens(&self) -> usize {
         self.opens.load(Ordering::SeqCst)
@@ -417,7 +444,16 @@ pub(super) struct DmaDelta {
 /// All handles for one base share the same header, so mutations would remain
 /// visible across candidates.
 pub(super) fn fixture_for(base: usize) -> Option<Fixture> {
-    let (device_type, header, opens, events, status_after_identify, status_at_open, status_history) = {
+    let (
+        device_type,
+        header,
+        opens,
+        events,
+        status_after_identify,
+        status_at_open,
+        status_history,
+        released,
+    ) = {
         let fixtures = FIXTURES.lock();
         let spec = fixtures.get(&base)?;
         (
@@ -428,9 +464,11 @@ pub(super) fn fixture_for(base: usize) -> Option<Fixture> {
             spec.status_after_identify.clone(),
             spec.status_at_open.clone(),
             spec.status_history.clone(),
+            spec.released.clone(),
         )
     };
     Some(Fixture {
+        released,
         device_type,
         header,
         opens,
@@ -444,6 +482,7 @@ pub(super) fn fixture_for(base: usize) -> Option<Fixture> {
 
 /// One probe's view of a synthetic MMIO region and the transport it may open.
 pub(super) struct Fixture {
+    released: Arc<kcompletion::Completion>,
     device_type: virtio::DeviceType,
     header: Arc<Mutex<Header>>,
     opens: Arc<AtomicUsize>,
@@ -469,8 +508,18 @@ impl Fixture {
     }
 }
 
+/// Signals only after the owned transport and its MMIO claim have been dropped.
+pub(super) struct ReleaseNotification(Arc<kcompletion::Completion>);
+
+impl Drop for ReleaseNotification {
+    fn drop(&mut self) {
+        self.0.complete_all();
+    }
+}
+
 impl MmioAccess for Fixture {
-    type Transport = OwnedMmioTransport<MmioClaim, MockTransport>;
+    // Tuple fields drop in order: release the real claim before notifying.
+    type Transport = OwnedMmioTransport<(MmioClaim, ReleaseNotification), MockTransport>;
 
     fn identify(&mut self, size: usize) -> Result<virtio::MmioIdentification, DriverError> {
         if self.claim.is_none() {
@@ -507,9 +556,13 @@ impl MmioAccess for Fixture {
         self.status_at_open.lock().push(status);
         self.events.lock().push(Event::Open);
         self.opens.fetch_add(1, Ordering::SeqCst);
+        self.released.reinit();
         let mut transport = MockTransport::new_with_type(self.device_type);
         transport.status_history = self.status_history;
-        Ok(OwnedMmioTransport::new(transport, claim))
+        Ok(OwnedMmioTransport::new(
+            transport,
+            (claim, ReleaseNotification(self.released)),
+        ))
     }
 
     fn is_fixture(&self) -> bool {
