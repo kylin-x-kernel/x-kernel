@@ -77,6 +77,11 @@ pub(crate) fn present_count() -> usize {
     current_cpu_id_map().present_count()
 }
 
+/// Returns the highest present logical ID plus one, or 1 when uninitialized.
+pub(crate) fn nr_cpu_ids() -> usize {
+    current_cpu_id_map().nr_cpu_ids()
+}
+
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LogicalCpuId(usize);
@@ -300,6 +305,17 @@ impl CpuIdMap {
     /// Counts logical CPUs that have a raw CPU id mapping.
     pub(crate) fn present_count(&self) -> usize {
         self.present_count
+    }
+
+    /// Highest present logical ID plus one, clamped to the initialized floor of 1.
+    pub(crate) fn nr_cpu_ids(&self) -> usize {
+        let mut nr_cpu_ids = 1;
+        for (index, raw_cpu_id) in self.raw_cpu_ids_by_logical.iter().enumerate() {
+            if *raw_cpu_id != self.invalid_raw_cpu_id {
+                nr_cpu_ids = index + 1;
+            }
+        }
+        nr_cpu_ids
     }
 
     /// Reports whether a present logical CPU is currently online.

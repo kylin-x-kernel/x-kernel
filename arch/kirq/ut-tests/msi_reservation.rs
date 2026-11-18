@@ -98,6 +98,24 @@ impl RcuIndexProbe {
             && !crate::context::is_in_hardirq()
     }
 
+    /// Returns a fresh handle for the exact current Line, if any.
+    pub fn handle(&self) -> Option<crate::IrqLineHandle> {
+        crate::lookup_irq_line(self.virq).ok().flatten()
+    }
+
+    pub fn mark_action_history_for_tests(&self) {
+        self.owner
+            .upgrade()
+            .expect("probe owner")
+            .lock()
+            .set_action_history_for_tests();
+    }
+
+    /// Runs the x86 production free path for this synthetic reservation.
+    pub fn free_msi_via_production(&self) -> bool {
+        super::free_msi_if_unused(self.virq, |_reservation| {})
+    }
+
     /// Withdraw only this identity and submit both owners after unlocking.
     ///
     /// No real source is associated with the fixture.
@@ -118,11 +136,12 @@ impl RcuIndexProbe {
             // read scopes intervene before unlocked retirement below.
             unsafe { state.withdraw_msi(self.virq) }
         };
-        let Some((line, reservation, pending)) = withdrawn else {
+        let Some((line, reservation, pending, retirements)) = withdrawn else {
             return false;
         };
         pending.retire();
         drop(reservation);
+        crate::runtime::retirement::notify_retirements(self.virq, retirements);
         drop(line);
         true
     }
@@ -365,4 +384,86 @@ fn release_withdraws_both_indexes_before_returning_backend_ownership() {
     assert!(super::release_unused_msi(&mut state, virq, |_, _| releases += 1).is_none());
     assert_eq!(releases, 1);
     assert!(line.lock().msi_reservation.is_none());
+}
+
+
+/// Covers the `withdraw_msi` primitive and its returned retirement queue.
+/// The full `free_msi_if_unused` production wiring is covered separately below.
+#[def_test]
+fn msi_withdrawal_primitive_notifies_observer_after_index_removal() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Observer(Arc<AtomicUsize>);
+    impl crate::IrqLineRetirementObserver for Observer {
+        fn on_line_retired(&self, _virq: crate::Virq) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let probe = RcuIndexProbe::new(0x7e000079, 0x7e000079);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observer: Arc<dyn crate::IrqLineRetirementObserver> = Arc::new(Observer(calls.clone()));
+    let handle = probe.handle().expect("current MSI handle");
+    let subscription = handle
+        .subscribe_retirement(Arc::downgrade(&observer))
+        .expect("subscribe");
+    assert!(probe.retire());
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert!(probe.handle().is_none());
+    drop(subscription);
+}
+
+
+#[cfg(any(target_arch = "x86_64", unittest))]
+#[def_test(serial)]
+fn production_free_msi_notifies_after_index_and_backend_release() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use crate::state::free_msi_if_unused;
+
+    struct Observer {
+        virq: crate::Virq,
+        backend_released: Arc<AtomicBool>,
+        index_removed_during_callback: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl crate::IrqLineRetirementObserver for Observer {
+        fn on_line_retired(&self, _virq: crate::Virq) {
+            self.index_removed_during_callback.store(
+                matches!(crate::lookup_irq_line(self.virq), Ok(None)),
+                Ordering::Release,
+            );
+            core::assert!(self.backend_released.load(Ordering::Acquire));
+            self.calls.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    let virq = 0x7e00007a;
+    let probe = RcuIndexProbe::new(virq, 0x7e00007a);
+    let backend_released = Arc::new(AtomicBool::new(false));
+    let index_removed_during_callback = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observer: Arc<dyn crate::IrqLineRetirementObserver> = Arc::new(Observer {
+        virq,
+        backend_released: backend_released.clone(),
+        index_removed_during_callback: index_removed_during_callback.clone(),
+        calls: calls.clone(),
+    });
+    let handle = probe.handle().expect("current MSI handle");
+    let subscription = handle
+        .subscribe_retirement(Arc::downgrade(&observer))
+        .expect("subscribe");
+
+    let released = backend_released.clone();
+    assert!(free_msi_if_unused(virq, move |_reservation| {
+        released.store(true, Ordering::Release);
+    }));
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert!(index_removed_during_callback.load(Ordering::Acquire));
+    assert!(backend_released.load(Ordering::Acquire));
+    assert!(matches!(crate::lookup_irq_line(virq), Ok(None)));
+    drop(subscription);
 }

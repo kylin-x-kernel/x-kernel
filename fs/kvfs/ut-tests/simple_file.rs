@@ -3,8 +3,10 @@
 // See LICENSES for license details.
 
 use alloc::{sync::Arc, vec, vec::Vec};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-use unittest::{assert_eq, def_test};
+use kerrno::LinuxError;
+use unittest::{assert, assert_eq, def_test};
 
 use super::*;
 use crate::{DirMapping, FileSystemType, Filename, Mount, NodePermission, SimpleDir, SimpleFs};
@@ -218,4 +220,71 @@ fn generated_file_provides_the_linux_poll_fallback() {
         file.poll_handler().map(|events| events.bits()),
         Some(expected.bits())
     );
+}
+
+#[def_test]
+fn read_only_snapshot_observes_source_error_at_open() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, move |fs| {
+        let file = SimpleFile::new_snapshot(fs.clone(), move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Err::<Vec<u8>, _>(VfsError::from(LinuxError::ENODATA))
+        });
+        let mut root = DirMapping::new();
+        root.add_file("snapshot", file);
+        SimpleDir::new_maker(fs, Arc::new(root))
+    })
+    .unwrap();
+    let root = Mount::new_root(&super_block).root_path();
+    let open = |flags| {
+        Filename::new("/snapshot").open_with_flags_at(
+            &root,
+            &root,
+            flags,
+            NodePermission::empty(),
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        )
+    };
+    assert_eq!(
+        open(linux_raw_sys::general::O_RDONLY).err(),
+        Some(VfsError::from(LinuxError::ENODATA))
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert!(open(linux_raw_sys::general::O_WRONLY).is_ok());
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+struct BorrowedOps;
+
+impl SimpleFileOps for BorrowedOps {
+    fn read_all(&self) -> VfsResult<Cow<'_, [u8]>> {
+        Ok(Cow::Borrowed(b"borrowed"))
+    }
+}
+
+#[def_test]
+fn borrowed_snapshot_content_is_materialized() {
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, move |fs| {
+        let file = SimpleFile::new_snapshot(fs.clone(), BorrowedOps);
+        let mut root = DirMapping::new();
+        root.add_file("borrowed", file);
+        SimpleDir::new_maker(fs, Arc::new(root))
+    })
+    .unwrap();
+    let root = Mount::new_root(&super_block).root_path();
+    let file = Filename::new("/borrowed")
+        .open_with_flags_at(
+            &root,
+            &root,
+            linux_raw_sys::general::O_RDONLY,
+            NodePermission::empty(),
+            NodePermission::empty(),
+            kcred::initial_cred(),
+        )
+        .unwrap();
+    let mut buf = [0u8; 8];
+    assert_eq!(file.read(&mut buf), Ok(8));
+    assert_eq!(&buf, b"borrowed");
 }

@@ -829,6 +829,7 @@ impl VfsFileBuilder {
             slots: Mutex::new(slots),
             flags: AtomicU32::new(flags.bits()),
             position: Mutex::new(position),
+            dir_position: Mutex::new(()),
             readahead: Mutex::new(readahead),
             writeback_error_cursor: Mutex::new(writeback_error_cursor),
             filesystem_error_cursor: Mutex::new(filesystem_error_cursor),
@@ -849,6 +850,10 @@ pub struct VfsFile {
     slots: Mutex<FileSlots>,
     flags: AtomicU32,
     position: Mutex<u64>,
+    /// Serializes directory position operations. `position` remains the sole
+    /// f_pos storage; this lock only prevents iterate/seek from interleaving
+    /// their read-execute-commit sequences.
+    dir_position: Mutex<()>,
     pub(crate) readahead: Mutex<crate::file_ra::FileRaState>,
     writeback_error_cursor: Mutex<u64>,
     filesystem_error_cursor: Mutex<u64>,
@@ -1244,18 +1249,26 @@ impl VfsFile {
     /// Requires sleepable task context with IRQs/preemption enabled, outside
     /// non-sleepable RCU sections and locks needed by reclaim, IO or filesystem
     /// callbacks. Directory implementations may allocate with the default
-    /// KERNEL policy. No position lock is held across the implementation call.
+    /// KERNEL policy.
+    ///
+    /// Directory iteration holds `dir_position` across reading f_pos, calling
+    /// the implementation and committing `ctx.pos()`, including error exits.
+    /// `position` itself is only held for the short read/commit steps; the
+    /// operation lock is what prevents another iterate or llseek from
+    /// interleaving with this sequence. Directory callbacks must not re-enter
+    /// iterate/llseek on the same open description.
     pub fn iterate_dir(&self, ctx: &mut DirContext<'_>) -> VfsResult<usize> {
         if self.inode().node_type() != NodeType::Directory {
             return Err(VfsError::NotADirectory);
         }
         self.verify_mode(FMode::READ)?;
 
+        let _dir_position = self.dir_position.lock();
         ctx.set_pos(self.position());
-        let directory = self
-            .operations()
-            .dir_operations()
-            .ok_or(VfsError::NotADirectory)?;
+        let Some(directory) = self.operations().dir_operations() else {
+            self.set_position(ctx.pos());
+            return Err(VfsError::NotADirectory);
+        };
         let result = directory.iterate_shared(self, ctx);
         self.set_position(ctx.pos());
         result
@@ -1270,6 +1283,11 @@ impl VfsFile {
     }
 
     /// Locks this file's `f_pos`.
+    ///
+    /// This is the single position storage, but it is not the directory
+    /// operation lock. Directory position changes must go through
+    /// [`Self::iterate_dir`] or [`Self::llseek`], which hold `dir_position`.
+    /// Direct callers in production must not bypass that sequence.
     pub fn position_lock(&self) -> MutexGuard<'_, u64> {
         self.position.lock()
     }
@@ -1284,6 +1302,10 @@ impl VfsFile {
     }
 
     /// Sets this file's `f_pos`.
+    ///
+    /// Directory iteration is the only production caller; tests may use it
+    /// directly. Other production code must use [`Self::llseek`] so the
+    /// directory operation lock is respected.
     pub fn set_position(&self, position: u64) {
         *self.position_lock() = position;
     }
@@ -1445,10 +1467,20 @@ impl VfsFile {
     }
 
     /// Changes this open file offset.
+    ///
+    /// Directory seeks take the same `dir_position` operation lock as
+    /// [`Self::iterate_dir`], so a seek cannot land between iteration's f_pos
+    /// read and commit. The callback still owns the actual position update.
     pub fn llseek(&self, offset: i64, whence: i32) -> VfsResult<u64> {
         if !self.mode().contains(FMode::LSEEK) {
             return Err(VfsError::from(LinuxError::ESPIPE));
         }
+        let is_directory = self.inode().node_type() == NodeType::Directory;
+        let _dir_position = if is_directory {
+            Some(self.dir_position.lock())
+        } else {
+            None
+        };
         self.operations().llseek(self, offset, whence)
     }
 

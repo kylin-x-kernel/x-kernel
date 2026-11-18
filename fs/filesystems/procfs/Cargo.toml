@@ -9,8 +9,8 @@ homepage.workspace = true
 repository.workspace = true
 
 [package.metadata.cargo-shear]
-# cfg(unittest) assertions in ut-tests/basic_nodes_root.rs use log::LevelFilter;
-# cargo-shear ignores ut-tests sources, but guest UT needs a regular dependency.
+# cfg(unittest) assertions in ut-tests are not scanned by cargo-shear, but
+# guest UT needs a regular dependency.
 ignored = ["log"]
 
 [features]
@@ -26,6 +26,8 @@ vmm = ["dep:kvmm"]
 kalloc-types.workspace = true
 kfd_objects.workspace = true
 kbuild_config.workspace = true
+kirq.workspace = true
+kerrno.workspace = true
 kcred.workspace = true
 kns.workspace = true
 kvfs.workspace = true

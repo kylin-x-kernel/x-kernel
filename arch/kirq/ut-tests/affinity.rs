@@ -745,3 +745,97 @@ fn confirmed_old_route_can_activate_while_finish_stays_pending() {
     assert!(entry.affinity.is_pending);
     assert!(!entry.affinity.has_failed_programming);
 }
+
+#[def_test]
+fn initial_policy_prepares_without_publishing_and_retains_explicit_policy() {
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f40));
+    assert_eq!(
+        entry.prepare_initial_affinity_policy_with(None),
+        Err(crate::IrqDescError::NotReady)
+    );
+    let policy = entry.prepare_initial_affinity_policy();
+    match kcpu_id_map::present_mask() {
+        Some(present) => {
+            assert_eq!(policy, Ok(Some(present)));
+            entry.commit_initial_affinity_policy(policy.unwrap());
+            assert_eq!(entry.affinity.requested, Some(present));
+            assert_eq!(entry.affinity.effective, None);
+        }
+        None => assert_eq!(policy, Err(crate::IrqDescError::NotReady)),
+    }
+
+    let mut fixed = IrqStateDesc::test_new(
+        IrqDesc::from_virq(0x6f41).with_affinity(crate::IrqAffinity::Cpu(0)),
+    );
+    assert_eq!(
+        fixed.prepare_initial_affinity_policy(),
+        Ok(Some(cpu_mask(0)))
+    );
+    fixed.commit_initial_affinity_policy(Some(cpu_mask(0)));
+    assert_eq!(fixed.affinity.requested, Some(cpu_mask(0)));
+
+    let explicit = cpu_mask(0);
+    let mut retained = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f42));
+    retained.affinity.requested = Some(explicit);
+    assert_eq!(retained.prepare_initial_affinity_policy(), Ok(None));
+}
+
+#[def_test]
+fn action_history_is_set_by_publication_and_survives_withdrawal() {
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f43));
+    assert!(!entry.has_action_history());
+    let handler: crate::Handler = Arc::new(|_| IrqEvent::HANDLED);
+    let token = entry.install_shared_action(handler).unwrap();
+    assert!(entry.has_action_history());
+    let _retired = entry.withdraw_action(Some(token)).unwrap();
+    assert!(entry.has_action_history());
+}
+
+#[def_test]
+fn cancelling_absent_pending_does_not_clear_requested_policy() {
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(0x6f44));
+    let requested = cpu_mask(0);
+    entry.affinity.requested = Some(requested);
+    entry.affinity.effective = None;
+    entry.affinity.is_pending = false;
+    entry.cancel_pending_affinity();
+    assert_eq!(entry.affinity.requested, Some(requested));
+    assert_eq!(entry.affinity.effective, None);
+    assert!(!entry.affinity.is_pending);
+}
+
+#[def_test(serial)]
+fn first_registration_commits_default_policy_after_action_publication() {
+    let virq = crate::DYNAMIC_VIRQ_BASE + 0x6f45;
+    if let Some(present) = kcpu_id_map::present_mask() {
+        let state = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+        let fixture = QueryFixture { virq, line: Arc::new(IrqLine::new(state)) };
+        IRQ_STATE.lock().descs.insert(virq, fixture.line.clone());
+
+        assert!(crate::try_register_disabled(virq, Arc::new(|_| IrqEvent::HANDLED)).unwrap());
+        {
+            let entry = fixture.line.lock();
+            assert_eq!(entry.affinity.requested, Some(present));
+            assert_eq!(entry.affinity.effective, None);
+            assert!(entry.has_action_history());
+        }
+        drop(crate::try_free_irq(virq).unwrap());
+        assert!(fixture.line.lock().has_action_history());
+    }
+}
+
+#[def_test]
+fn fixed_owner_cpu_must_be_representable_before_policy_commit() {
+    for cpu in [kbuild_config::NR_CPUS, usize::MAX] {
+        let entry = IrqStateDesc::test_new(
+            IrqDesc::from_virq(0x6f46).with_affinity(crate::IrqAffinity::Cpu(cpu)),
+        );
+        assert_eq!(
+            entry.prepare_initial_affinity_policy(),
+            Err(crate::IrqDescError::InvalidCpu { cpu })
+        );
+        assert_eq!(entry.affinity.requested, None);
+        assert_eq!(entry.affinity.effective, None);
+        assert!(!entry.has_action_history());
+    }
+}

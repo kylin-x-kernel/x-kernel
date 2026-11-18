@@ -4,8 +4,12 @@
 
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(unittest)]
+extern crate alloc;
+
 mod arch;
 mod cpu_id;
+pub mod text;
 
 pub use arch::init_boot_cpu_id_map;
 pub use cpu_id::{KCpuMask, KCpuMaskExt, LogicalCpuId, LogicalCpuIdIter, RawCpuId};
@@ -86,6 +90,33 @@ pub fn set_cpu_online(logical_cpu_id: LogicalCpuId, is_online: bool) -> Option<b
     cpu_id::set_online(logical_cpu_id, is_online)
 }
 
+/// Reports whether the runtime CPU id map has been populated.
+///
+/// This does not force lazy initialization and is suitable for KIRQ policy
+/// initialization: an absent map means a default present-CPU policy is not yet
+/// available.
+pub fn is_initialized() -> bool {
+    cpu_id::cpu_map_initialized()
+}
+
+/// Returns the current present CPU mask, or `None` before the runtime CPU map
+/// is initialized or when firmware described no CPUs.
+///
+/// This is a policy input, not an interrupt-readiness set. It never synthesizes
+/// boot/CPU 0 or changes the CPU map.
+pub fn present_mask() -> Option<KCpuMask> {
+    if !is_initialized() {
+        return None;
+    }
+    let mut mask = KCpuMask::new();
+    let mut count = 0usize;
+    for_each_present_logical_cpu(|_, logical, _| {
+        mask.set_logical(logical, true);
+        count += 1;
+    });
+    (count != 0).then_some(mask)
+}
+
 /// Returns the number of present CPUs discovered at runtime from the device
 /// tree (AArch64/RISC-V/LoongArch) or ACPI MADT (x86_64), clamped to the
 /// compile-time `NR_CPUS` cap.
@@ -99,3 +130,18 @@ pub fn nr_cpus() -> usize {
 
     cpu_id::present_count().max(1)
 }
+
+/// Returns the runtime CPU numbering width: the highest present logical CPU ID
+/// plus one, with a minimum of 1 before the map is initialized.
+///
+/// This is the Linux-style `nr_cpu_ids` width used for bitmap high-chunk digit
+/// width and list parsing. It is deliberately distinct from the compile-time
+/// `NR_CPUS` capacity and from [`nr_cpus`] present-CPU count.
+pub fn nr_cpu_ids() -> usize {
+    imp::ensure_runtime_cpu_id_map();
+
+    cpu_id::nr_cpu_ids()
+}
+
+#[cfg(unittest)]
+unittest::path_mod_test!(tests, "../ut-tests/text.rs");

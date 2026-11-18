@@ -1121,3 +1121,19 @@ fn typed_nmi_domains_do_not_alias_equal_hardware_numbers() {
     assert_eq!(second_calls.load(Ordering::Relaxed), 1);
     assert!(second.remove());
 }
+
+#[def_test(serial)]
+fn nmi_explicit_owner_policy_is_committed_with_action_history() {
+    let desc = IrqDesc::from_virq(0x7e000076)
+        .with_affinity(crate::IrqAffinity::Cpu(0));
+    let fixture = Fixture::mapped(desc);
+    let handler: Handler = Arc::new(|_| IrqEvent::HANDLED);
+    assert!(fixture.install(handler));
+    {
+        let entry = fixture.line.lock();
+        let requested = entry.affinity.requested.expect("NMI owner policy");
+        assert!(requested.get(0));
+        assert_eq!(entry.affinity.effective, None);
+        assert!(entry.has_action_history());
+    }
+}

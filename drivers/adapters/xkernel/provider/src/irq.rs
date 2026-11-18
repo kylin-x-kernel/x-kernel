@@ -280,6 +280,7 @@ fn map_irq_desc_error(err: kirq::IrqDescError) -> ResError {
         kirq::IrqDescError::VirqExhausted { .. } | kirq::IrqDescError::NoMemory => {
             ResError::NoMemory
         }
+        kirq::IrqDescError::NotReady | kirq::IrqDescError::InvalidCpu { .. } => ResError::BadState,
         kirq::IrqDescError::HwirqConflict { .. }
         | kirq::IrqDescError::DomainConflict { .. }
         | kirq::IrqDescError::TriggerConflict { .. }

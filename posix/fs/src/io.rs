@@ -546,9 +546,6 @@ pub fn sys_pwrite64(
     }
     let f = kprocess::with_current_user_thread(|thread| thread.files().get_file(fd))?;
     reject_positioned_stream_io(&f)?;
-    if len == 0 {
-        return Ok(0);
-    }
     let write = write_file_at_from_io(&f, VmBytes::new(buf.as_ptr(), len), offset as _)?;
     Ok(write as _)
 }

@@ -10,6 +10,7 @@ use unittest::{assert, assert_eq, def_test};
 
 use super::{IrqLineHandle, lookup_irq_line, next_irq_line};
 use crate::{
+    IrqLineRetirementObserver, IrqLineRetirementSubscription,
     Handler, IrqAffinityApplyError, IrqAffinityChip, IrqAffinityError, IrqAffinityPrepare,
     IrqDeferredAffinityChip, IrqDesc, IrqDescError, IrqEvent, IrqFlow, IrqRegisterOptions,
     LevelChip,
@@ -87,6 +88,15 @@ impl TestLine {
 
     fn mark_retired(&self) {
         self.line.lock().set_retired_for_tests();
+    }
+
+    fn retire_and_notify(&self) {
+        let slots = {
+            let mut entry = self.line.lock();
+            entry.set_retired_for_tests();
+            entry.take_retirements()
+        };
+        crate::runtime::retirement::notify_retirements(self.virq, slots);
     }
 }
 
@@ -377,6 +387,10 @@ fn enumeration_rejects_hardirq_context() {
 
 #[def_test(serial)]
 fn enumeration_rejects_serving_softirq_context() {
+    // Softirq state alone does not disable preemption. Keep the synthetic
+    // context non-preemptible so an unrelated kernel worker cannot run on this
+    // CPU while the test's softirq depth is elevated.
+    let _pin = kspin::NoPreemptIrqSave::new();
     let _softirq = crate::context::SoftIrqContextGuard::enter();
     assert!(matches!(
         next_irq_line(0x7e000069),
@@ -576,4 +590,170 @@ fn unprotected_user_deferred_request_remains_pending() {
     let snapshot = handle.set_user_affinity(&cpu_mask(0)).unwrap();
     assert!(snapshot.is_pending);
     assert_eq!(handle.irq_affinity().unwrap(), snapshot);
+}
+
+
+struct RetirementObserver {
+    calls: Arc<AtomicUsize>,
+    subscription: Option<Arc<kspin::SpinNoIrq<Option<IrqLineRetirementSubscription>>>>,
+}
+
+impl IrqLineRetirementObserver for RetirementObserver {
+    fn on_line_retired(&self, _virq: crate::Virq) {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        if let Some(subscription) = &self.subscription {
+            drop(subscription.lock().take());
+        }
+    }
+}
+
+#[def_test(serial)]
+fn handle_identity_and_unchecked_affinity_snapshot() {
+    let virq = 0x7e000071;
+    let line = TestLine::new(virq);
+    let first = line.handle();
+    let second = line.handle();
+    assert!(first.is_same_line(&second));
+    assert!(first.is_current());
+    assert_eq!(first.affinity_snapshot().unwrap(), Default::default());
+    assert_eq!(
+        first.irq_affinity(),
+        Err(IrqAffinityError::Unsupported)
+    );
+    assert!(!first.has_action_history());
+}
+
+#[def_test(serial)]
+fn retirement_subscription_notifies_and_cancels_independently() {
+    let virq = 0x7e000072;
+    let line = TestLine::new(virq);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observer: Arc<dyn IrqLineRetirementObserver> = Arc::new(RetirementObserver {
+        calls: calls.clone(),
+        subscription: None,
+    });
+    let first = line
+        .handle()
+        .subscribe_retirement(Arc::downgrade(&observer))
+        .unwrap();
+    let second = line
+        .handle()
+        .subscribe_retirement(Arc::downgrade(&observer))
+        .unwrap();
+    drop(first);
+    line.retire_and_notify();
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    drop(second);
+}
+
+#[def_test(serial)]
+fn retirement_subscription_cancel_after_retirement_does_not_touch_links() {
+    let virq = 0x7e000073;
+    let line = TestLine::new(virq);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observer: Arc<dyn IrqLineRetirementObserver> = Arc::new(RetirementObserver {
+        calls: calls.clone(),
+        subscription: None,
+    });
+    let subscription = line
+        .handle()
+        .subscribe_retirement(Arc::downgrade(&observer))
+        .unwrap();
+    line.retire_and_notify();
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    drop(subscription);
+}
+
+#[def_test(serial)]
+fn retirement_callback_can_drop_its_own_subscription() {
+    let virq = 0x7e000074;
+    let line = TestLine::new(virq);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observer: Arc<dyn IrqLineRetirementObserver> = Arc::new(RetirementObserver {
+        calls: calls.clone(),
+        subscription: None,
+    });
+    let observer_slot = Arc::new(kspin::SpinNoIrq::new(None));
+    let subscription = line
+        .handle()
+        .subscribe_retirement(Arc::downgrade(&observer))
+        .unwrap();
+    // The callback drops this slot; the subscription is not otherwise retained.
+    let observer_with_slot: Arc<dyn IrqLineRetirementObserver> = Arc::new(RetirementObserver {
+        calls: calls.clone(),
+        subscription: Some(observer_slot.clone()),
+    });
+    let callback_subscription = line
+        .handle()
+        .subscribe_retirement(Arc::downgrade(&observer_with_slot))
+        .unwrap();
+    *observer_slot.lock() = Some(callback_subscription);
+    line.retire_and_notify();
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+    drop(subscription);
+}
+
+#[def_test(serial)]
+fn handle_identity_distinguishes_same_number_successor() {
+    let virq = 0x7e000075;
+    let first = TestLine::new(virq);
+    let first_handle = first.handle();
+    first.mark_retired();
+    drop(first);
+
+    let second = TestLine::new(virq);
+    let second_handle = second.handle();
+    assert!(!first_handle.is_same_line(&second_handle));
+    assert!(!first_handle.is_current());
+    assert!(second_handle.is_current());
+    assert!(!first_handle.has_action_history());
+}
+
+#[def_test(serial)]
+fn retirement_cancel_after_detach_before_notify_is_safe() {
+    let virq = 0x7e000077;
+    let line = TestLine::new(virq);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observer: Arc<dyn IrqLineRetirementObserver> = Arc::new(RetirementObserver {
+        calls: calls.clone(),
+        subscription: None,
+    });
+    let subscription = line
+        .handle()
+        .subscribe_retirement(Arc::downgrade(&observer))
+        .unwrap();
+    let slots = {
+        let mut entry = line.line.lock();
+        entry.set_retired_for_tests();
+        entry.take_retirements()
+    };
+    drop(subscription);
+    crate::runtime::retirement::notify_retirements(virq, slots);
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+}
+
+#[def_test(serial)]
+fn retired_and_stale_handles_cannot_subscribe() {
+    let virq = 0x7e000078;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observer: Arc<dyn IrqLineRetirementObserver> = Arc::new(RetirementObserver {
+        calls: calls.clone(),
+        subscription: None,
+    });
+
+    let line = TestLine::new(virq);
+    let stale = line.handle();
+    line.mark_retired();
+    assert!(matches!(
+        stale.subscribe_retirement(Arc::downgrade(&observer)),
+        Err(IrqDescError::UnknownIrq)
+    ));
+    drop(line);
+
+    let _successor = TestLine::new(virq);
+    assert!(matches!(
+        stale.subscribe_retirement(Arc::downgrade(&observer)),
+        Err(IrqDescError::UnknownIrq)
+    ));
+    assert_eq!(calls.load(Ordering::Acquire), 0);
 }

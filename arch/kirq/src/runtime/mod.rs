@@ -21,5 +21,6 @@ pub(crate) mod manager;
 pub(crate) mod nmi;
 pub(crate) mod rcu;
 pub mod resend;
+pub(crate) mod retirement;
 pub(crate) mod state;
 mod unhandled;

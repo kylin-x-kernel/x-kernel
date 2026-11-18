@@ -18,6 +18,7 @@ use kpoll::{IoEvents, PollContext, PollRegisterError};
 use crate::{
     FileOperations, InodeOperations, Kiocb, Metadata, MetadataUpdate, NodeFlags, NodePermission,
     NodeType, VfsError, VfsFile, VfsInode, VfsInodeInit, VfsResult,
+    command::{self, CompleteCommandOptions, EmptyCommandPolicy},
     simple_fs::{SimpleFs, SimpleFsNode},
 };
 
@@ -26,7 +27,18 @@ pub trait SimpleFileOps: Send + Sync + 'static {
     /// Reads all content in the file.
     fn read_all(&self) -> VfsResult<Cow<'_, [u8]>>;
 
+    /// Validates one open after VFS permission checks and before file state is
+    /// installed. The default preserves existing helper users.
+    fn validate_open(&self) -> VfsResult<()> {
+        Ok(())
+    }
+
     /// Handles one scalar write; read-only files reject it by default.
+    ///
+    /// `CommandFile` invokes this callback after complete command copying and
+    /// possibly while the VFS position mutex is held. The callback must not
+    /// recursively perform I/O, seek, or another write on the same open
+    /// description.
     fn write(&self, _file: &VfsFile, _data: &[u8], _offset: u64) -> VfsResult<usize> {
         Err(VfsError::BadFileDescriptor)
     }
@@ -87,29 +99,17 @@ where
     fn write_iter(&self, iocb: &mut Kiocb<'_>, iter: &mut IovIterSource<'_>) -> VfsResult<usize> {
         const MAX_COMMAND_SIZE: usize = 4096;
         let count = iter.count();
-        if count == 0 {
+        let Some(command) = command::copy_complete_command(
+            iter,
+            CompleteCommandOptions {
+                max_bytes: MAX_COMMAND_SIZE,
+                empty: EmptyCommandPolicy::NoOp,
+            },
+        )?
+        else {
             return Ok(0);
-        }
-        if count > MAX_COMMAND_SIZE {
-            return Err(VfsError::FileTooLarge);
-        }
-        let mut command = alloc::vec![0; count];
-        let mut copied = 0;
-        while copied < count {
-            let read = match iter.copy_from_iter(&mut command[copied..]) {
-                Ok(read) => read,
-                Err(error) => {
-                    iter.revert(copied)?;
-                    return Err(error);
-                }
-            };
-            if read == 0 {
-                iter.revert(copied)?;
-                return Err(VfsError::BadAddress);
-            }
-            copied += read;
-        }
-        let written = match self.write(iocb.file(), &command, iocb.ki_pos()) {
+        };
+        let written = match self.write(iocb.file(), &command, 0) {
             Ok(written) => written,
             Err(error) => {
                 iter.revert(count)?;
@@ -315,6 +315,7 @@ impl crate::InodeSymlinkOperations for SimpleFile {
 
 impl FileOperations for SimpleFile {
     fn open(self: Arc<Self>, inode: &VfsInode, file: &mut crate::VfsFileBuilder) -> VfsResult<()> {
+        self.ops.validate_open()?;
         self.file_operations.clone().open(inode, file)
     }
 
@@ -332,6 +333,14 @@ impl FileOperations for SimpleFile {
 
     fn read(&self, file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
         self.file_operations.read(file, buf, offset)
+    }
+
+    fn read_iter(
+        &self,
+        iocb: &mut Kiocb<'_>,
+        iter: &mut iov_iter::IovIterDest<'_>,
+    ) -> VfsResult<usize> {
+        self.file_operations.read_iter(iocb, iter)
     }
 
     fn write(&self, file: &VfsFile, buf: &[u8], offset: u64) -> VfsResult<usize> {
@@ -399,9 +408,9 @@ impl FileOperations for GeneratedFileOperations {
 impl FileOperations for SnapshotFileOperations {
     fn open(self: Arc<Self>, _inode: &VfsInode, file: &mut crate::VfsFileBuilder) -> VfsResult<()> {
         if file.mode().contains(crate::FMode::READ) {
-            file.set_private_data(Arc::new(SimpleFileSnapshot(
-                self.0.read_all()?.into_owned(),
-            )));
+            file.set_private_data(Arc::new(SimpleFileSnapshot(materialize_content(
+                self.0.read_all()?,
+            )?)));
         }
         Ok(())
     }
@@ -445,6 +454,20 @@ impl FileOperations for SnapshotFileOperations {
             .ok_or(VfsError::InvalidInput)? as u64;
         *position = next;
         Ok(next)
+    }
+}
+
+fn materialize_content(content: Cow<'_, [u8]>) -> VfsResult<Vec<u8>> {
+    match content {
+        Cow::Owned(bytes) => Ok(bytes),
+        Cow::Borrowed(bytes) => {
+            let mut owned = Vec::new();
+            owned
+                .try_reserve_exact(bytes.len())
+                .map_err(|_| VfsError::NoMemory)?;
+            owned.extend_from_slice(bytes);
+            Ok(owned)
+        }
     }
 }
 

@@ -27,6 +27,8 @@ use crate::IrqFlags;
 use crate::backend::msi::MsiReservation;
 #[cfg(any(target_arch = "x86_64", unittest))]
 use crate::runtime::index::{PreparedWithdrawal, WithdrawnIndexes};
+#[cfg(any(target_arch = "x86_64", unittest))]
+use crate::runtime::retirement::{RetirementAdapter, notify_retirements};
 use crate::{
     Hwirq, IrqDesc, IrqDescError, IrqDomainId, IrqSpec, Virq,
     runtime::index::{LineIndex, PreparedPublication},
@@ -559,7 +561,12 @@ impl IrqState {
     pub(in crate::runtime) unsafe fn withdraw_msi(
         &mut self,
         virq: Virq,
-    ) -> Option<(Arc<IrqLine>, MsiReservation, WithdrawnIndexes)> {
+    ) -> Option<(
+        Arc<IrqLine>,
+        MsiReservation,
+        WithdrawnIndexes,
+        intrusive_collections::LinkedList<RetirementAdapter>,
+    )> {
         let line = self.descs.get(&virq)?;
         let mut entry = line.lock();
         if !entry.is_msi()
@@ -571,6 +578,7 @@ impl IrqState {
         }
         let prepared = entry.msi_withdrawal.take()?;
         entry.is_retired = true;
+        let retirements = entry.take_retirements();
         let desc = entry.desc;
         let reservation = entry.msi_reservation.take()?;
         // SAFETY: caller preflight and registry exclusion span validation and
@@ -591,7 +599,12 @@ impl IrqState {
         // pending retirement is returned for submission outside exclusion.
         let logical = unsafe { self.descs.withdraw(virq, prepared.logical) };
         drop(entry);
-        Some((line, reservation, WithdrawnIndexes { logical, domain }))
+        Some((
+            line,
+            reservation,
+            WithdrawnIndexes { logical, domain },
+            retirements,
+        ))
     }
 }
 
@@ -687,7 +700,7 @@ pub(crate) fn publish_msi_reservation(
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", unittest))]
 pub(crate) fn free_msi_if_unused(
     virq: Virq,
     free_backend_vector_fn: impl FnOnce(MsiReservation),
@@ -701,11 +714,12 @@ pub(crate) fn free_msi_if_unused(
         // after restoring that context, before the backend/user callback.
         unsafe { state.withdraw_msi(virq) }
     };
-    let Some((line, reservation, pending)) = removed else {
+    let Some((line, reservation, pending, retirements)) = removed else {
         return false;
     };
     pending.retire();
     free_backend_vector_fn(reservation);
+    notify_retirements(virq, retirements);
     drop(line);
     true
 }
@@ -721,9 +735,10 @@ fn release_unused_msi(
     krcu::preflight_callback_submission().ok()?;
     // SAFETY: this private-registry test helper preflights outside exclusion,
     // then submits immediately before invoking the observation callback.
-    let (line, reservation, pending) = unsafe { state.withdraw_msi(virq) }?;
+    let (line, reservation, pending, retirements) = unsafe { state.withdraw_msi(virq) }?;
     pending.retire();
     free_backend_vector_fn(state, reservation);
+    notify_retirements(virq, retirements);
     Some(line)
 }
 

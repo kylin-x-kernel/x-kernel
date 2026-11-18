@@ -33,6 +33,64 @@ diagnostic; they do not replace the independently generated ELF auxiliary vector
 or guarantee feature availability after migration.
 
 
+## IRQ affinity boundary
+
+`/proc/irq` combines a per-superblock stable `IrqNamespace` with KIRQ-owned
+identity and policy. The root source uses the common sparse `SimpleDir` adapter
+and KIRQ's `next_irq_line`; it publishes only Lines with action history, has no
+fixed name-count cap, and does not retain a Line handle. Numeric lookup accepts
+only canonical decimal names; malformed, overflowing and leading-zero aliases
+fail lookup. Root enumeration is weak: insert/remove can shift or repeat
+ordinal results.
+
+Each `LineRecord` owns stable directory/file inodes and retains the exact
+`IrqLineHandle` used when it was created. The inode graph never owns the record,
+avoiding a record/inode strong cycle. `is_same_line` compares underlying KIRQ
+Line identity. A stale lookup does not delete a successor record; a replacement
+record is installed only after its inode/observer build succeeds. Retirement
+notification removes the record only for the exact recorded Line and runs after
+KIRQ locks are released. Old directories/files keep their historical inode and
+handle; fresh lookup of the retired Virq fails. A successor gets distinct
+inodes.
+
+The four file inodes are real, precreated `SeqFileInode` VFS inodes installed in
+a fixed `DirMapping`; `SimpleDir` supplies actual d_ino/dot/dotdot. The old
+`affinity_status` file is removed. Requested files start at 0644 only for
+ordinary sources with static user-routing capability; fixed, PerCpu/NMI/MSI,
+no-flow and controllerless sources start 0444. Effective files are 0444. Mode is
+fixed at record creation: action restrictions/removal do not rewrite it, and
+chmod/chown persist until the record is retired; a full-path reopen after
+closing the old file and root dentry observes the same inode metadata, while a
+different superblock and a successor start with fresh defaults. Open is lazy: it
+checks the retained identity but does not read a mask, so a live Line whose
+requested mask is still unknown can be opened O_WRONLY/O_RDWR and receive its
+first command.
+First read or `SEEK_END` reports `ENODATA`; no status text is synthesized.
+
+Requested files use the shared `kcpu_id_map::text` codec with the
+`LineRecord`-captured runtime domain; the domain is validated before the stable
+inodes are created, so uninitialized/empty present state fails closed. CPU text
+errors are mapped by procfs's shared `cpu_text_error` adapter, not by IRQ policy
+code. The current present-only domain does not imply Linux possible/hotplug
+coverage. The generic
+backend owns fallible per-open generation storage, bounded complete copying,
+one scalar callback, seek handling and readv pinning. Write offset is ignored;
+128-byte overflow returns `FileTooLarge`; empty commands reach the parser and
+return `EINVAL` for settable Lines. The policy precheck runs before parsing/size
+checks, so unsupported/fixed/owner-restricted Lines return `EPERM` for malformed
+or oversized commands too; read-side unsupported/fixed observations remain
+`EOPNOTSUPP`. KIRQ's checked `set_user_affinity` is the only mutation path; a
+callback error is not retried as a hardware rollback. Effective files are
+read-only and use the same lazy `SeqFileInode` read validation, not eager
+`SimpleFile` snapshots.
+
+VFS DAC remains the open gate; root/capability cannot bypass KIRQ policy. No
+KIRQ-to-VFS dependency, controller dependency or second IRQ registry is
+introduced. Old open files retain a historical Line handle and cannot follow a
+reused Virq; fresh namespace lookup revalidates current KIRQ identity. The
+retirement test exercises the production MSI free/notification path, including
+index removal before the observer checks the namespace.
+
 ## Superblock-owner failure
 
 Private-owner allocation failure returns NoMemory through get_tree before any

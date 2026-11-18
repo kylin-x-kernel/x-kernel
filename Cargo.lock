@@ -2304,6 +2304,7 @@ dependencies = [
  "klazy",
  "log",
  "of",
+ "unittest",
 ]
 
 [[package]]
@@ -4784,8 +4785,10 @@ dependencies = [
  "kcpu_id_map",
  "kcred",
  "kdevice",
+ "kerrno",
  "kfd_objects",
  "khal",
+ "kirq",
  "klockstat",
  "klogger",
  "kns",

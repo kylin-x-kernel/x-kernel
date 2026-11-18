@@ -137,6 +137,54 @@ and the namespace mutation use the same passed-in object.
 `CommandFile` does not trust the read callback to always return content; `Ok(None)` returns
 `VfsError::InvalidData` instead of triggering a kernel panic.
 
+The complete-command transport is crate-private; procfs supplies only business
+callbacks and never calls the copy helper directly. `SeqFileInode` opts into the
+writable form only when a command callback is configured; read state remains
+owned by `SeqFile`.
+
+Sequential observation errors are not EOF: `try_start`/`try_next` preserve
+`ENOENT`/`ENODATA`/other errors and discard the partial record. A private
+`ReadRecovery<T>` state distinguishes format retry from observation recovery:
+format failure always retains the failed item, including at a nonzero offset
+with no prefix; observation failure reports first when a prefix was copied, then
+rewinds and rebuilds the committed byte position rather than trusting the failed
+iterator cursor. `SeqIterator::Item` is `Send` because an item may be retained
+across reads. `SeqTextSink` keeps the real `NoMemory`/`FileTooLarge` in a private
+buffer side channel; a formatter cannot clear it, and a plain `fmt::Error`
+without a sink error is mapped to `Io`. Lazy `SeqFileInode` forms do not observe
+at open and apply `validate_read` to each new read/read_iter.
+
+## Directory position serialization
+
+Directory iteration samples f_pos, runs the filesystem callback, and commits
+`ctx.pos()` as one `VfsFile::dir_position` operation. Directory `llseek` takes
+the same lock, so concurrent dup descriptors cannot interleave a read-commit
+with a seek or with another iterate. `position` remains the sole f_pos storage
+and is only briefly locked; the operation lock, not the position lock, defines
+the callback's lock lifetime. Directory callbacks must not re-enter iterate or
+seek on the same open description. Production position changes outside
+`iterate_dir()` go through `llseek()`; direct `set_position()` is limited to
+iteration commit and tests.
+
+## Sparse directory sources
+
+A sparse directory source is a kvfs opt-in and must return canonical, unique
+names and a current object matching the key/name pair. `name_for_key()` or
+`lookup_key()` `NotFound` is a vanished candidate: it is skipped without
+consuming an output cookie. A returned dentry with a mismatching name, or an
+empty/dot/slash/NUL name, is rejected with `InvalidData`. kvfs does not build a
+full name table to detect duplicates; the source owns that invariant.
+
+Cookies are VFS positions, not keys or inode numbers; they are bounded by
+`i64::MAX`, sparse directories reject `SEEK_END`, and positive seek overflow
+returns `EOVERFLOW` without changing f_pos. The sparse adapter disables child
+dentry caching because the source has no invalidation contract in this version;
+fresh pathname lookups must re-consult the source. A sink rejection keeps the
+pending key and does not advance the cursor. A seek past EOF preserves the
+requested position rather than silently clamping it. Source locks must not span
+the sink callback, and sparse does not support `ChainedDirOps` composition in
+this version.
+
 ## External Boundaries / Attack Surface
 
 - `Filename::open_with_flags_at` and `dentry_open` are compatibility entry points that preserve raw `O_*` bits, and they normalize the
@@ -477,7 +525,7 @@ KVFS returns the mapped error, does not fabricate a successful byte count, and d
 | T-41 | Two mutable superblocks appear on the same block device, or a mount lands on an instance being torn down | High | The filesystem allocates its own state on every mount, or there is no state check between `get_tree` and active acquisition | KVFS builds a nascent reservation and an exclusive claim keyed by the canonical `(s_type, BlockDevice)`; the same identity waits/reuses, a RO/RW mismatch or a cross-type conflict returns `EBUSY`; `mount_new` retries after a dying/dead activation race |
 | T-42 | A filesystem keeps using a stale mount data borrow after the transaction completes | High | The filesystem stores the `FsContext::data()` byte-slice reference directly into superblock state | The opaque data serves only as synchronous context input; the filesystem must parse and store owned/typed state, and the generic fill closure is `FnOnce` |
 | T-43 | A resident inode exposes timestamp precision the disk format cannot store, or field coupling inconsistent with the disk | Medium | After the filesystem callback the VFS republishes the original request, masking the backend's range clamping, field-specific granularity or ignore behavior | `TimestampLimits` handles only superblock-level common capability; the callback reuses `MetadataUpdate` to return the fields actually applied, and KVFS publishes only the returned value; FAT date-granularity atime, the 2-second mtime/ctime coupling, and KVFS callback echo tests constrain this contract |
-| T-44 | A command-style pseudo file merges multiple writes by offset, or splits one write_iter into multiple commands | High | The default scalar write algorithm handles a command file | `CommandFile`'s own `write_iter` fully copies one request of at most 4096 bytes, ignores the offset, and hands `VfsFile::f_cred` and the complete buffer to the callback at once |
+| T-44 | A command-style pseudo file merges multiple writes by offset, or splits one write_iter into multiple commands | High | The default scalar write algorithm handles a command file | The crate-private complete-command transport fully copies one request into a fallible buffer, ignores the offset and hands `VfsFile::f_cred` plus the complete buffer to the callback at once; `CommandFile` uses a 4096-byte bound, and opt-in `SeqFileInode` writable files compose it with sequential reads |
 | T-45 | A dynamic directory backend re-resolves by name a victim the VFS has already locked | High | The `rmdir` callback receives only a string, and a replacement race makes the backend delete a different identity | `SimpleDirOps::rmdir` receives `LockedDentry`; the backend can validate `inode_ref()`, and `mkdir` also receives the parent inode, prepared mode and credential |
 
 ## Failure Mode and Effects Analysis (FMEA)
@@ -975,3 +1023,17 @@ competing writes and truncate. Hooks must accept at most the copied count and
 publish a nonempty accepted prefix before returning success. Cancellation
 preserves the file length. Writeback continues to sample live EOF under its own
 folio-lock protocol.
+
+## Open validation bounds
+
+The optional open hooks are checked once at the common `SimpleFile`/`SimpleDir`
+open boundary, before private state is installed. They do not replace VFS
+permission checks and are not evaluated through `link_count` or other metadata
+observations. A failed validation leaves no open file or directory state.
+
+The writable `SnapshotCommand` backend and its per-open generation state were
+removed after procfs IRQ moved to `SeqFileInode` command transport. Its
+`validate_write` hook is gone with it. Command-size limits, complete copying,
+callback-once behavior and iterator rollback now belong to the retained
+`SeqCommandOptions` path; ordinary `CommandFile` and read-only snapshots keep
+their existing behavior.

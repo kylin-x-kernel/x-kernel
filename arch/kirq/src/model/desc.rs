@@ -165,6 +165,12 @@ pub struct IrqDesc {
 pub enum IrqDescError {
     /// Preparing unpublished mapping or action storage failed before publication.
     NoMemory,
+    /// The runtime CPU map needed for an initial ordinary affinity policy is not ready.
+    ///
+    /// No action, history or policy was published.
+    NotReady,
+    /// A fixed owner affinity names a logical CPU outside the representable range.
+    InvalidCpu { cpu: usize },
     /// The hardware number is outside the domain's supported reverse-map range.
     InvalidHwirq { hwirq: Hwirq },
     /// Controller configuration did not complete or its readback did not match.

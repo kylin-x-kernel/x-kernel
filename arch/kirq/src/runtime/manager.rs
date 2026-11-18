@@ -997,6 +997,7 @@ fn register_prepared_locked(
         warn!("register handler for IRQ {virq} failed");
         return Ok(false);
     }
+    let initial_policy = entry.prepare_initial_affinity_policy()?;
     let needs_restore = configure_registration(entry, &mut apply_plan)?;
     super::affinity::apply_deferred_before_activation(entry)?;
     if options.is_user_affinity_restricted() {
@@ -1004,6 +1005,7 @@ fn register_prepared_locked(
     }
     let installed = entry.publish_regular_action(prepared);
     debug_assert!(installed, "duplicate regular action was checked above");
+    entry.commit_initial_affinity_policy(initial_policy);
     let mut plan = if options.should_auto_enable() {
         entry.prepare_auto_enable()
     } else {
@@ -1120,6 +1122,7 @@ fn register_shared_prepared_locked(
         warn!("register shared handler for IRQ {virq} failed");
         return Ok(None);
     }
+    let initial_policy = entry.prepare_initial_affinity_policy()?;
     let needs_restore = configure_registration(entry, &mut apply_plan)?;
     super::affinity::apply_deferred_before_activation(entry)?;
     let was_first_action = !entry.has_actions();
@@ -1127,6 +1130,7 @@ fn register_shared_prepared_locked(
         warn!("register shared handler for IRQ {virq} failed");
         return Ok(None);
     };
+    entry.commit_initial_affinity_policy(initial_policy);
     let mut plan = if was_first_action {
         entry.prepare_auto_enable()
     } else {

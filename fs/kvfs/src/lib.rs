@@ -13,6 +13,7 @@
 extern crate alloc;
 
 mod address_space;
+mod command;
 mod direct_io;
 mod fiemap;
 mod file;
@@ -50,6 +51,7 @@ pub use address_space::{
     BatchedWriteOperations, ReadaheadControl, WriteBeginRequest, WriteEndRequest, WriteReservation,
     WritebackControl, WritebackErrors, WritebackSyncMode,
 };
+pub use command::EmptyCommandPolicy;
 pub use direct_io::{
     DioDirection, DioMapping, DioMappingFlags, DioMappingKind, DirectIoOperations,
 };
@@ -94,10 +96,13 @@ pub use pagecache::WritebackRangeResult;
 pub use permission::{Permission, generic_permission, open_access_to_permission};
 pub use poll::poll_file_io;
 pub use quota::QuotaOperations;
-pub use seq_file::{SeqFile, SeqFileInode, SeqIterator, seq_open};
+pub use seq_file::{
+    SeekEndPolicy, SeqCommandOptions, SeqFile, SeqFileInode, SeqFileOptions, SeqIterator,
+    SeqValidateFn, SeqWriteFn, seq_open,
+};
 pub use simple_dir::{
     ChainedDirOps, DirMaker, DirMapping, IntoDirMappingEntry, SimpleDir, SimpleDirEntry,
-    SimpleDirLookup, SimpleDirOps,
+    SimpleDirLookup, SimpleDirOps, SparseDirSource, new_sparse_dir_inode,
 };
 pub use simple_file::{CommandFile, SimpleFile, SimpleFileOperation, SimpleFileOps};
 pub use simple_fs::{SimpleFs, SimpleFsNode};

@@ -49,3 +49,5 @@ fn tracing_capture_stats_is_readable_and_read_only() {
     assert!(lines.next().is_none());
     assert_eq!(file.write(b"0\n"), Err(VfsError::InvalidInput));
 }
+
+mod irq_nodes;

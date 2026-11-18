@@ -101,6 +101,18 @@ fn check_source(entry: &IrqStateDesc) -> Result<AffinitySource, IrqAffinityError
         .ok_or(IrqAffinityError::Unsupported)
 }
 
+/// Classifies the static source capability used to seed requested file modes.
+///
+/// This intentionally does not consult action presence, restrictions or the
+/// affinity snapshot. The caller owns the Line lock.
+pub(super) fn source_is_user_settable(entry: &IrqStateDesc) -> Result<bool, IrqAffinityError> {
+    match check_source(entry) {
+        Ok(_) => Ok(true),
+        Err(IrqAffinityError::Unsupported | IrqAffinityError::OwnerFixed) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Copies affinity from an already locked Line state.
 ///
 /// The caller owns the short Line lock. This helper never reacquires it and only

@@ -65,6 +65,32 @@ It uses quiescent fixture removal, not GP-delayed retirement, so the caller must
 exclude all borrowed readers of the removed key, not only active actions.
 It is not a production dynamic mapping-disposal API or proof of source vacancy.
 
+## Initial Policy And Retirement Notification
+
+An ordinary first action may establish a requested policy only after the CPU
+present map is ready. `present_mask()` is present, not ready; it does not write
+hardware. If the map is unavailable, registration returns `NotReady` before
+publishing an action or history. Fixed owner affinity is independent of that
+default. No procfs read or user setter supplies the initial policy.
+
+Action-history publication is a separate core fact: successful regular/shared/
+NMI publication sets it, failures do not, and action removal does not clear it.
+It is not a filesystem visibility flag; procfs applies its own display policy.
+
+Static user-routing source capability is a separate classification used for
+initial inode permissions. It is independent of action presence, per-action
+restriction and temporary routing state; every actual write still revalidates
+the complete checked setter.
+
+Retirement observers are weak, per-subscription intrusive slots allocated
+outside the Line lock. Subscription verifies the original Line is current under
+`IRQ_STATE -> Line`. Retirement moves the list under the Line lock and invokes
+callbacks only after KIRQ locks are released. A cancellation after that move
+does not access links and does not wait for a captured callback. Callback code
+does not hold KIRQ locks; dropping a namespace record may indirectly acquire
+the Line lock through subscription Drop, which is permitted outside the callback's
+KIRQ operation. Only real Line retirement notifies, not ordinary action removal.
+
 ## Sparse Handle Identity Boundary
 
 `runtime/handle.rs` is an identity and enumeration boundary, not a new routing

@@ -12,7 +12,7 @@ use unittest::{assert, assert_eq, def_test};
 
 use super::{
     MapsEntry, PROC_MAPS_ADDR_WIDTH, PROC_MAPS_PATH_COLUMN, ProcNsKind, TaskStatus,
-    format_cpu_list, format_cpu_mask, format_oom_score_adj, format_task_status, maps_permissions,
+    format_oom_score_adj, format_task_status, maps_permissions,
     namespace_identity, parse_oom_score_adj_input, render_maps_line, special_mapping_name,
     task_namespace_inode,
 };
@@ -145,7 +145,7 @@ fn test_task_status_includes_process_name_and_snapshot_fields() {
         shared_pending: 0x2000,
         cpumask,
     };
-    let status = format_task_status(&status);
+    let status = format_task_status(&status).unwrap();
 
     assert!(status.contains("Name:\ttest-bin\n"));
     assert!(status.contains("State:\tS (sleeping)\n"));
@@ -163,7 +163,7 @@ fn test_task_status_includes_process_name_and_snapshot_fields() {
     assert!(status.contains("SigCgt:\t0000000000000800\n"));
     // The fixture's two low bits are representable on any runtime CPU count;
     // the high bit is only meaningful when at least three CPUs are online.
-    let nr_cpus = kcpu_id_map::nr_cpus();
+    let nr_cpus = kcpu_id_map::nr_cpu_ids();
     let (mask, list) = if nr_cpus > 2 {
         ("5", "0,2")
     } else {
@@ -171,34 +171,6 @@ fn test_task_status_includes_process_name_and_snapshot_fields() {
     };
     assert!(status.contains(&alloc::format!("Cpus_allowed:\t{mask}\n")));
     assert!(status.contains(&alloc::format!("Cpus_allowed_list:\t{list}\n")));
-}
-
-#[def_test]
-fn test_cpu_mask_format_uses_runtime_width_and_list_trim() {
-    let mut mask = KCpuMask::new();
-    mask.set(0, true);
-    // CpuMask<1> uses a boolean representation rather than independent bits.
-    // Synthetic runtime widths must stay within the configured mask capacity.
-    let width = kbuild_config::NR_CPUS.min(4);
-    let trimmed_width = kbuild_config::NR_CPUS.min(2);
-    let (expected_mask, expected_list) = if width > 2 {
-        mask.set(2, true);
-        ("5", "0,2")
-    } else {
-        ("1", "0")
-    };
-
-    // Linux's `%*pb` derives its high-chunk width from `nr_cpu_ids`; bits
-    // outside that runtime set are not printed.
-    assert_eq!(format_cpu_mask(mask, width), expected_mask);
-    assert_eq!(format_cpu_list(mask, width), expected_list);
-    assert_eq!(format_cpu_mask(mask, trimmed_width), "1");
-    assert_eq!(format_cpu_list(mask, trimmed_width), "0");
-
-    // An empty mask prints as `0` in the compact form and as an empty list,
-    // matching Linux's `bitmap_string`/`bitmap_list_string` pair.
-    assert_eq!(format_cpu_mask(KCpuMask::new(), width), "0");
-    assert_eq!(format_cpu_list(KCpuMask::new(), width), "");
 }
 
 #[def_test]
@@ -215,7 +187,8 @@ fn test_task_status_escapes_name_like_linux() {
         cred: Arc::new(kcred::Cred::root()),
         shared_pending: 0,
         cpumask: KCpuMask::new(),
-    });
+    })
+    .unwrap();
 
     assert_eq!(status.lines().next(), Some("Name:\ta\tb\\nc\\\\d e"));
 }
@@ -233,7 +206,8 @@ fn test_task_status_omits_vm_size_without_address_space() {
         cred: Arc::new(kcred::Cred::root()),
         shared_pending: 0,
         cpumask: KCpuMask::new(),
-    });
+    })
+    .unwrap();
 
     assert!(!status.contains("VmSize:"));
     assert!(status.contains("Threads:\t0\n"));
@@ -254,7 +228,8 @@ fn test_task_status_uses_linux_subset_field_order() {
         cred: Arc::new(kcred::Cred::root()),
         shared_pending: 0,
         cpumask: KCpuMask::new(),
-    });
+    })
+    .unwrap();
     let keys: Vec<_> = status
         .lines()
         .map(|line| line.split(':').next().expect("status line has a key"))
@@ -414,7 +389,7 @@ fn read_status(file: &kvfs::VfsFile) -> kvfs::VfsResult<alloc::string::String> {
 fn test_status_root_credential_columns_remain_zero() {
     let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
     let target = status_credential_target(kcred::Cred::root(), false).unwrap();
-    let status = super::task_status(target.task());
+    let status = super::task_status(target.task()).unwrap();
     assert_eq!(status_id_columns(&status, "Uid:"), Some([0; 4]));
     assert_eq!(status_id_columns(&status, "Gid:"), Some([0; 4]));
 }
@@ -431,7 +406,7 @@ fn test_status_nonzero_target_credentials_are_not_reader_credentials() {
     ));
     assert_eq!(kprocess::current_real_cred().ruid(), 71);
     assert_eq!(kprocess::current_real_cred().rgid(), 81);
-    let status = super::task_status(target.task());
+    let status = super::task_status(target.task()).unwrap();
     assert_eq!(status_id_columns(&status, "Uid:"), Some([1234; 4]));
     assert_eq!(status_id_columns(&status, "Gid:"), Some([4321; 4]));
 }
@@ -449,7 +424,7 @@ fn test_status_orders_real_effective_saved_filesystem_ids() {
         [cred.rgid(), cred.egid(), cred.sgid(), cred.fsgid()],
         [201, 202, 203, 204]
     );
-    let status = super::task_status(target.task());
+    let status = super::task_status(target.task()).unwrap();
     assert_eq!(status_id_columns(&status, "Uid:"), Some([101, 0, 103, 104]));
     assert_eq!(
         status_id_columns(&status, "Gid:"),
@@ -473,8 +448,8 @@ fn test_status_same_process_threads_keep_their_own_credentials() {
         owner
     ));
     assert!(first.task().as_thread().tid() != second.task().as_thread().tid());
-    let first_status = super::task_status(first.task());
-    let second_status = super::task_status(second.task());
+    let first_status = super::task_status(first.task()).unwrap();
+    let second_status = super::task_status(second.task()).unwrap();
     assert_eq!(status_id_columns(&first_status, "Uid:"), Some([1234; 4]));
     assert_eq!(status_id_columns(&first_status, "Gid:"), Some([4321; 4]));
     assert_eq!(status_id_columns(&second_status, "Uid:"), Some([2345; 4]));
@@ -485,17 +460,17 @@ fn test_status_same_process_threads_keep_their_own_credentials() {
 fn test_status_reader_credential_change_does_not_retarget_snapshot() {
     let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
     let target = status_credential_target(kcred::Cred::new(1234, 4321), false).unwrap();
-    let before = super::task_status(target.task());
+    let before = super::task_status(target.task()).unwrap();
     {
         let _changed = ScopedStatusReaderCred::install(kcred::Cred::new(98, 89));
         assert_eq!(kprocess::current_real_cred().ruid(), 98);
-        let changed = super::task_status(target.task());
+        let changed = super::task_status(target.task()).unwrap();
         assert_eq!(status_id_columns(&changed, "Uid:"), Some([1234; 4]));
         assert_eq!(status_id_columns(&changed, "Gid:"), Some([4321; 4]));
     }
     assert_eq!(kprocess::current_real_cred().ruid(), 71);
     assert_eq!(kprocess::current_real_cred().rgid(), 81);
-    let after = super::task_status(target.task());
+    let after = super::task_status(target.task()).unwrap();
     assert_eq!(
         status_id_columns(&before, "Uid:"),
         status_id_columns(&after, "Uid:")
@@ -534,7 +509,7 @@ fn test_status_partial_reads_keep_one_record_and_rewind_refreshes_credentials() 
     let name = alloc::format!("/{pid}/status");
     let first = open_status(&root, name.clone()).unwrap();
     let not_yet_read = open_status(&root, name).unwrap();
-    let original = super::task_status(&target);
+    let original = super::task_status(&target).unwrap();
     let split = original.find("Gid:").unwrap();
     let mut prefix = alloc::vec![0u8; split];
     assert_eq!(first.read(&mut prefix).unwrap(), split);
@@ -584,7 +559,7 @@ fn test_status_retained_target_preserves_credentials_after_abort() {
     let retained = target.task().clone();
     let weak = ktask::KtaskRef::downgrade(&retained);
     target.abort();
-    let status = super::task_status(&retained);
+    let status = super::task_status(&retained).unwrap();
     assert_eq!(status_id_columns(&status, "Uid:"), Some([1234; 4]));
     assert_eq!(status_id_columns(&status, "Gid:"), Some([4321; 4]));
     drop(retained);

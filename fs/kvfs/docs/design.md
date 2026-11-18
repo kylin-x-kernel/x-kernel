@@ -105,17 +105,71 @@ SimpleDirOps::child_names returns a fallibly allocated KBox iterator. DirMapping
 releases its entries lock after collecting the name snapshot; ChainedDirOps owns
 both child iterators and releases the first if the second fails. The outer owner
 also propagates NoMemory. All use the default KERNEL policy. The getdents path
-obtains an owned file handle; VfsFile::iterate_dir samples/updates position with
-separate lock acquisitions and holds no position lock over iterate_shared.
-SimpleDir::read_dir_at constructs the child iterator before publishing even dot
-entries. These paths require sleepable task context, enabled IRQs/preemption,
-and no non-sleepable RCU section or lock required by reclaim/IO/FS callbacks.
-There is no current held-lock reason to restrict these allocations to NOWAIT or
-NOFS; future callers must preserve this contract.
+obtains an owned file handle; VfsFile::iterate_dir samples/updates f_pos with
+short position-lock acquisitions but holds no position lock over
+iterate_shared. Instead it holds the directory operation mutex across the whole
+read-execute-commit sequence. SimpleDir::read_dir_at constructs the child
+iterator before publishing even dot entries. These paths require sleepable task
+context, enabled IRQs/preemption, and no non-sleepable RCU section or lock
+required by reclaim/IO/FS callbacks. There is no current held-lock reason to
+restrict these allocations to NOWAIT or NOFS; future callers must preserve this
+contract.
+
+### Directory position serialization
+
+`VfsFile::position` is the sole f_pos storage. A separate
+`VfsFile::dir_position: Mutex<()>` serializes directory position operations:
+
+- `iterate_dir()` acquires it before sampling f_pos, holds it through
+  `iterate_shared()`, commits `ctx.pos()` on success and error, then releases it.
+- `llseek()` acquires the same lock for a directory before dispatching the
+  operation. `SEEK_CUR` therefore observes a committed f_pos.
+- Lock order is `dir_position -> position -> filesystem/source locks`; the
+  position lock is not held across the directory callback.
+- Directory callbacks must not re-enter `iterate_dir()` or `llseek()` on the
+  same open file.
+- `set_position()` is used in production only by `iterate_dir()`; other
+  production position changes use `llseek()`. Direct `position_lock()` users are
+  regular-file/stream paths and tests, not directory position changes.
+- `dup` shares the same `VfsFile`, so it shares this lock and f_pos. Independent
+  opens have independent locks.
 
 A dynamic child may disappear between its name snapshot and lookup. Directory
 reads skip only `NotFound` for that child and retain the later entries' cookies.
 Snapshot-construction errors and other lookup failures still propagate.
+
+## Sparse simple directories
+
+`SimpleDirOps::sparse_source()` is a default-`None` opt-in. A source implements
+`SparseDirSource` (first/next key, canonical name, current object by key/name,
+and path lookup by name). `new_sparse_dir_inode()` wraps it in a private adapter;
+`child_names()` on that adapter is intentionally `OperationNotSupported`, and the
+first version does not compose sparse with `ChainedDirOps`.
+
+The per-open `SparseDirCursor` is installed in the open file's private data by
+`SimpleDirFileOperations::open()` and is owned by the same `VfsFile` as f_pos, so
+`dup` shares it. kvfs owns dot/dotdot, cookies, seek, continuation and error
+state. Cookies are 0 start, 1 dot, 2 dotdot, then one ordinal per accepted data
+entry; source keys and `d_ino` are never cookies. Cookie values are bounded by
+`i64::MAX`, and sparse directories reject `SEEK_END`.
+
+Formatting and object resolution are source responsibilities:
+
+- `name_for_key()`/`lookup_key()` NotFound skips a vanished candidate without
+  advancing the output cookie;
+- the returned dentry's current name must match the enumerated name;
+- helper checks reject empty names, dot names, `/`, and NUL;
+- source names are unique by contract; kvfs does not allocate a full name table.
+
+Sink rejection retains the pending key and does not advance cursor/cookie.
+EOF is not cached: the next iterate retries `next_key(last_key)`, so later keys
+are visible. A seek beyond EOF preserves the requested f_pos and returns 0; a
+later insertion can make that ordinal visible and triggers an O(cookie) rebuild.
+For sparse directories, a positive seek beyond `i64::MAX` returns `EOVERFLOW`
+and leaves f_pos unchanged; `SEEK_END` is rejected with `EINVAL`.
+Sequential reading advances by visited candidates, not by a full re-scan; many
+vanished candidates can increase work. The open-file directory operation lock
+(`dir_position`) remains the only serialization mechanism around iterate/seek.
 
 ## Fallible mount-transaction private state
 
@@ -1387,12 +1441,97 @@ released with its last reference; hard links share the same active session becau
 
 ## Sequential record rendering errors
 
+`SeqIterator::try_start`/`try_next` are default-compatible fallible entries:
+`Ok(None)` is EOF and `Err` is an observation failure. Existing `start`/`next`
+implementations continue to work through the default adapters. `SeqFile` resets
+the failed record and lets a later offset-zero read retry; an observation error is
+never converted to EOF.
+
 `SeqIterator::try_show` defaults to the existing `show` formatter and maps its
 formatting failure to `Io`. Iterators that need a filesystem error may override
 it, for example to preserve procfs `NoSuchProcess` when a weak target expires.
-`SeqFile` discards the failed record and resets its iterator before returning the
-error. Successful records use the existing per-open buffer and offset semantics;
-no second snapshot or credential cache is introduced.
+`SeqFile` retains a failed item in per-open `pending_item` when formatting fails,
+so the next sequential read retries that item instead of advancing past it. If
+the read already copied a successful prefix, the prefix is returned and the
+failed item is retried on the next read; if no bytes were copied, the error is
+returned immediately. An explicit offset-zero reset discards the pending item
+and starts a fresh traversal. Successful records use the existing per-open
+buffer and offset semantics; no second snapshot or credential cache is
+introduced.
+
+When `try_start`/`try_next` itself fails after a successful prefix, the error is
+stored in a recovery transition; the next sequential read reports it without
+advancing the file position. The following read rewinds the iterator and rebuilds
+its position from the committed byte offset with `seek_to`, then retries the
+failed position. The iterator is not trusted to preserve its cursor across an
+error. `SeqIterator::Item` must be `Send` because the pending item is retained
+across read calls, not only during one formatting operation.
+
+### SeqFile read recovery state
+
+The read path has one private recovery state rather than independent
+`pending_item`/`pending_error`/`needs_reposition` flags:
+
+```text
+ReadRecovery<T>:
+  Ready
+  RetryItem(T)
+  ReportThenReposition(VfsError)
+  Reposition
+
+RecordFailure<T>:
+  Observe(VfsError)
+  Format { item: T, error: VfsError }
+```
+
+`fill_next_entry` is the only producer of `RecordFailure`; it reports whether
+the iterator cursor failed or an item failed formatting. `read`/`read_iter` only
+decide whether the failure follows copied bytes (short read) or precedes them
+(error). A formatting failure always becomes `RetryItem`, including at a
+nonzero offset with no successful prefix; an observation failure becomes
+`ReportThenReposition` only after a prefix, otherwise `Reposition`.
+
+Transitions:
+
+| Current | Event | Next |
+| --- | --- | --- |
+| `Ready` | record formatted | `Ready` |
+| `Ready` | format failure | `RetryItem(item)` |
+| `Ready` | observation failure, prefix copied | `ReportThenReposition(error)` |
+| `Ready` | observation failure, no prefix | `Reposition` |
+| `RetryItem(item)` | next read | retry the same item, then `Ready` |
+| `ReportThenReposition(error)` | next read | return `error`, remain `Reposition` |
+| `Reposition` | next read | `rewind` + `seek_to(committed offset)`, then `Ready` |
+| any | offset 0 reset | `Ready` |
+
+Buffer data, `buf_read_pos`, `last_file_offset`, `started`, and `is_eof` remain
+separate because they describe data/position, not failure recovery. Scalar
+`read` uses the kernel kvec iterator destination and delegates to `read_iter`, so
+both entries share one copy/position/recovery loop.
+
+### Sequential lazy/open and vectored reads
+
+`SeqFileInode::new_regular` keeps its existing eager iterator creation and
+synthetic 1 MiB size. The opt-in `new_regular_with_options` form adds:
+
+- `lazy_open`: open validates identity but does not create the iterator or
+  observe content; the first read/read_iter creates it.
+- `validate_open` once at open and `validate_read` on every read/read_iter.
+- `max_record_bytes` and a private `RecordBuffer` that preserves `NoMemory` /
+  `FileTooLarge` through a `fmt::Write` side channel; formatters cannot consume
+  or clear the real error.
+- `read_iter` on `SeqFile`/`SeqFileInode`: one request pins one record buffer and
+  does not restart the iterator per page. `SeqFile` remains the sole read-state
+  owner.
+- `SeekEndPolicy`: legacy consumers retain the old synthetic size; new dynamic
+  single-record consumers may reject `SEEK_END` and report size 0.
+- Optional `SeqCommandOptions`: the same inode can use the command transport for
+  writes; read state does not copy or retry commands. A complete command write
+  does not advance `f_pos`, and a zero-length write returns success without
+  invoking the provider callback.
+
+`SeqFileInode::open` is the VFS adapter that invokes the optional command
+callback; `SeqFile` itself owns only the read buffer/offset.
 
 ## Per-open generated-file snapshots
 
@@ -1787,3 +1926,17 @@ in `kvfs` and will be wired into `read_iter`/`write_iter` in a later change.
 
 No call site uses the engine yet. `O_DIRECT` still falls back to buffered I/O,
 and `FMode::CAN_ODIRECT` remains an informational open-time flag.
+## Open validation
+
+`SimpleFileOps::validate_open()` and `SimpleDirOps::validate_open()` are opt-in
+defaults returning success. `SimpleFile` invokes the file hook exactly once
+before delegating to its selected file-operation object; `SimpleDir`'s file
+operations invoke the directory hook exactly once at directory open. Existing
+closures and helper users need no changes. Validation is an open-admission
+decision only: metadata callbacks such as `link_count()` are not a substitute
+for it.
+
+The writable `SnapshotCommand` backend, its per-open generation state and its
+tests have been removed. Writable command semantics are now owned by
+`SeqFileInode` plus the shared complete-command transport; ordinary
+`CommandFile` and read-only snapshot helpers are unchanged.

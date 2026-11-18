@@ -4,8 +4,11 @@
 
 use alloc::sync::Arc;
 
-use kvfs::{DirMapping, SimpleFs};
+use kvfs::{DirMaker, DirMapping, SimpleFs};
 
-pub(crate) fn add_root_entries(_root: &mut DirMapping, _fs: Arc<SimpleFs>) {
-    // /proc/interrupts stub — will be replaced with per-IRQ statistics from khal.
+use super::dir::new_root_inode;
+
+pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
+    let maker: DirMaker = Arc::new(move || new_root_inode(fs.clone()));
+    root.add("irq", maker);
 }

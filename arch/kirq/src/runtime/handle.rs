@@ -9,16 +9,18 @@
 //! management admission. Enumeration is task/control-only and never creates a
 //! mapping, action or hardware route.
 
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 
 use kcpu_id_map::KCpuMask;
 
 use super::{
     affinity::{
         apply_locked, apply_user_locked, check_user_affinity_change_locked, snapshot_locked,
+        source_is_user_settable,
     },
     index::DIRECTORY,
     manager::{self, ManagementMode},
+    retirement::{self, IrqLineRetirementObserver, IrqLineRetirementSubscription},
     state::{IRQ_STATE, IrqLine},
 };
 use crate::{IrqAffinityError, IrqAffinitySnapshot, IrqDescError, Virq};
@@ -41,6 +43,106 @@ impl IrqLineHandle {
     /// membership or permission to operate on the source.
     pub fn virq(&self) -> Virq {
         self.virq
+    }
+
+    /// Compares the underlying Line identity, not the wrapper allocation.
+    pub fn is_same_line(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.line, &other.line) && self.virq == other.virq
+    }
+
+    /// Returns whether this exact Line is the current non-retired directory entry.
+    ///
+    /// This takes the registry and Line short locks. It is a task/control-plane
+    /// observation, not an NMI-safe permission token.
+    pub fn is_current(&self) -> bool {
+        let state = IRQ_STATE.lock();
+        if !state
+            .descs
+            .get(&self.virq)
+            .is_some_and(|current| Arc::ptr_eq(&current, &self.line))
+        {
+            return false;
+        }
+        !self.line.lock().is_retired()
+    }
+
+    /// Returns whether this Line has ever published an action.
+    ///
+    /// The fact is not cleared by action removal; it is a visibility input only.
+    /// Takes the Line short lock; not NMI-safe.
+    pub fn has_action_history(&self) -> bool {
+        self.line.lock().has_action_history()
+    }
+
+    /// Returns the stored affinity policy/route without a settable-capability check.
+    ///
+    /// Retired or replaced identities still return `UnknownIrq`; no hardware
+    /// capability or action presence is consulted.
+    pub fn affinity_snapshot(&self) -> Result<IrqAffinitySnapshot, IrqAffinityError> {
+        if crate::context::is_in_nmi() {
+            return Err(IrqAffinityError::Management(IrqDescError::InvalidContext {
+                operation: "observe IRQ affinity snapshot",
+            }));
+        }
+        let state = IRQ_STATE.lock();
+        if !state
+            .descs
+            .get(&self.virq)
+            .is_some_and(|current| Arc::ptr_eq(&current, &self.line))
+        {
+            return Err(IrqAffinityError::Management(IrqDescError::UnknownIrq));
+        }
+        let entry = self.line.lock();
+        if entry.is_retired() {
+            return Err(IrqAffinityError::Management(IrqDescError::UnknownIrq));
+        }
+        Ok(entry.affinity)
+    }
+
+    /// Reports whether this source has a static ordinary user-routing capability.
+    ///
+    /// This is a descriptor/source classification, not an action or policy
+    /// token: ordinary immediate/deferred `Any` sources return `true`, while
+    /// fixed, PerCpu/NMI/MSI, no-flow and no-controller sources return `false`.
+    /// Action removal, action restrictions and churn do not change it. A retired
+    /// or replaced identity still returns `UnknownIrq`.
+    pub fn is_user_affinity_source_supported(&self) -> Result<bool, IrqAffinityError> {
+        if crate::context::is_in_nmi() {
+            return Err(IrqAffinityError::Management(IrqDescError::InvalidContext {
+                operation: "classify IRQ affinity source",
+            }));
+        }
+        let state = IRQ_STATE.lock();
+        if !state
+            .descs
+            .get(&self.virq)
+            .is_some_and(|current| Arc::ptr_eq(&current, &self.line))
+        {
+            return Err(IrqAffinityError::Management(IrqDescError::UnknownIrq));
+        }
+        let entry = self.line.lock();
+        if entry.is_retired() {
+            return Err(IrqAffinityError::Management(IrqDescError::UnknownIrq));
+        }
+        source_is_user_settable(&entry)
+    }
+
+    /// Registers a weak observer for this exact Line's retirement.
+    ///
+    /// The slot is allocated before the Line lock. Registration verifies the
+    /// original Line is still current under `IRQ_STATE -> Line`. Requires
+    /// task/control context outside hardirq, NMI, BH-disabled task and RCU read
+    /// scope. A retired or replaced handle returns `UnknownIrq`.
+    pub fn subscribe_retirement(
+        &self,
+        observer: Weak<dyn IrqLineRetirementObserver>,
+    ) -> Result<IrqLineRetirementSubscription, IrqDescError> {
+        if crate::context::is_in_interrupt_context() || krcu::is_reading() {
+            return Err(IrqDescError::InvalidContext {
+                operation: "subscribe IRQ retirement",
+            });
+        }
+        retirement::subscribe(self.virq, &self.line, observer)
     }
 
     /// Reads confirmed affinity from this exact Line.

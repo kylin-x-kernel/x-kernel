@@ -194,6 +194,7 @@ fn register_nmi_with_flow(
                     });
                 }
                 entry.flow = Some(flow);
+                let initial_policy = entry.prepare_initial_affinity_policy()?;
                 if let Err(error) = configure(entry.desc) {
                     entry.mark_configuration_failed();
                     return Err(error);
@@ -208,6 +209,7 @@ fn register_nmi_with_flow(
                     return Ok(false);
                 }
                 entry.install_nmi_action();
+                entry.commit_initial_affinity_policy(initial_policy);
                 Ok(true)
             },
         )

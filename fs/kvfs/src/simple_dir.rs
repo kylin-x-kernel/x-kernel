@@ -14,13 +14,16 @@ use alloc::{
 use core::any::Any;
 
 use kalloc_types::KBox;
+use kerrno::LinuxError;
 use ksync::Mutex;
 
 use crate::{
     Dentry, DeviceId, DirContext, DirEntrySink, FileDirOperations, FileOperations,
     InodeDirOperations, InodeOperations, LockedDentry, Metadata, MetadataUpdate, NodeFlags,
     NodePermission, NodeType, RenameFlags, SeqFileInode, Umode, VfsError, VfsFile, VfsInode,
-    VfsResult, inode_init_owner,
+    VfsResult,
+    file::{SEEK_CUR, SEEK_END, SEEK_SET},
+    inode_init_owner,
     libfs::{generic_read_dir, noop_fsync},
     path::{DOT, DOTDOT},
     simple_fs::{SimpleFs, SimpleFsNode},
@@ -127,6 +130,13 @@ impl<'a> SimpleDirLookup<'a> {
 
 /// Operations for a simple directory.
 pub trait SimpleDirOps: Send + Sync + 'static {
+    /// Validates one directory open after VFS permission checks. The default
+    /// preserves existing helper users; implementations that retain a dynamic
+    /// backing identity can reject a stale open here.
+    fn validate_open(&self) -> VfsResult<()> {
+        Ok(())
+    }
+
     /// Get the names of all children in the directory.
     ///
     /// # Execution context
@@ -146,6 +156,16 @@ pub trait SimpleDirOps: Send + Sync + 'static {
     /// Directory reads skip `NotFound` when a child disappears after the name
     /// snapshot. Other lookup errors still propagate to the reader.
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry>;
+
+    /// Returns an optional sparse enumeration source.
+    ///
+    /// The default keeps every existing directory on the full
+    /// `child_names()` path. A sparse source opts this directory into the
+    /// incremental cursor path; `ChainedDirOps` does not forward it in the
+    /// first version.
+    fn sparse_source(&self) -> Option<&dyn SparseDirSource> {
+        None
+    }
 
     /// Samples a dynamic directory link count for each metadata query.
     ///
@@ -434,10 +454,72 @@ impl Default for DirMapping {
     }
 }
 
+/// Incremental enumeration source for a simple directory.
+///
+/// `key` is the source's sorted sparse identity, not the VFS cookie and not a
+/// `d_ino`. The source generates names and resolves the current object for a
+/// key; kvfs owns dot entries, cookies, seeking and short-read continuation.
+pub trait SparseDirSource: Send + Sync + 'static {
+    /// Validates one directory open. Implementations must not enumerate here.
+    fn validate_open(&self) -> VfsResult<()> {
+        Ok(())
+    }
+
+    /// Returns the first sparse key, or `None` when the source is empty.
+    fn first_key(&self) -> VfsResult<Option<u64>>;
+
+    /// Returns the smallest key strictly greater than `after`.
+    fn next_key(&self, after: u64) -> VfsResult<Option<u64>>;
+
+    /// Returns the canonical name for `key`.
+    fn name_for_key(&self, key: u64) -> VfsResult<String>;
+
+    /// Resolves the current object for `key`, which must currently have `name`.
+    fn lookup_key(&self, lookup: SimpleDirLookup<'_>, key: u64, name: &str) -> VfsResult<Dentry>;
+
+    /// Resolves a path name without treating the name as a numeric key.
+    fn lookup_name(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry>;
+}
+
+struct SparseDirAdapter {
+    source: Arc<dyn SparseDirSource>,
+}
+
+impl SimpleDirOps for SparseDirAdapter {
+    fn validate_open(&self) -> VfsResult<()> {
+        self.source.validate_open()
+    }
+
+    fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
+        // Sparse readdir must never take the full-name path. Returning a clear
+        // error prevents accidental fallback (and documents the chain limit).
+        Err(VfsError::OperationNotSupported)
+    }
+
+    fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
+        self.source.lookup_name(lookup, name)
+    }
+
+    fn sparse_source(&self) -> Option<&dyn SparseDirSource> {
+        Some(self.source.as_ref())
+    }
+
+    fn supports_dentry_cache(&self) -> bool {
+        // A sparse source has no invalidation contract in this version. Do not
+        // let a fresh pathname lookup reuse a dentry after source replacement.
+        false
+    }
+}
+
 /// Directory created by [`SimpleDirOps::chain`].
 pub struct ChainedDirOps<A, B>(A, B);
 
 impl<A: SimpleDirOps, B: SimpleDirOps> SimpleDirOps for ChainedDirOps<A, B> {
+    fn validate_open(&self) -> VfsResult<()> {
+        self.0.validate_open()?;
+        self.1.validate_open()
+    }
+
     fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         Ok(KBox::new(
             self.0.child_names()?.chain(self.1.child_names()?),
@@ -459,10 +541,102 @@ impl<A: SimpleDirOps, B: SimpleDirOps> SimpleDirOps for ChainedDirOps<A, B> {
     }
 }
 
+const SPARSE_COOKIE_LIMIT: u64 = i64::MAX as u64;
+const SPARSE_DOT_COOKIE: u64 = 1;
+const SPARSE_DOTDOT_COOKIE: u64 = 2;
+
+struct SparseDirCursor {
+    next_cookie: u64,
+    last_key: Option<u64>,
+    scan_started: bool,
+    pending_key: Option<u64>,
+}
+
+impl SparseDirCursor {
+    fn new() -> Self {
+        Self {
+            next_cookie: 0,
+            last_key: None,
+            scan_started: false,
+            pending_key: None,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.next_cookie = 0;
+        self.last_key = None;
+        self.scan_started = false;
+        self.pending_key = None;
+    }
+
+    fn next_key(&mut self, source: &dyn SparseDirSource) -> VfsResult<Option<u64>> {
+        let key = if self.scan_started {
+            match self.last_key {
+                Some(after) => source.next_key(after)?,
+                None => None,
+            }
+        } else {
+            source.first_key()?
+        };
+        if key.is_some() {
+            self.scan_started = true;
+        }
+        Ok(key)
+    }
+}
+
+fn validate_sparse_name(name: &str) -> VfsResult<()> {
+    if name.is_empty()
+        || name == DOT
+        || name == DOTDOT
+        || name.contains('/')
+        || name.as_bytes().contains(&0)
+    {
+        return Err(VfsError::InvalidData);
+    }
+    Ok(())
+}
+
 /// Simple directory.
 pub struct SimpleDir<O> {
     node: SimpleFsNode,
     ops: Arc<O>,
+}
+
+impl SimpleDir<SparseDirAdapter> {
+    /// Creates a directory whose readdir path uses a sparse source.
+    ///
+    /// The first version does not support combining this inode with
+    /// `ChainedDirOps`; the adapter's full-name path is intentionally rejected.
+    pub(crate) fn new_sparse_inode_with_owner(
+        fs: Arc<SimpleFs>,
+        source: Arc<dyn SparseDirSource>,
+        permission: NodePermission,
+        uid: u32,
+        gid: u32,
+    ) -> Arc<VfsInode> {
+        Self::new_inode_with_owner(
+            fs,
+            Arc::new(SparseDirAdapter { source }),
+            permission,
+            uid,
+            gid,
+        )
+    }
+}
+
+/// Creates a directory whose readdir path uses a sparse source.
+///
+/// The first version does not support combining this inode with
+/// `ChainedDirOps`; the adapter's full-name path is intentionally rejected.
+pub fn new_sparse_dir_inode(
+    fs: Arc<SimpleFs>,
+    source: Arc<dyn SparseDirSource>,
+    permission: NodePermission,
+    uid: u32,
+    gid: u32,
+) -> Arc<VfsInode> {
+    SimpleDir::<SparseDirAdapter>::new_sparse_inode_with_owner(fs, source, permission, uid, gid)
 }
 
 impl<O: SimpleDirOps> SimpleDir<O> {
@@ -513,6 +687,153 @@ impl<O: SimpleDirOps> SimpleDir<O> {
             flags,
             init,
         )
+    }
+
+    fn resolve_sparse_candidate(
+        &self,
+        source: &dyn SparseDirSource,
+        dir: &Dentry,
+        key: u64,
+    ) -> VfsResult<Option<(String, Dentry)>> {
+        let name = match source.name_for_key(key) {
+            Ok(name) => name,
+            Err(VfsError::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        validate_sparse_name(&name)?;
+        let entry = match source.lookup_key(SimpleDirLookup::new(dir), key, &name) {
+            Ok(entry) => entry,
+            Err(VfsError::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if entry.name_snapshot() != name {
+            return Err(VfsError::InvalidData);
+        }
+        Ok(Some((name, entry)))
+    }
+
+    fn read_sparse_dir_at(
+        &self,
+        source: &dyn SparseDirSource,
+        dir: &Dentry,
+        ctx: &mut DirContext<'_>,
+        cursor: &mut SparseDirCursor,
+    ) -> VfsResult<usize> {
+        let position = ctx.pos();
+        if position > SPARSE_COOKIE_LIMIT {
+            return Err(VfsError::from(LinuxError::EOVERFLOW));
+        }
+
+        if position == 0 {
+            cursor.reset();
+        } else if position < SPARSE_DOTDOT_COOKIE {
+            cursor.reset();
+            cursor.next_cookie = position;
+        } else if position != cursor.next_cookie
+            && !self.rebuild_sparse_cursor(source, dir, cursor, position)?
+        {
+            // The requested position is beyond the current EOF. Keep it as the
+            // caller's observable f_pos; a later insertion can make it valid.
+            return Ok(0);
+        }
+
+        let mut count = 0;
+        if ctx.pos() == 0 {
+            let metadata = dir.metadata();
+            if !ctx.emit(
+                DOT,
+                metadata.inode,
+                metadata.mode.node_type(),
+                SPARSE_DOT_COOKIE,
+            ) {
+                return Ok(count);
+            }
+            cursor.next_cookie = SPARSE_DOT_COOKIE;
+            count += 1;
+        }
+        if ctx.pos() == 1 {
+            let metadata = dir
+                .parent()
+                .map_or_else(|| dir.metadata(), |parent| parent.metadata());
+            if !ctx.emit(
+                DOTDOT,
+                metadata.inode,
+                metadata.mode.node_type(),
+                SPARSE_DOTDOT_COOKIE,
+            ) {
+                return Ok(count);
+            }
+            cursor.next_cookie = SPARSE_DOTDOT_COOKIE;
+            count += 1;
+        }
+
+        loop {
+            if cursor.pending_key.is_none() {
+                let Some(key) = cursor.next_key(source)? else {
+                    return Ok(count);
+                };
+                cursor.pending_key = Some(key);
+            }
+            let key = cursor.pending_key.expect("sparse pending key");
+            let Some((name, entry)) = self.resolve_sparse_candidate(source, dir, key)? else {
+                cursor.last_key = Some(key);
+                cursor.pending_key = None;
+                continue;
+            };
+
+            let next_cookie = cursor
+                .next_cookie
+                .checked_add(1)
+                .filter(|cookie| *cookie <= SPARSE_COOKIE_LIMIT)
+                .ok_or_else(|| VfsError::from(LinuxError::EOVERFLOW))?;
+            let metadata = entry.metadata();
+            if !ctx.emit(
+                &name,
+                metadata.inode,
+                metadata.mode.node_type(),
+                next_cookie,
+            ) {
+                cursor.pending_key = Some(key);
+                return Ok(count);
+            }
+            cursor.pending_key = None;
+            cursor.last_key = Some(key);
+            cursor.next_cookie = next_cookie;
+            count += 1;
+        }
+    }
+
+    fn rebuild_sparse_cursor(
+        &self,
+        source: &dyn SparseDirSource,
+        dir: &Dentry,
+        cursor: &mut SparseDirCursor,
+        target: u64,
+    ) -> VfsResult<bool> {
+        cursor.reset();
+        cursor.next_cookie = SPARSE_DOTDOT_COOKIE;
+
+        while cursor.next_cookie < target {
+            let Some(key) = cursor.next_key(source)? else {
+                return Ok(false);
+            };
+            cursor.pending_key = Some(key);
+            let Some(_entry) = self.resolve_sparse_candidate(source, dir, key)? else {
+                cursor.last_key = Some(key);
+                cursor.pending_key = None;
+                continue;
+            };
+
+            let next_cookie = cursor
+                .next_cookie
+                .checked_add(1)
+                .filter(|cookie| *cookie <= SPARSE_COOKIE_LIMIT)
+                .ok_or_else(|| VfsError::from(LinuxError::EOVERFLOW))?;
+            cursor.next_cookie = next_cookie;
+            cursor.last_key = Some(key);
+            cursor.pending_key = None;
+        }
+        Ok(true)
     }
 
     fn read_dir_at(
@@ -781,12 +1102,53 @@ impl<O> SimpleDirFileOperations<O> {
 }
 
 impl<O: SimpleDirOps> FileOperations for SimpleDirFileOperations<O> {
+    fn open(
+        self: Arc<Self>,
+        _inode: &crate::VfsInode,
+        file: &mut crate::VfsFileBuilder,
+    ) -> VfsResult<()> {
+        self.dir.ops.validate_open()?;
+        if self.dir.ops.sparse_source().is_some() {
+            file.set_private_data(Arc::new(Mutex::new(SparseDirCursor::new())));
+        }
+        Ok(())
+    }
+
     fn dir_operations(&self) -> Option<&dyn FileDirOperations> {
         Some(self)
     }
 
     fn supports_read(&self) -> bool {
         true
+    }
+
+    fn llseek(&self, file: &VfsFile, offset: i64, whence: i32) -> VfsResult<u64> {
+        let is_sparse = self.dir.ops.sparse_source().is_some();
+        if is_sparse && whence == SEEK_END {
+            return Err(VfsError::InvalidInput);
+        }
+
+        let mut position = file.position_lock();
+        let base = match whence {
+            SEEK_SET => 0i128,
+            SEEK_CUR => i128::from(*position),
+            SEEK_END => i128::from(file.size()),
+            _ => return Err(VfsError::InvalidInput),
+        };
+        let new_offset = base + i128::from(offset);
+        if new_offset < 0 {
+            return Err(VfsError::InvalidInput);
+        }
+        if is_sparse && new_offset > i128::from(SPARSE_COOKIE_LIMIT) {
+            return Err(VfsError::from(LinuxError::EOVERFLOW));
+        }
+        if !is_sparse && new_offset > i128::from(i64::MAX) {
+            return Err(VfsError::InvalidInput);
+        }
+        let new_offset =
+            u64::try_from(new_offset).map_err(|_| VfsError::from(LinuxError::EOVERFLOW))?;
+        *position = new_offset;
+        Ok(new_offset)
     }
 
     fn read(&self, _file: &VfsFile, buf: &mut [u8], offset: u64) -> VfsResult<usize> {
@@ -805,6 +1167,15 @@ impl<O: SimpleDirOps> FileOperations for SimpleDirFileOperations<O> {
 
 impl<O: SimpleDirOps> FileDirOperations for SimpleDirFileOperations<O> {
     fn iterate_shared(&self, file: &VfsFile, ctx: &mut DirContext<'_>) -> VfsResult<usize> {
+        if let Some(source) = self.dir.ops.sparse_source() {
+            let cursor = file
+                .private_data_get::<Mutex<SparseDirCursor>>()
+                .ok_or(VfsError::InvalidInput)?;
+            let mut cursor = cursor.lock();
+            return self
+                .dir
+                .read_sparse_dir_at(source, file.path().dentry(), ctx, &mut cursor);
+        }
         let start = ctx.pos();
         self.dir.read_dir_at(file.path().dentry(), start, ctx)
     }

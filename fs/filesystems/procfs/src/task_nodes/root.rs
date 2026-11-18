@@ -14,7 +14,7 @@ use core::{ffi::CStr, fmt, fmt::Write as _, iter, str};
 
 use kaddr_layout::{SIGNAL_TRAMPOLINE, USER_HEAP_BASE, USER_STACK_SIZE, USER_STACK_TOP};
 use kalloc_types::KBox;
-use kcpu_id_map::nr_cpus;
+use kcpu_id_map::text::{CpuTextDomain, bitmap_capacity, list_capacity, write_bitmap, write_list};
 use kcred::Cred;
 use kfd_objects::inotify::Inotify;
 use khal::paging::MappingFlags;
@@ -117,7 +117,7 @@ impl SeqIterator for StatusIter {
 
     fn try_show(&self, _item: &Self::Item, buf: &mut String) -> VfsResult<()> {
         let task = upgrade_task(&self.task)?;
-        buf.push_str(&task_status(&task));
+        buf.push_str(&task_status(&task)?);
         Ok(())
     }
 }
@@ -156,11 +156,12 @@ impl TaskStatus {
     }
 }
 
-fn task_status(task: &KtaskRef) -> String {
+fn task_status(task: &KtaskRef) -> VfsResult<String> {
     format_task_status(&TaskStatus::capture(task))
 }
 
-fn format_task_status(status: &TaskStatus) -> String {
+fn format_task_status(status: &TaskStatus) -> VfsResult<String> {
+    let domain = CpuTextDomain::runtime().map_err(crate::cpu_text_error::map_cpu_text)?;
     let stat = &status.stat;
     // Linux prints "S (sleeping)": parsers key on the letter and the wording is
     // for whoever reads the file, so both are emitted as in fs/proc/array.c.
@@ -221,27 +222,49 @@ fn format_task_status(status: &TaskStatus) -> String {
     push_status_line(&mut out, format_args!("SigCgt:\t{:016x}", stat.sigcatch));
     // Linux renders these with `%*pb` / `cpumask_pr_args` over the runtime
     // `nr_cpu_ids`, not over the compile-time `NR_CPUS` capacity.
-    let nr_cpus = nr_cpus();
-    push_status_line(
+    push_cpu_line(&mut out, "Cpus_allowed:\t", status.cpumask, &domain, false)?;
+    push_cpu_line(
         &mut out,
-        format_args!(
-            "Cpus_allowed:\t{}",
-            format_cpu_mask(status.cpumask, nr_cpus)
-        ),
-    );
-    push_status_line(
-        &mut out,
-        format_args!(
-            "Cpus_allowed_list:\t{}",
-            format_cpu_list(status.cpumask, nr_cpus)
-        ),
-    );
+        "Cpus_allowed_list:\t",
+        status.cpumask,
+        &domain,
+        true,
+    )?;
     // X-Kernel currently models a single memory node and has no mempolicy.
     // Linux parsers expect the mask/list pair, so report that sole node rather
     // than inventing per-task NUMA state.
     push_status_line(&mut out, format_args!("Mems_allowed:\t1"));
     push_status_line(&mut out, format_args!("Mems_allowed_list:\t0"));
-    out
+    Ok(out)
+}
+
+fn push_cpu_line(
+    out: &mut String,
+    label: &str,
+    mask: KCpuMask,
+    domain: &CpuTextDomain,
+    list: bool,
+) -> VfsResult<()> {
+    let capacity = if list {
+        list_capacity(domain)
+    } else {
+        bitmap_capacity(domain)
+    }
+    .map_err(crate::cpu_text_error::map_cpu_text)?;
+    let reserved = label
+        .len()
+        .checked_add(capacity)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(VfsError::NoMemory)?;
+    out.try_reserve(reserved).map_err(|_| VfsError::NoMemory)?;
+    out.push_str(label);
+    if list {
+        write_list(mask, domain, out).map_err(crate::cpu_text_error::map_cpu_text)?;
+    } else {
+        write_bitmap(mask, domain, out).map_err(crate::cpu_text_error::map_cpu_text)?;
+    }
+    out.push('\n');
+    Ok(())
 }
 
 /// Escapes a task name for `/proc/<pid>/status` like Linux.
@@ -269,76 +292,6 @@ fn escape_status_name(name: &str) -> Cow<'_, str> {
         }
     }
     Cow::Owned(escaped)
-}
-
-/// Formats a CPU mask the way Linux's `%*pb` does for procfs.
-///
-/// Words are printed from the highest 32-bit chunk down. The high chunk is
-/// limited to `ceil(word_bits / 4)` hex digits, exactly as Linux's
-/// `bitmap_string` derives its width from `nr_cpu_ids`; lower chunks always
-/// use eight digits. With four runtime CPUs this produces `5`, while a
-/// five-CPU machine produces `05` for the same low bits.
-fn format_cpu_mask(mask: KCpuMask, nr_cpus: usize) -> String {
-    const BITS_PER_WORD: usize = 32;
-    let word_count = nr_cpus.div_ceil(BITS_PER_WORD);
-    let mut out = String::new();
-
-    for word in (0..word_count).rev() {
-        let first_bit = word * BITS_PER_WORD;
-        let word_bits = (nr_cpus - first_bit).min(BITS_PER_WORD);
-        let mut value = 0u32;
-        for bit in 0..word_bits {
-            if mask.get(first_bit + bit) {
-                value |= 1 << bit;
-            }
-        }
-
-        if !out.is_empty() {
-            out.push(',');
-        }
-        let digits = if word + 1 == word_count {
-            word_bits.div_ceil(4)
-        } else {
-            BITS_PER_WORD / 4
-        };
-        let _ = write!(out, "{value:0digits$x}");
-    }
-
-    if out.is_empty() {
-        out.push('0');
-    }
-    out
-}
-
-/// Formats a CPU mask as Linux's compressed `Cpus_allowed_list`.
-fn format_cpu_list(mask: KCpuMask, nr_cpus: usize) -> String {
-    let mut out = String::new();
-    let mut range_start = None;
-
-    for cpu in 0..nr_cpus {
-        if mask.get(cpu) {
-            if range_start.is_none() {
-                range_start = Some(cpu);
-            }
-        } else if let Some(start) = range_start.take() {
-            push_cpu_range(&mut out, start, cpu - 1);
-        }
-    }
-    if let Some(start) = range_start {
-        push_cpu_range(&mut out, start, nr_cpus - 1);
-    }
-    out
-}
-
-fn push_cpu_range(out: &mut String, start: usize, end: usize) {
-    if !out.is_empty() {
-        out.push(',');
-    }
-    if start == end {
-        let _ = write!(out, "{start}");
-    } else {
-        let _ = write!(out, "{start}-{end}");
-    }
 }
 
 /// Appends one procfs status line.

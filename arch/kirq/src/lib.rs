@@ -127,6 +127,7 @@ pub use runtime::{
         teardown_percpu_nmi, unregister_nmi,
     },
     resend,
+    retirement::{IrqLineRetirementObserver, IrqLineRetirementSubscription},
     state::DYNAMIC_VIRQ_BASE,
 };
 

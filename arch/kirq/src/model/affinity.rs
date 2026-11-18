@@ -13,7 +13,12 @@ use crate::IrqDescError;
 /// lost after a programming failure. It never means all present CPUs.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IrqAffinitySnapshot {
-    /// Last successfully applied policy, including requested CPUs not yet ready.
+    /// Established request policy, including CPUs not yet ready.
+    ///
+    /// The policy may be established by an explicit setter or by the first
+    /// action's default/owner initialization; it does not imply that the
+    /// controller has programmed or confirmed it. `None` means no policy has
+    /// been established.
     pub requested: Option<KCpuMask>,
     /// Confirmed destinations, not a promise that old deliveries have drained.
     pub effective: Option<KCpuMask>,

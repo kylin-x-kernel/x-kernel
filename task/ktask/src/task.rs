@@ -1001,6 +1001,7 @@ impl TaskInner {
     ///
     /// The requested mask belongs to userspace and the bound to cpuset; a
     /// transient stop failure must not overwrite either of them.
+    #[cfg(feature = "smp")]
     #[inline]
     pub(crate) fn restore_effective_cpus(&self, cpumask: KCpuMask) {
         self.affinity.lock().effective = cpumask;

@@ -72,6 +72,48 @@ exists, it may resume service while the request remains pending. This decision
 uses current suppression and confirmed route availability, not
 `effective == None` as an activation-history proxy.
 
+### Initial Policy And Action History
+
+The first successfully published action establishes an otherwise-absent
+`requested` policy. Ordinary `IrqAffinity::Any` uses
+`kcpu_id_map::present_mask()`; fixed `IrqAffinity::Cpu(n)` uses `{n}`. Source-
+managed PerCpu/NMI/MSI/no-flow sources do not receive an ordinary default.
+The value is computed before publication and committed only after action
+publication succeeds; a rejected/configured-failing registration leaves no
+policy or history. Explicitly established requested values are retained.
+
+The four boot entries call `init_boot_cpu_id_map` before primary kernel/IRQ
+initialization. If the map is unexpectedly unavailable, ordinary Any
+registration fails with `IrqDescError::NotReady` before action/history/policy
+publication. No procfs read or user setter initializes it.
+
+`IrqAffinity::Cpu(n)` is range-checked against the compile-time logical CPU
+bound before constructing a mask; an impossible descriptor returns
+`InvalidCpu` without action/history/policy mutation. "Representable" is not the
+same claim as "present".
+
+NMI publication uses the same prepare/commit path as regular/shared actions.
+A source-managed NMI without explicit owner policy remains unknown; an explicit
+fixed owner policy is committed only after the NMI action publishes.
+
+`has_action_history` is set only by successful regular/shared/NMI publication.
+It is not cleared by action removal; it is a lifecycle fact, not a VFS
+visibility flag.
+
+### Line Retirement Subscription
+
+`IrqLineHandle::subscribe_retirement` allocates an independent intrusive slot
+outside the Line lock, then verifies the exact Line is still the current
+directory entry under `IRQ_STATE -> Line`. The slot links without allocation.
+Retirement marks the Line retired, moves the entire list under the Line lock,
+releases KIRQ locks, and then invokes observers. An unlinked subscription stops
+future notification but never waits for an already captured callback. A
+subscription whose Line already retired does not touch intrusive links.
+
+Only a real Line retirement notifies; ordinary `free_irq` action removal does
+not. Current production retirement is x86_64 `free_msix`; callback runs in its
+sleepable task context without KIRQ locks and may enter the procfs namespace.
+
 ## Sparse Line Access And Retained Identity
 
 `runtime/handle.rs` owns the opaque `IrqLineHandle` and the public
@@ -84,10 +126,21 @@ active RCU readers before taking the array lock, and creates no mapping or
 action.
 
 The handle retains the exact Line Arc observed in `DIRECTORY`; the virq is a
-label, not identity or permission. Query validates the directory Arc and the
-Line's retired bit under `IRQ_STATE -> Line`, then copies affinity from the
-already-locked state through `snapshot_locked`; it never calls a second
-Line-locking helper. It is a historical observation, not a mapping lease.
+label, not identity or permission. `is_same_line` compares the underlying Line,
+not the wrapper allocation; `is_current` checks the directory Arc and retired
+bit. `affinity_snapshot` copies the stored policy without a source-capability
+check, while the existing `irq_affinity` remains capability-gated. Neither
+query reads hardware or creates a mapping lease.
+
+`has_action_history` records successful publication and survives action
+removal. It does not imply that an action is currently installed.
+
+`is_user_affinity_source_supported` is a static source/descriptor
+classification, checked under `IRQ_STATE -> Line`: ordinary immediate/deferred
+Any sources are user-routable; fixed, PerCpu/NMI/MSI, no-flow and controllerless
+sources are not. It does not inspect action presence, per-action restrictions or
+temporary routing state. Procfs uses it only when constructing stable inode
+permissions; writes independently re-run the checked setter.
 
 Set uses `with_retained_line`: acquire the expected Line's management mutex,
 take `IRQ_STATE`, verify `descs[virq]` is still the same Arc, take the Line,
