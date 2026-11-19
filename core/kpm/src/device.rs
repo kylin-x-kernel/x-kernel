@@ -21,7 +21,8 @@ use kerrno::{KError, KResult};
 /// callback's partial changes: the coordinator resumes only successful entries.
 /// Resume must restore safe access on both aborted and actual platform entry,
 /// without failure. Both callbacks must return normally without unwinding and
-/// must not reenter PM or wait for frozen tasks. Dependencies must agree with
+/// must not reenter PM or wait for frozen tasks or work on PM-paused queues.
+/// Dependencies must agree with
 /// the supplied ordering. The platform remains responsible for unlisted users
 /// and for restoring shared infrastructure before ordinary IRQs are enabled.
 pub unsafe trait DeviceSuspendOps {

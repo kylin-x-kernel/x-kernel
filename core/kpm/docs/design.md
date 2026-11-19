@@ -186,3 +186,82 @@ ordering, failure at every device position, later failures at every time/entry
 boundary, untouched devices on early rejection, reusable rollback and public
 admission. They assert that devices resume with time/events usable while tasks
 remain frozen and platform exclusion remains held. No live device is suspended.
+
+## Selected workqueue participation
+
+`src/workqueue.rs` adapts explicitly selected `kworkng::NormalQueue` handles to
+`FrozenQueue` ownership. `WorkqueueFreezeSession` owns the policy and acquired
+pause guards for one PM attempt, including its successful prefix on failure.
+`suspend_uniprocessor_with_workqueues` adds a
+`SuspendWorkqueues` policy to the existing task/device/time executor; existing
+entry points use an empty set and retain their API and behavior. No default
+queue registry, worker discovery, BH pause or crosvm protocol is added.
+Guard storage is reserved before platform preparation, outside exclusion locks.
+Each queue still prepares its own bounded timer while MONOTONIC/IRQs advance.
+
+The sequence becomes:
+
+```text
+platform prepare -> system task freeze (queues still run)
+  -> selected queue freeze/join, in supplied order -> ordered device suspend
+  -> existing RTC/time/event/entry/recovery transaction -> reverse device resume
+  -> platform finish -> reverse queue thaw -> task thaw and activation release
+```
+
+Task checkpoints can therefore complete ordinary queue dependencies before
+queue dispatch stops. Every existing worker needed to finish claimed callbacks
+must be explicitly exempted from task freezing. Its callback and occurrence
+cleanup must not depend on frozen tasks or pending work on an earlier paused
+queue. List queue consumers before providers, and keep their shared workers
+runnable. There are no implicit exemptions: a missing checkpoint or worker
+progress causes a bounded failure instead of establishing quiescence.
+Exempt workers can still service unlisted queues; the unsafe platform provider
+must separately exclude those accesses, IRQ/BH producers and physical timers.
+Callbacks, device recovery, RTC reads and platform finish must not wait on held
+work. PM-critical queues remain outside the selection.
+
+Queue failure reports `WorkqueueFreezeError { index, error }`. The failing
+queue's own mechanism rolls back its partial pause; prior successful guards
+remain retained until platform finish, then release in reverse order. Device
+and time stages are skipped. Every later ordinary error retains the complete
+queue set through device recovery and platform finish. Guards are popped before
+Drop, so explicit cleanup is idempotent. Duplicate queue aliases fail Busy at
+the later index without releasing an unrelated owner's pause.
+
+Queue timeout is per queue, not a total suspend deadline. Task and queue
+cancellation handles are separate one-shot notifications: a whole-preparation
+cancel source must notify both. Once a phase returns its guard, later
+cancellation does not thaw it during hardware recovery. This is preparation
+cancellation, not a wakeup-source or late-abort protocol.
+
+Deterministic executor fixtures verify ordering and rollback at every queue,
+device and time boundary. Live private-queue tests use permanent boot-installed
+workers/timers, retain pending work while an unselected queue progresses, and
+exercise Busy/Closed/cancelled preparation, alias rejection and retry. They
+thaw/drain/close fixture resources. No production platform implementation,
+worker safe points, real device transition or physical guest sleep is added.
+
+## Multicore software preparation
+
+`freeze_system_workqueues` is independent of platform sleep. It accepts the same
+explicit task exemptions and selected private queues, closes task activation,
+freezes admitted tasks using the SMP scheduler handshake, then pauses queues.
+`FrozenSystemWorkqueues` holds all credentials on the coordinator; Drop thaws
+queues in reverse order before tasks and deferred activation, then releases
+transaction admission. A queue failure explicitly releases its successful prefix
+before task cleanup, allowing a subsequent attempt. No platform callbacks run.
+
+All CPUs, IRQs and logical clocks remain available. Queue workers and recovery
+infrastructure must be explicitly exempt, and their callbacks must not depend
+on frozen tasks or earlier paused queues. Exemptions are caller policy, not
+inferred from task names or a diagnostic list. This safe guard does not certify
+hardware quiescence and must not authorize device power-off or clock freeze.
+The existing `suspend_uniprocessor*` entry points retain their CPU-count check.
+
+The serial integration fixture captures the authoritative admitted-task registry
+through a test-only ktask adapter to exempt boot infrastructure. It runs real
+pinned tasks and private queues on every present CPU, verifies callback CPU IDs,
+and models device availability with a fixture-owned atomic. Three rounds verify
+pending work and wake retention, deferred activation and recovery before thaw.
+A duplicate-queue failure exercises task/queue rollback and successful retry.
+No real device is powered down and no firmware sleep is entered.

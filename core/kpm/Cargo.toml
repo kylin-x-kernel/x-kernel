@@ -15,6 +15,7 @@ khal.workspace = true
 kiface-time-api.workspace = true
 kspin.workspace = true
 ktask.workspace = true
+kworkng.workspace = true
 ktime.workspace = true
 ktime_types.workspace = true
 kcpu_id_map.workspace = true

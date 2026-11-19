@@ -38,6 +38,9 @@ struct Probe {
     frozen: bool,
     hardware_ready: bool,
     injected: u64,
+    queue_count: usize,
+    frozen_queues: usize,
+    queue_failure: Option<WorkqueueFreezeError>,
 }
 impl Probe {
     fn new(fault: Fault) -> Rc<RefCell<Self>> {
@@ -53,6 +56,9 @@ impl Probe {
             frozen: false,
             hardware_ready: true,
             injected: 0,
+            queue_count: 0,
+            frozen_queues: 0,
+            queue_failure: None,
         }))
     }
 }
@@ -66,6 +72,7 @@ impl Drop for TaskGuard {
         let mut p = self.0.borrow_mut();
         core::assert!(!p.prepared && p.irqs && !p.accounting && !p.paused && !p.frozen);
         core::assert!(p.tasks_frozen);
+        core::assert_eq!(p.frozen_queues, 0);
         p.tasks_frozen = false;
         p.log.push("tasks-thaw");
     }
@@ -130,6 +137,31 @@ impl SuspendOps for Ops {
     type Critical = Critical;
     type Events = ();
     type Tasks = TaskGuard;
+
+    fn freeze_workqueues(&mut self) -> Result<(), WorkqueueFreezeError> {
+        let mut p = self.0.borrow_mut();
+        core::assert!(p.tasks_frozen && p.prepared && p.irqs && !p.accounting);
+        for index in 0..p.queue_count {
+            p.log
+                .push(["queue0-freeze", "queue1-freeze", "queue2-freeze"][index]);
+            if let Some(error) = p.queue_failure.filter(|error| error.index == index) {
+                return Err(error);
+            }
+            p.frozen_queues += 1;
+        }
+        Ok(())
+    }
+
+    fn thaw_workqueues(&mut self) {
+        let mut p = self.0.borrow_mut();
+        core::assert!(!p.prepared && p.irqs && !p.frozen && !p.paused && !p.accounting);
+        while p.frozen_queues != 0 {
+            p.frozen_queues -= 1;
+            let index = p.frozen_queues;
+            p.log
+                .push(["queue0-thaw", "queue1-thaw", "queue2-thaw"][index]);
+        }
+    }
 
     fn freeze_tasks(&mut self) -> Result<TaskGuard, FreezeError> {
         let mut p = self.0.borrow_mut();
@@ -545,6 +577,7 @@ unsafe impl DeviceSuspendOps for DeviceProbe {
     fn suspend(&mut self) -> KResult<()> {
         let mut p = self.probe.borrow_mut();
         core::assert!(p.tasks_frozen && p.prepared && p.irqs);
+        core::assert_eq!(p.frozen_queues, p.queue_count);
         core::assert!(!p.frozen && !p.paused && !p.accounting && !self.is_suspended);
         p.log
             .push(["device0-suspend", "device1-suspend", "device2-suspend"][self.index]);
@@ -558,6 +591,7 @@ unsafe impl DeviceSuspendOps for DeviceProbe {
     fn resume(&mut self) {
         let mut p = self.probe.borrow_mut();
         core::assert!(p.tasks_frozen && p.prepared && p.irqs && p.hardware_ready);
+        core::assert_eq!(p.frozen_queues, p.queue_count);
         core::assert!(!p.frozen && !p.paused && !p.accounting && self.is_suspended);
         p.log
             .push(["device0-resume", "device1-resume", "device2-resume"][self.index]);
@@ -779,4 +813,202 @@ fn public_device_entry_rejects_before_device_or_rtc_access() {
     }
     assert!(probe.borrow().log.is_empty());
     assert_eq!(reads.get(), 0);
+}
+
+fn queues_attempt(
+    fault: Fault,
+    queue_failure: Option<WorkqueueFreezeError>,
+    device_failure: Option<usize>,
+) -> (Result<TimeSpan, SuspendError>, Rc<RefCell<Probe>>) {
+    let probe = Probe::new(fault);
+    probe.borrow_mut().queue_count = 3;
+    probe.borrow_mut().queue_failure = queue_failure;
+    let mut device = DeviceProbe {
+        index: 0,
+        probe: probe.clone(),
+        fail_at: Rc::new(core::cell::Cell::new(device_failure)),
+        is_suspended: false,
+    };
+    let result = run(
+        &mut Ops(probe.clone()),
+        &mut Source(probe.clone()),
+        &mut DeviceSet::new(&mut [&mut device]),
+    );
+    let p = probe.borrow();
+    core::assert!(!p.prepared && !p.tasks_frozen && p.frozen_queues == 0);
+    core::assert!(p.irqs && !p.frozen && !p.paused && !p.accounting);
+    core::assert!(!device.is_suspended);
+    drop(p);
+    (result, probe)
+}
+
+#[def_test]
+fn queues_pause_after_tasks_and_thaw_after_devices_and_platform_before_tasks() {
+    let (result, probe) = queues_attempt(Fault::None, None, None);
+    assert_eq!(result, Ok(TimeSpan::from_secs(7)));
+    let p = probe.borrow();
+    assert_eq!(
+        &p.log[..6],
+        &[
+            "prepare",
+            "tasks-freeze",
+            "queue0-freeze",
+            "queue1-freeze",
+            "queue2-freeze",
+            "device0-suspend",
+        ]
+    );
+    assert_eq!(
+        &p.log[p.log.len() - 6..],
+        &[
+            "device0-resume",
+            "finish",
+            "queue2-thaw",
+            "queue1-thaw",
+            "queue0-thaw",
+            "tasks-thaw",
+        ]
+    );
+}
+
+#[def_test]
+fn queue_failure_unwinds_only_successful_prefix_without_device_or_time_access() {
+    for error in [
+        kworkng::QueueFreezeError::TimedOut,
+        kworkng::QueueFreezeError::Cancelled,
+        kworkng::QueueFreezeError::Busy,
+        kworkng::QueueFreezeError::Closed,
+    ] {
+        for index in 0..3 {
+            let failure = WorkqueueFreezeError { index, error };
+            let (result, probe) = queues_attempt(Fault::None, Some(failure), None);
+            assert_eq!(result, Err(SuspendError::WorkqueueFreeze(failure)));
+            let mut expected = vec!["prepare", "tasks-freeze"];
+            expected
+                .extend_from_slice(&["queue0-freeze", "queue1-freeze", "queue2-freeze"][..=index]);
+            expected.push("finish");
+            expected.extend(
+                ["queue0-thaw", "queue1-thaw", "queue2-thaw"][..index]
+                    .iter()
+                    .rev()
+                    .copied(),
+            );
+            expected.push("tasks-thaw");
+            assert_eq!(probe.borrow().log, expected);
+        }
+    }
+}
+
+#[def_test]
+fn queue_guards_cover_every_device_time_and_entry_failure() {
+    for fault in [
+        Fault::None,
+        Fault::Begin,
+        Fault::Pause,
+        Fault::Freeze,
+        Fault::Mark,
+        Fault::Enter,
+        Fault::Settle,
+        Fault::EnterAndSettle,
+    ] {
+        for device_failure in [None, Some(0)] {
+            let (_, probe) = queues_attempt(fault, None, device_failure);
+            let p = probe.borrow();
+            assert_eq!(
+                &p.log[p.log.len() - 5..],
+                &[
+                    "finish",
+                    "queue2-thaw",
+                    "queue1-thaw",
+                    "queue0-thaw",
+                    "tasks-thaw",
+                ]
+            );
+            for label in ["queue0-thaw", "queue1-thaw", "queue2-thaw"] {
+                assert_eq!(p.log.iter().filter(|&&s| s == label).count(), 1);
+            }
+        }
+    }
+}
+
+#[def_test]
+fn platform_and_task_rejection_never_attempt_queue_freeze() {
+    for fault in [Fault::Prepare, Fault::Tasks] {
+        let (_, probe) = queues_attempt(fault, None, None);
+        assert!(!probe.borrow().log.iter().any(|s| s.starts_with("queue")));
+    }
+}
+
+#[def_test]
+fn queue_rollback_and_success_can_be_repeated_without_stale_ownership() {
+    let probe = Probe::new(Fault::None);
+    probe.borrow_mut().queue_count = 3;
+    let mut ops = Ops(probe.clone());
+    for failure in [
+        Some(WorkqueueFreezeError {
+            index: 1,
+            error: kworkng::QueueFreezeError::Cancelled,
+        }),
+        None,
+        None,
+    ] {
+        probe.borrow_mut().queue_failure = failure;
+        let result = run(
+            &mut ops,
+            &mut Source(probe.clone()),
+            &mut DeviceSet::new(&mut []),
+        );
+        assert_eq!(result.is_err(), failure.is_some());
+        assert_eq!(probe.borrow().frozen_queues, 0);
+        assert!(!probe.borrow().tasks_frozen);
+    }
+}
+
+#[def_test(serial)]
+fn public_workqueue_entry_rejects_without_pausing_queues_or_reading_rtc() {
+    let mut cpus = Vec::new();
+    kcpu_id_map::for_each_present_logical_cpu(|_, cpu, _| cpus.push(cpu));
+    let queue = kworkng::NormalQueue::new(
+        "pm-public-admission",
+        kworkng::QueueConfig::new(&cpus, kworkng::CpuPolicy::CurrentCpu, 1).unwrap(),
+    )
+    .unwrap();
+    let reads = Rc::new(core::cell::Cell::new(0));
+    let mut source = RtcSleepAccounting::new(
+        UnreadClock(reads.clone()),
+        TimeSpan::from_secs(60),
+        TimeSpan::from_millis(10),
+    )
+    .unwrap();
+    let mut platform = RefusingPlatform(core::cell::Cell::new(0));
+    let task_cancellation = FreezeCancellation::new();
+    let queue_cancellation = kworkng::QueueFreezeCancellation::new();
+    let result = suspend_uniprocessor_with_workqueues(
+        &mut platform,
+        &mut source,
+        SuspendTasks {
+            exempt: &[],
+            timeout: TimeSpan::ZERO,
+            cancellation: &task_cancellation,
+        },
+        SuspendWorkqueues {
+            queues: core::slice::from_ref(&queue),
+            timeout: TimeSpan::ZERO,
+            cancellation: &queue_cancellation,
+        },
+        &mut [],
+    );
+    if kcpu_id_map::nr_cpus() == 1 {
+        assert_eq!(
+            result,
+            Err(SuspendError::Prepare(KError::OperationNotSupported))
+        );
+        assert_eq!(platform.0.get(), 1);
+    } else {
+        assert_eq!(result, Err(SuspendError::MultipleCpus));
+        assert_eq!(platform.0.get(), 0);
+    }
+    assert_eq!(reads.get(), 0);
+    drop(queue.freeze(TimeSpan::ZERO, &queue_cancellation).unwrap());
+    queue.close_and_drain().unwrap();
 }

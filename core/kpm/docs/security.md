@@ -113,3 +113,51 @@ mutate only private fixtures and verify callback order, exact-once cleanup,
 retry, execution-phase predicates and no callbacks before admission/freezing.
 They do not establish DMA draining, interrupt routing, actual hardware recovery,
 SMP safety or a complete driver PM implementation.
+
+## Selected queue freeze boundary
+
+The new workqueue entry accepts trusted kernel-owned `NormalQueue` handles;
+there is no userspace pointer, MMIO, DMA, firmware or network parser here.
+`kworkng` owns callback/occurrence quiescence and timer cancellation; `kpm`
+retains its safe `FrozenQueue` credentials through device/platform recovery.
+No new unsafe operation is introduced by the adapter.
+
+Task freezing precedes queue freezing. This relies on explicitly exempt existing
+workers and callback dependencies that can finish without frozen tasks. An
+unlisted queue on a shared exempt worker is still executable. The unsafe
+platform contract must audit/exclude its hardware and timer accesses separately;
+selected queues do not certify full worker, device or IRQ quiescence. The task
+admission gate may defer newly created workers, so existing worker capacity must
+be sufficient for the bounded preparation. No CPU hotplug or SMP support is added.
+
+| Threat / failure | Control and residual limitation |
+| --- | --- |
+| Queue callback runs against a suspended device | Selected queue guards survive time/event rearm, reverse device recovery and platform finish; callbacks resume before ordinary tasks only after resource recovery. Unlisted queues and IRQ/BH paths remain provider obligations. |
+| Claimed callback waits for a frozen task or earlier paused queue | Require audited worker exemptions and dependency ordering; advancing-MONOTONIC timeout/cancellation aborts before device suspension. This does not guarantee arbitrary callback progress or diagnose all dependency cycles. |
+| PM/RTC/device resume waits for selected pending work | Exclude PM-critical queues from selection and forbid these waits in the integration contract. Recovery itself is not timed out and must remain infallible. |
+| A later queue fails after earlier queues paused | Preserve successful guards through platform finish, then pop in reverse order before task thaw. Failing queue owns its own partial rollback. No device/time entry occurs. |
+| Duplicate aliases or external pause ownership | Underlying queue admission returns Busy with the failing index; only guards actually acquired by this attempt are released. |
+| Cancellation releases callbacks during hardware recovery | Successful guards ignore later cancellation; both phase handles must be signalled for a whole-preparation cancel. This does not provide late wake/abort semantics. |
+
+Audit field/cleanup ordering whenever extending the executor: devices resume
+before platform finish; queues thaw after finish with usable time/events and
+before the system task guard drops. Callbacks and platform/device methods must
+not unwind. As with existing device participation, panic recovery and forgotten
+credentials are not supported cancellation mechanisms.
+
+## Multicore preparation guard
+
+`freeze_system_workqueues` accepts trusted kernel references and performs no
+platform transition. It retains global transaction admission and the authoritative
+system task-admission gate until queue and task cleanup finish. Queue failure
+releases only this attempt's acquired prefix before task thaw; aliases cannot
+steal another owner's pause. Cancellation after success cannot release either
+kind of guard. Callers must recover their own resources before dropping it.
+
+The guard permits scheduler infrastructure, exempt workers, idle and interrupts
+to continue. It is not a DMA, IRQ, CPU or device barrier. In particular, SMP
+support here does not relax the UP-only platform-suspend validation. Using this
+guard as evidence that shared clocks or hardware may be stopped violates its
+contract. Serial integration fixtures use a test-only authoritative task snapshot
+for explicit infrastructure exemptions; no production exemption discovery API
+or name-based rule is introduced.

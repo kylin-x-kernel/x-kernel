@@ -10,7 +10,8 @@
 //! The coordinator freezes all admitted tasks, deferring new scheduler activation;
 //! a platform provider supplies device/NMI exclusion and firmware entry.
 //! It orders RTC accounting, monotonic freeze and
-//! local clock events and optional ordered device callbacks, and unwinds completed
+//! local clock events, optional private queue freezes and ordered device callbacks,
+//! and unwinds completed
 //! preparation on ordinary errors.
 //! SMP rendezvous and concrete platform implementations are separate work.
 
@@ -19,6 +20,7 @@
 extern crate alloc;
 
 mod device;
+mod workqueue;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -34,6 +36,10 @@ use ktask::{
 };
 use ktime::{RtcSleepAccounting, RtcSleepError, RtcSleepSession};
 use ktime_types::TimeSpan;
+use workqueue::WorkqueueFreezeSession;
+pub use workqueue::{
+    FrozenSystemWorkqueues, SuspendWorkqueues, WorkqueueFreezeError, freeze_system_workqueues,
+};
 
 /// Platform-owned exclusion and hardware recovery around one PM transaction.
 ///
@@ -45,7 +51,9 @@ use ktime_types::TimeSpan;
 /// admitted task after preparation. SuspendTasks may exempt only explicitly
 /// identified kernel infrastructure needed for PM progress; the provider must
 /// keep those tasks' accesses safe. Kernel workers must provide safe checkpoints
-/// or have their producers/work drained before being exempted. Preparation must exclude timer producers,
+/// or be explicitly exempted with independently safe accesses and progress.
+/// Selected queues join their exempt workers' claimed callbacks before device
+/// suspend; unlisted work still requires provider exclusion. Preparation must exclude timer producers,
 /// idle/fixup dispatch and NMI/watchdog clock reads until finish, while allowing
 /// the PM task and resources needed for RTC reads to progress. Counter, event
 /// and RTC access must remain valid until enter. No CPU may be brought online.
@@ -63,6 +71,9 @@ use ktime_types::TimeSpan;
 /// With ordered device participants, preparation must also exclude exempt
 /// accesses; it must not duplicate their suspend/resume callbacks. Devices are
 /// resumed before finish, while platform exclusions and frozen tasks remain held.
+/// Selected queues stay paused through finish. Neither device recovery nor
+/// finish may wait for their pending work or frozen tasks. Before finish returns,
+/// resources needed by resumed queue callbacks must be safe to access.
 /// Prepare and finish must preserve the enabled local IRQ state. These
 /// obligations include any device mappings needed by the existing HAL.
 pub unsafe trait PlatformSuspendOps {
@@ -113,6 +124,8 @@ pub enum SuspendError {
     Prepare(KError),
     /// Cooperative task freezing failed; requests were cancelled and preparation released.
     TaskFreeze(FreezeError),
+    /// A selected workqueue could not quiesce; completed pauses were released.
+    WorkqueueFreeze(WorkqueueFreezeError),
     /// Initial RTC accounting failed; platform preparation was released.
     RtcPrepare(RtcSleepError),
     /// Device preparation failed; successful predecessors were resumed in reverse order.
@@ -246,7 +259,61 @@ pub fn suspend_uniprocessor_with_devices<P: PlatformSuspendOps, C: PersistentClo
     validate_context(ktask::is_sleepable_context(), kcpu_id_map::nr_cpus)?;
     let _admission = Admission::acquire(&TRANSACTION_ACTIVE)?;
     run(
-        &mut SystemOps { platform, tasks },
+        &mut SystemOps {
+            platform,
+            tasks,
+            workqueues: WorkqueueFreezeSession::empty(),
+        },
+        source,
+        &mut DeviceSet::new(devices),
+    )
+}
+
+/// Coordinates selected private normal queues, tasks and ordered devices.
+///
+/// Tasks freeze first while queues can still help them reach checkpoints. Then
+/// queues pause in supplied order and join claimed callbacks before devices
+/// suspend. Devices recover and platform finish completes before queues thaw
+/// in reverse order, followed by task thaw and deferred task activation.
+///
+/// Every worker needed by a selected queue must remain runnable through an
+/// explicit `tasks.exempt` entry. Its already claimed callbacks and cleanup
+/// must not wait for frozen tasks or work held by an earlier paused queue.
+/// Supply dependent queues before providers. The platform must separately
+/// quiesce unlisted queues, IRQ/BH work and exempt workers' other accesses.
+/// There is no worker discovery or automatic exemption. PM/RTC/device recovery
+/// must not need work on these paused queues, including in platform finish.
+/// All requirements of [`suspend_uniprocessor_with_devices`] still apply.
+///
+/// The task and queue cancellation handles govern their respective preparation
+/// phases. A system cancellation source must signal both handles; cancellation
+/// after a phase succeeds cannot release its guard during hardware recovery.
+/// Empty queue selection retains the existing device entry's behavior.
+///
+/// # Errors
+/// Returns [`SuspendError::WorkqueueFreeze`] with the failing list index after
+/// platform finish and reverse release of successful pauses. No device, RTC
+/// or clock transition is attempted on that branch. Other errors follow
+/// [`suspend_uniprocessor_with_devices`], retaining queue pauses through recovery.
+///
+/// # Panics
+/// Propagates fatal allocation and provider invariant failures. Platform and
+/// device callbacks must not unwind, as with the existing entry points.
+pub fn suspend_uniprocessor_with_workqueues<P: PlatformSuspendOps, C: PersistentClock>(
+    platform: &mut P,
+    source: &mut RtcSleepAccounting<C>,
+    tasks: SuspendTasks<'_>,
+    workqueues: SuspendWorkqueues<'_>,
+    devices: &mut [&mut dyn DeviceSuspendOps],
+) -> Result<TimeSpan, SuspendError> {
+    validate_context(ktask::is_sleepable_context(), kcpu_id_map::nr_cpus)?;
+    let _admission = Admission::acquire(&TRANSACTION_ACTIVE)?;
+    run(
+        &mut SystemOps {
+            platform,
+            tasks,
+            workqueues: WorkqueueFreezeSession::new(workqueues),
+        },
         source,
         &mut DeviceSet::new(devices),
     )
@@ -291,6 +358,8 @@ trait SuspendOps {
     type Critical;
     type Tasks;
     fn freeze_tasks(&mut self) -> Result<Self::Tasks, FreezeError>;
+    fn freeze_workqueues(&mut self) -> Result<(), WorkqueueFreezeError>;
+    fn thaw_workqueues(&mut self);
     fn prepare(&mut self) -> KResult<()>;
     fn finish(&mut self);
     fn mask_irqs(&mut self) -> Self::Critical;
@@ -317,6 +386,10 @@ fn run<O: SuspendOps, S: SleepSource>(
             return Err(SuspendError::TaskFreeze(error));
         }
     };
+    if let Err(error) = ops.freeze_workqueues() {
+        finish(ops, devices);
+        return Err(SuspendError::WorkqueueFreeze(error));
+    }
     if let Err(error) = devices.suspend() {
         finish(ops, devices);
         return Err(SuspendError::DeviceSuspend(error));
@@ -381,17 +454,27 @@ fn run<O: SuspendOps, S: SleepSource>(
 fn finish<O: SuspendOps>(ops: &mut O, devices: &mut DeviceSet<'_, '_>) {
     devices.resume();
     ops.finish();
+    ops.thaw_workqueues();
 }
 
 struct SystemOps<'a, P> {
     platform: &'a mut P,
     tasks: SuspendTasks<'a>,
+    workqueues: WorkqueueFreezeSession<'a>,
 }
 impl<P: PlatformSuspendOps> SuspendOps for SystemOps<'_, P> {
     type Clock = MonotonicSuspendToken;
     type Critical = NoPreemptIrqSave;
     type Events = LocalTimerSuspend;
     type Tasks = SystemFrozenTasks;
+
+    fn freeze_workqueues(&mut self) -> Result<(), WorkqueueFreezeError> {
+        self.workqueues.freeze()
+    }
+
+    fn thaw_workqueues(&mut self) {
+        self.workqueues.thaw();
+    }
 
     fn freeze_tasks(&mut self) -> Result<Self::Tasks, FreezeError> {
         ktask::freezer::freeze_system_tasks(

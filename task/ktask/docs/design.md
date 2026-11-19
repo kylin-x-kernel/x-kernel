@@ -1572,7 +1572,7 @@ trigger calls `dump_sched_stats()` for allocation-free base output.
 
 ## Scheduler trace state
 
-The optional switch callback receives the outgoing task state from the leave decision (`Running=1`, `Ready=2`, `Blocked=3`, `Exited=4`, `BlockedInterruptible=5`, `BlockedKillable=6`). Consumers can distinguish runnable delay from blocking when combined with wakeup events and embedded event timestamps. The leave path passes this state explicitly through reschedule and switch; a concurrent waker changing a sleeping state to Ready cannot overwrite the recorded block decision. The private local-helper switch also accepts an explicit leave-decision state. Its sole caller, `migrate_current`, transitions the outgoing task to Ready and passes Ready at that call site; the helper does not hardcode a migration-specific state. Callbacks run with interrupts disabled and must not block or schedule.
+The optional switch callback receives the outgoing task state from the leave decision (`Running=1`, `Ready=2`, `Blocked=3`, `Exited=4`, `BlockedInterruptible=5`, `BlockedKillable=6`, `Frozen=7`). Consumers can distinguish runnable delay from blocking when combined with wakeup events and embedded event timestamps. The leave path passes this state explicitly through reschedule and switch; a concurrent waker changing a sleeping state to Ready cannot overwrite the recorded block decision. The private local-helper switch also accepts an explicit leave-decision state. Its sole caller, `migrate_current`, transitions the outgoing task to Ready and passes Ready at that call site; the helper does not hardcode a migration-specific state. Callbacks run with interrupts disabled and must not block or schedule.
 
 ### Adjustable-clock waits
 
