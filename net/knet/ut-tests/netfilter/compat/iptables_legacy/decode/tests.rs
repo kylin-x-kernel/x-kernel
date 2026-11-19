@@ -229,14 +229,23 @@ fn transport_extensions_decode_native_values_and_keep_their_order() {
         condition,
         IcmpMatch::new(Some(3), 1, 4).unwrap().with_inversion(true)
     );
-    icmp[144..147].copy_from_slice(&[255, 9, 1]);
-    let parsed = DecodedEntry::decode(&icmp).unwrap();
-    assert_eq!(
-        parsed.extensions,
-        vec![ExtensionMatch::Icmp(
-            IcmpMatch::new(None, 0, 255).unwrap().with_inversion(true)
-        )]
-    );
+    for code in [[0, 255], [255, 255], [9, 1]] {
+        for is_inverted in [false, true] {
+            icmp[144..148].copy_from_slice(&[255, code[0], code[1], u8::from(is_inverted)]);
+            let parsed = DecodedEntry::decode(&icmp).unwrap();
+            assert_eq!(
+                parsed.extensions,
+                vec![ExtensionMatch::Icmp(
+                    IcmpMatch::new(None, code[0], code[1])
+                        .unwrap()
+                        .with_inversion(is_inverted)
+                )]
+            );
+            let mut encoded = vec![0; icmp.len()];
+            encode::encode_entry(&mut encoded, &parsed.base, &parsed.extensions, -2).unwrap();
+            assert_eq!(encoded, icmp);
+        }
+    }
 
     let extensions = [
         ExtensionMatch::Tcp(

@@ -329,11 +329,7 @@ impl TryFrom<&IcmpMatch> for IptIcmp {
     type Error = EncodeError;
 
     fn try_from(icmp: &IcmpMatch) -> Result<Self, Self::Error> {
-        // Type 255 skips both type and code checks.
-        if icmp.icmp_type() == Some(u8::MAX)
-            || (icmp.icmp_type().is_none()
-                && (icmp.code_start() != 0 || icmp.code_end() != u8::MAX))
-        {
+        if icmp.icmp_type() == Some(u8::MAX) {
             return Err(EncodeError::UnsupportedMatch);
         }
         Ok(Self {

@@ -162,10 +162,11 @@ Filter publication never waits for Router while holding the configuration lock.
 Entry decoding bounds every record by `next_offset`, keeps extensions before the
 target, and checks their aligned sizes before slicing. Each decode allocates at
 most 16 extension values and fixed-width names. Unsupported conditions are
-rejected rather than weakened; masked-out interface bytes are ignored, and ICMP
-type 255 normalizes its ignored code range. The owned result contains no user
-pointers and cannot publish rules: graph checks and Rule construction belong to
-table reconstruction. Failures discard partial output without touching live state.
+rejected rather than weakened; masked-out interface bytes are ignored. ICMP
+wildcard types ignore code during evaluation but preserve it for export.
+The owned result contains no user pointers and cannot publish rules: graph checks
+and Rule construction belong to table reconstruction. Failures discard partial
+output without touching live state.
 
 Table decoding bounds the declared record count and total bytes before
 allocating decoded entries. Hook, policy, and jump offsets must identify entry

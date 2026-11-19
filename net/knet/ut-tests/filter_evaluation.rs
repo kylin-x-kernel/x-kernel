@@ -311,6 +311,24 @@ fn udp_and_icmp_apply_port_and_type_code_conditions() {
         );
     }
     for is_inverted in [false, true] {
+        for code in [[0, 255], [255, 255], [9, 1]] {
+            let icmp = transport_rule(ExtensionMatch::Icmp(
+                IcmpMatch::new(None, code[0], code[1])
+                    .unwrap()
+                    .with_inversion(is_inverted),
+            ));
+            let bytes = packet(PROTOCOL_ICMP, &[8, 0, 0, 0, 0, 0, 0, 0]);
+            let buffer = validated_packet(&bytes);
+            let packet = MatchContext::new(&buffer, "", "").unwrap();
+            assert_eq!(
+                icmp.evaluate_match(&packet),
+                if is_inverted {
+                    MatchOutcome::NotMatched
+                } else {
+                    MatchOutcome::Matched
+                }
+            );
+        }
         let icmp = transport_rule(ExtensionMatch::Icmp(
             IcmpMatch::new(Some(13), 0, 1)
                 .unwrap()

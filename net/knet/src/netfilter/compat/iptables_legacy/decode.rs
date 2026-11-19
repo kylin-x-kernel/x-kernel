@@ -537,12 +537,8 @@ impl TryFrom<&IptIcmp> for IcmpMatch {
         if icmp.inverse_flags & !IPT_ICMP_INV != 0 {
             return Err(DecodeError::Unsupported);
         }
-        let (icmp_type, code) = if icmp.icmp_type == u8::MAX {
-            (None, [0, u8::MAX])
-        } else {
-            (Some(icmp.icmp_type), icmp.code)
-        };
-        Self::new(icmp_type, code[0], code[1])
+        let icmp_type = (icmp.icmp_type != u8::MAX).then_some(icmp.icmp_type);
+        Self::new(icmp_type, icmp.code[0], icmp.code[1])
             .map(|value| value.with_inversion(icmp.inverse_flags & IPT_ICMP_INV != 0))
             .ok_or(DecodeError::InvalidValue)
     }

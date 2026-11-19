@@ -151,7 +151,8 @@ fn encoding_rejects_conditions_without_equivalent_legacy_semantics() {
             IcmpMatch::new(None, 0, 255).unwrap().with_inversion(true),
             true,
         ),
-        (IcmpMatch::new(None, 1, 4).unwrap(), false),
+        (IcmpMatch::new(None, 255, 255).unwrap(), true),
+        (IcmpMatch::new(None, 1, 4).unwrap(), true),
         (IcmpMatch::new(Some(255), 0, 255).unwrap(), false),
     ] {
         let result = encode_entry(&mut output, &base, &[ExtensionMatch::Icmp(icmp)], -2);
@@ -159,7 +160,7 @@ fn encoding_rejects_conditions_without_equivalent_legacy_semantics() {
             assert_eq!(result, Ok(()));
             assert_eq!(
                 &output[144..148],
-                &[255, 0, 255, u8::from(icmp.is_inverted())]
+                &[255, icmp.code_start(), icmp.code_end(), u8::from(icmp.is_inverted())]
             );
         } else {
             assert_eq!(result, Err(EncodeError::UnsupportedMatch));

@@ -305,6 +305,9 @@ impl UdpMatch {
 }
 
 /// ICMP type and inclusive code range with joint inversion.
+///
+/// An absent type matches any type and code. The ignored code range is retained
+/// so rules can be exported with their original match data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct IcmpMatch {
     icmp_type: Option<u8>,
@@ -315,7 +318,7 @@ pub(crate) struct IcmpMatch {
 
 impl IcmpMatch {
     pub(crate) const fn new(icmp_type: Option<u8>, code_start: u8, code_end: u8) -> Option<Self> {
-        if code_start <= code_end {
+        if icmp_type.is_none() || code_start <= code_end {
             Some(Self {
                 icmp_type,
                 code_start,
@@ -359,12 +362,11 @@ impl IcmpMatch {
             return MatchOutcome::HotDrop;
         };
         MatchOutcome::from(
-            (self
-                .icmp_type()
-                .is_none_or(|expected| expected == header[0])
-                && header[1] >= self.code_start()
-                && header[1] <= self.code_end())
-                ^ self.is_inverted(),
+            self.icmp_type().is_none_or(|expected| {
+                expected == header[0]
+                    && header[1] >= self.code_start()
+                    && header[1] <= self.code_end()
+            }) ^ self.is_inverted(),
         )
     }
 }
