@@ -527,6 +527,10 @@ pub fn on_timer_fire() {
     } else {
         current_run_queue::<NoOp>().account_current_runtime(now_ns);
     }
+    #[cfg(feature = "smp")]
+    if periodic_due {
+        crate::run_queue::fair_balance::on_periodic_tick(now_ns);
+    }
     // Timer callbacks and their wakeups may register/cancel timers or
     // refresh scheduler slots. Defer their hardware writes until the final
     // arbitration below, after all wakeups have run.
@@ -557,10 +561,14 @@ pub fn on_timer_fire() {
 
 /// Called from a remote reschedule IPI: request preemption.
 ///
-/// Only set `need_resched`. The IRQ-tail probe arms the hrtick.
+/// Set `need_resched` and forward any balance request to Sched softirq.
+///
+/// Runs in the fixed reschedule IPI with IRQs disabled and no RQ lock held.
+/// No accounting or RQ operation belongs here; the IRQ-tail probe arms hrtick.
 #[cfg(feature = "smp")]
 pub(crate) fn on_remote_resched_ipi() {
     current().set_preempt_pending(true);
+    crate::run_queue::fair_balance::on_reschedule_ipi();
 }
 
 #[cfg(feature = "ipi")]

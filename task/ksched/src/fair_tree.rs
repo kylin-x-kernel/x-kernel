@@ -479,6 +479,16 @@ impl<A: FairTreeAdapter> FairTree<A> {
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Value<A>> {
         self.tree.iter()
     }
+
+    /// Resume a bounded balance scan without walking its previous prefix.
+    pub(crate) fn iter_after(&self, key: Option<DeadlineKey>) -> impl Iterator<Item = &Value<A>> {
+        use intrusive_collections::Bound;
+
+        self.tree.range(
+            key.as_ref().map_or(Bound::Unbounded, Bound::Excluded),
+            Bound::<&DeadlineKey>::Unbounded,
+        )
+    }
 }
 
 impl<A: FairTreeAdapter> Drop for FairTree<A> {

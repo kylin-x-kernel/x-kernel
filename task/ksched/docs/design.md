@@ -51,12 +51,34 @@ only the weighted contribution. A blocked task waking on another CPU requires
 
 `fair_pelt` reports queue history independently of higher-class eligibility;
 `task_pelt` refreshes an entity to the last queue clock sample. Callers needing
-fresh queue data first use `update(Account)` under the same RQ lock. There
-are no additional atomic snapshots, timer events, allocations or task lists.
-PELT does not yet drive placement, balancing or preemption. CPU/frequency
+fresh queue data first use `update(Account)` under the same RQ lock. ksched
+adds no atomic snapshots, timer events, allocations or task lists. ktask uses
+this history for periodic Fair balancing; spawn/wake placement and local
+preemption keep their existing policies. CPU/frequency
 scaling is neutral and wall time is not corrected for IRQ/steal time. Task
 groups, RT/DL/IRQ aggregates, hardware pressure and UTIL_EST are outside this
 implementation. The regression cases are in `ut-tests/pelt.rs`.
+
+`fair_balance_stats` exposes queue history, Fair runnable/queued counts
+(including parked waiters), and whether the entire CPU is idle. An empty Fair
+queue on an RT/Deadline-running CPU is not idle. `steal_fair` refreshes this
+source snapshot under its RQ lock and visits only Fair waiters, unlike the
+RT-first idle-pull `steal`. Higher classes never veto Fair migration: even a
+sole Fair waiter behind an RT runner can migrate, and an RT-running queue may
+accept Fair migrate-in without changing its runner.
+Each call examines at most the supplied number of tree entries, skips parked
+entities, refreshes candidate PELT and calls the host predicate with both
+histories. The host validates task state, `!on_cpu`, affinity and migration
+benefit; it must not reenter the scheduler or acquire another RQ lock.
+
+FairClass remembers the last examined deadline key. The next balance scan
+starts after that key using the tree's O(log N) range lookup; an exhausted
+suffix resets the cursor for the following pass. Pinned prefixes therefore
+cannot permanently hide later candidates. No additional task owner or tree
+index is retained. Successful removal uses the existing lag-saving dequeue
+and PELT detach. The host releases the source lock before destination
+`MigrateIn` publication, which restores lag and attaches the history at the
+destination decay phase. Deterministic cases live in `ut-tests/fair_balance.rs`.
 
 ### Reference ownership and destruction
 

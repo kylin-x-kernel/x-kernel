@@ -596,6 +596,8 @@ impl RunQueue {
             nr_home: AtomicUsize::new(0),
             #[cfg(feature = "smp")]
             rt_preempt_rank: AtomicU8::new(0),
+            #[cfg(feature = "smp")]
+            balance: super::fair_balance::BalanceState::new(),
         }
     }
 
@@ -643,6 +645,7 @@ impl RunQueue {
             if publish_rank {
                 self.rt_preempt_rank
                     .store(sched.rt_preempt_rank(), Ordering::Relaxed);
+                self.balance.publish(sched.fair_balance_stats());
             }
         }
         #[cfg(not(feature = "smp"))]

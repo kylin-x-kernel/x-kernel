@@ -11,6 +11,36 @@ This adds no raw pointer, allocation, retained task reference or timer callback.
 The old-owner query applies only to cross-CPU Wake publication; it does not
 require a prepared new task to have a registered source queue.
 
+## Periodic Fair balance safety
+
+Remote load/count atomics in `run_queue/fair_balance.rs` are advisory selection
+hints, not task-lifetime, affinity, class or on-CPU authorization. The source
+RQ refreshes PELT and checks Ready, `!on_cpu`, effective affinity and migration
+benefit while its scheduler lock prevents the task from being picked. Higher
+classes do not veto removal of a Fair waiter; only the Fair tree is visited.
+An RT-running CPU with an empty Fair queue is not classified as idle.
+
+The source lock is released before destination publication takes its RQ and
+entity guards. Destination affinity rejection preserves the owner and routes
+it through existing migrate-in retry; the task must never be dropped or left
+detached. Neither the balance softirq nor its callbacks sleep or allocate.
+Source scan work is bounded by two RQs and 32 candidates per RQ, with rotating
+CPU batches and tree cursors. The existing affinity retry remains unbounded
+under a continuously changing cpumask. No new unsafe block or global lock is
+introduced. All `SpinRaw` RQ holds still require IRQ/preemption exclusion,
+including softirq actions, whose enclosing runner enables IRQs.
+
+The per-CPU kick flag is release-published before a fixed reschedule IPI and
+acquire-consumed on the target. It carries no task pointer or allocated
+callback. Requests coalesce; failed notification clears the flag for a later
+periodic retry. The target only raises Sched softirq in the IPI handler.
+Stale hints or a concurrent destination wake may cause a missed or suboptimal
+migration; fresh source checks, relative hysteresis and queue cooldown bound
+repeated attempts, but do not provide an atomic global balance guarantee.
+Capacity loss from RT/DL/IRQ execution and asymmetric CPUs is not estimated.
+The deterministic tests cover load policy and ownership transfer; they do not
+prove physical IPI delivery, benchmark improvement or real-time guarantees.
+
 ## Priority inheritance
 
 `TaskPiHost` uses counted task references and pointer identity. Graph-held
@@ -726,9 +756,10 @@ is not explicitly scrubbed on drop here.
 
 Known limits:
 
-1. There is no periodic load-balance daemon. Cross-CPU movement depends on
-   affinity, wake `select_idle_sibling`, spawn idle-first plus `nr_home`,
-   and idle-pull of one Ready `!on_cpu` waiter from a CPU with
+1. Periodic Fair balancing uses a flat equal-capacity policy in Sched softirq;
+   RT/DL/IRQ capacity loss and topology domains are not modeled. Other
+   cross-CPU movement uses affinity, wake `select_idle_sibling`, spawn
+   idle-first plus `nr_home`, and idle-pull of one Ready `!on_cpu` waiter from a CPU with
    `nr_running >= 2` when about to idle. `on_cpu` must be rejected; only src
    is locked. `add_task` always `kick(Decision)` (including a busy home) so
    a new peer is not invisible after the dynamic timer is disarmed.

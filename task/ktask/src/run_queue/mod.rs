@@ -9,6 +9,7 @@
 //! - `rq`: leave / pick / switch / kick
 //! - `ownership`: `cpu_id` and `nr_running` / `nr_home` snapshots
 //! - `idle_pull`: steal a Ready `!on_cpu` waiter onto an about-to-idle CPU
+//! - `fair_balance`: periodic Fair pulls and coalesced idle-CPU kicks
 //! - `migrate`: affinity enforcement after `set_cpumask`
 //! - `stats`: optional `sched_stat` counters
 //!
@@ -19,6 +20,8 @@
 //! taking a remote scheduler lock; `ksched` only sees the already-chosen queue.
 
 pub(crate) mod bandwidth;
+#[cfg(feature = "smp")]
+pub(crate) mod fair_balance;
 #[cfg(feature = "smp")]
 mod idle_pull;
 #[cfg(feature = "smp")]
@@ -216,6 +219,8 @@ pub(crate) struct RunQueue {
     /// reads it without that lock. A stale rank only mis-places one wakeup.
     #[cfg(feature = "smp")]
     rt_preempt_rank: AtomicU8,
+    #[cfg(feature = "smp")]
+    balance: fair_balance::BalanceState,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -322,6 +327,8 @@ pub(crate) fn init() {
     current_run_queue_ref().install_running(&main_task);
     #[cfg(feature = "smp")]
     current_run_queue_ref().charge_home(&main_task);
+    #[cfg(feature = "smp")]
+    fair_balance::init();
 }
 
 pub(crate) fn init_secondary() {

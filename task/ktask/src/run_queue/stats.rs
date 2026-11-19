@@ -53,6 +53,10 @@ pub(super) struct SchedCpuStats {
     pub(super) pick_idle: AtomicU64,
     /// Successful idle-pull of a Ready `!on_cpu` waiter from a busier CPU.
     pub(super) idle_pull: AtomicU64,
+    /// Scheduler softirq balance attempts, successful pulls and idle-CPU kicks.
+    pub(super) fair_balance_runs: AtomicU64,
+    pub(super) fair_balance_pull: AtomicU64,
+    pub(super) fair_balance_kick: AtomicU64,
     pub(super) switch: AtomicU64,
     pub(super) switch_same: AtomicU64,
 }
@@ -87,6 +91,9 @@ impl SchedCpuStats {
             resched: AtomicU64::new(0),
             pick_idle: AtomicU64::new(0),
             idle_pull: AtomicU64::new(0),
+            fair_balance_runs: AtomicU64::new(0),
+            fair_balance_pull: AtomicU64::new(0),
+            fair_balance_kick: AtomicU64::new(0),
             switch: AtomicU64::new(0),
             switch_same: AtomicU64::new(0),
         }
@@ -121,7 +128,8 @@ pub(crate) fn dump_sched_stats() {
              tick_preempt={} timer_irq_sched={} timer_irq_soft={} timer_irq_periodic={} \
              timer_irq_stale={} preempt_check={} preempt_need={} preempt_skip_disabled={} \
              preempt_skip_exception={} preempt_resched={} preempt_denied={} resched={} \
-             pick_idle={} idle_pull={} switch={} switch_same={}\n",
+             pick_idle={} idle_pull={} fair_balance_runs={} fair_balance_pull={} \
+             fair_balance_kick={} switch={} switch_same={}\n",
             cpu,
             stats.select_task.load(Ordering::Relaxed),
             stats.select_wakeup.load(Ordering::Relaxed),
@@ -149,6 +157,9 @@ pub(crate) fn dump_sched_stats() {
             stats.resched.load(Ordering::Relaxed),
             stats.pick_idle.load(Ordering::Relaxed),
             stats.idle_pull.load(Ordering::Relaxed),
+            stats.fair_balance_runs.load(Ordering::Relaxed),
+            stats.fair_balance_pull.load(Ordering::Relaxed),
+            stats.fair_balance_kick.load(Ordering::Relaxed),
             stats.switch.load(Ordering::Relaxed),
             stats.switch_same.load(Ordering::Relaxed),
         );
@@ -188,7 +199,8 @@ pub(crate) fn sched_stats_text() -> String {
              tick_preempt={} timer_irq_sched={} timer_irq_soft={} timer_irq_periodic={} \
              timer_irq_stale={} preempt_check={} preempt_need={} preempt_skip_disabled={} \
              preempt_skip_exception={} preempt_resched={} preempt_denied={} resched={} \
-             pick_idle={} idle_pull={} switch={} switch_same={}",
+             pick_idle={} idle_pull={} fair_balance_runs={} fair_balance_pull={} \
+             fair_balance_kick={} switch={} switch_same={}",
             cpu,
             stats.select_task.load(Ordering::Relaxed),
             stats.select_wakeup.load(Ordering::Relaxed),
@@ -216,6 +228,9 @@ pub(crate) fn sched_stats_text() -> String {
             stats.resched.load(Ordering::Relaxed),
             stats.pick_idle.load(Ordering::Relaxed),
             stats.idle_pull.load(Ordering::Relaxed),
+            stats.fair_balance_runs.load(Ordering::Relaxed),
+            stats.fair_balance_pull.load(Ordering::Relaxed),
+            stats.fair_balance_kick.load(Ordering::Relaxed),
             stats.switch.load(Ordering::Relaxed),
             stats.switch_same.load(Ordering::Relaxed),
         );

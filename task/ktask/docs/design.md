@@ -19,7 +19,8 @@ permission to sleep or change the existing stack/bookkeeping allocations.
 
 PELT state and arithmetic belong to ksched. Existing scheduler entries update
 the history while holding the owning RQ lock; ktask keeps no duplicate PELT
-clock or atomic load averages. Placement still uses its previous metrics.
+clock. Periodic balancing publishes advisory load/count samples; spawn and
+wake placement still use their previous metrics.
 
 Before a Wake publish changes CPU ownership, `publish_task` visits the old
 owner with `with_owner_sched` and calls `detach_blocked_pelt`. That guard ends
@@ -27,6 +28,70 @@ before the destination scheduler lock is taken. Sleeping history is thereby
 removed once even if affinity rejects the destination and publication retries.
 Same-CPU wake remains attached, and ready migration already detaches through
 dequeue/steal or migrate_current. New task publication needs no old-owner query.
+
+## Periodic Fair balancing
+
+On SMP, `run_queue/fair_balance.rs` registers `SoftirqVec::Sched` once during primary
+RQ bring-up. A due periodic accounting tick requests the softirq only after
+accounting the interrupted task. It does not run remote scans in hardirq or
+change the schedule-deadline preemption rules. The initial interval is 16 ms,
+with a CPU-dependent initial phase; unsuccessful passes double the interval
+up to 128 ms, and successful pulls restore 16 ms. Actual requests follow the
+configured tick granularity; delayed periods are coalesced.
+
+Policy-mutation exits publish two independent atomic hints under the RQ lock:
+Fair `load_avg` and the number of Fair ready-tree waiters. Remote readers may
+observe mixed or stale hints; these only nominate source CPUs. A source with
+no Fair waiter is skipped even if its blocked history is large. The destination
+refreshes its local queue before searching, so an idle CPU's stale blocked
+history does not prevent filling an otherwise unused CPU. An empty Fair RQ
+on a CPU running a higher class is not treated as an idle CPU.
+
+Each pass tries at most two source queues and pulls at most one task. Source
+selection scans rotating batches of at most 32 CPUs and tests candidates in
+round-robin order against weighted load. Its cursor advances beyond each
+attempted source, so heavier pinned queues cannot hide lighter eligible donors.
+Idle-CPU kicks have a separate rotating cursor that advances beyond each
+chosen target, so an affinity-incompatible idle CPU cannot hide other idle
+CPUs. Source and idle searches cannot consume each other's scan windows.
+Each locked source scan visits at most 32 Fair tree entries, retaining a
+deadline-key cursor to continue beyond pinned/rejected prefixes. Candidates
+must be Ready, off-CPU, allowed on the destination and not cgroup-parked.
+Higher classes do not veto Fair migration: a sole Fair waiter behind an RT
+runner can be exported, and an RT-running CPU may receive Fair migrate-in.
+RT/Deadline/Stop tasks themselves are never selected by this path.
+
+For an actually idle destination, filling the CPU takes precedence over load
+history. Otherwise a candidate must reduce the absolute weighted-load gap:
+`abs(source_load - destination_load - 2 * task_load)`. The improvement must
+exceed `max((source_load + destination_load) / 32, 1)`. Source ranking also
+requires a gap exceeding `max(source_load / 16, 1)`. Relative margins preserve
+balancing for small nice weights, while rejecting equal-load exchanges and
+overshoot. A 32 ms queue participation cooldown limits repeated migration.
+This is an equal-capacity, flat Fair policy: RT/DL/IRQ utilization, frequency
+invariance, NUMA/cache domains and asymmetric CPU capacity are not modeled.
+In particular, current higher-class execution is not used as a substitute
+for measuring how much CPU capacity remains available to Fair.
+
+The source advances its clock and rechecks task PELT and migration benefit
+under its scheduler lock. It saves lag and detaches PELT before returning the
+owner. Only after releasing that lock does destination `publish_task` check
+affinity and move CPU ownership. Rejection routes the retained task through
+`migrate_entry(MigrateIn)`; success consumes the returned decision with `kick`.
+No two scheduler locks overlap. Late remote wakes may invalidate a load
+comparison; this is best-effort balancing, not an atomic two-queue transaction.
+
+Idle CPUs stop the periodic tick. A CPU with Fair waiters therefore requests
+one idle CPU's balance pass through a coalesced flag and the existing fixed
+reschedule IPI. The IPI consumes the flag and raises Sched softirq without
+locking or accounting an RQ. Failed notification clears the flag for retry on
+a subsequent pass. No additional periodic timer or callback allocation is
+introduced. Softirq actions remain non-sleeping; only individual RQ holds
+mask IRQs. Existing about-to-idle pulling remains independent of this policy.
+`/proc/sched_stat` adds `fair_balance_runs`, `fair_balance_pull` and `fair_balance_kick`.
+Deterministic selection tests are in ksched and ktask's
+`ut-tests/run_queue/fair_balance.rs`; throughput and latency need separate guest
+workloads under matching platform and CPU-count settings.
 
 ## Priority inheritance
 
@@ -297,6 +362,7 @@ task/ktask/
 │   │   ├── rq.rs              # leave / pick / switch / kick
 │   │   ├── placement.rs       # spawn / wake CPU choice (no remote sched lock)
 │   │   ├── ownership.rs       # cpu_id and nr_running / nr_home
+│   │   ├── fair_balance.rs         # periodic Fair pulls and idle-CPU kicks
 │   │   ├── idle_pull.rs       # steal a Ready !on_cpu waiter onto an idle CPU
 │   │   ├── migrate.rs         # affinity: migrate_current / migrate_entry
 │   │   └── stats.rs           # sched_stat counters and /proc text
@@ -322,7 +388,8 @@ task/ktask/
 `set_task_nice`. CPU choice lives in
 `placement.rs` because it reads each CPU's `nr_running` / `nr_home`; `ksched`
 holds one RQ lock and never sees remote load. `rq.rs` owns local leave / pick /
-switch. `idle_pull.rs` steals across CPUs. `migrate.rs` only moves a task after
+switch. `idle_pull.rs` steals when about to idle; `fair_balance.rs` implements
+periodic Fair pulls and idle-CPU kicks. `migrate.rs` only moves a task after
 an affinity change.
 
 `kworkerpool_ng` uses `ktask` for pinned task creation, prepared waits and
@@ -1162,8 +1229,8 @@ ordinary IRQ before worker submission, without inline Task destruction.
   the interrupted task. The IRQ-exit tail (`wake_softirqd` after both depths
   are zero) can still leak it; see the limit above. The returned
   `WakeRunQueueRef` carries that bool to the EEVDF sync mark.
-- There is no periodic balancer. Besides affinity and the wake SIS above,
-  an about-to-idle CPU does a Linux-style idle-pull: steal one
+- Periodic Fair balancing runs in Sched softirq (see above). Besides that,
+  affinity and wake SIS, an about-to-idle CPU does an idle-pull: steal one
   **Ready && `!on_cpu`** waiter from a CPU with `nr_running >= 2`, through
   source `steal_ready_task` (internal `remove_task`, PLACE_LAG) then local
   `enqueue_task`. Lock only src, then dest enqueue, so dest-then-src cannot
@@ -1416,7 +1483,8 @@ One file holding placement, switch, affinity, and counters would tangle
 SMP rules with local leave/pick once class placement (for example RT
 pin-home) is added. After the split, `placement.rs` only reads per-CPU load
 heuristics; `rq.rs` only leave/pick/switches on the already-chosen RQ;
-`idle_pull.rs` steals across CPUs; `migrate.rs` only moves a task after a
+`idle_pull.rs` handles about-to-idle steals; `fair_balance.rs` handles periodic
+Fair pulls and idle-CPU kicks; `migrate.rs` only moves a task after a
 mask change. External entries and lock order are unchanged.
 
 ### Why per-CPU run queues
@@ -1572,8 +1640,8 @@ trigger calls `dump_sched_stats()` for allocation-free base output.
   single global queue.
 - **Overload**: class algorithms (`ksched`) and the block model share the
   load. `ktask` places spawn / affinity migrate-in with `find_idlest_cpu`
-  and idle-pulls one Ready `!on_cpu` waiter when about to idle. There is no
-  periodic load-balance daemon.
+  and idle-pulls one Ready `!on_cpu` waiter when about to idle. Periodic Fair
+  load balancing runs in Sched softirq, with coalesced IPI kicks for idle CPUs.
 
 ## Scheduler trace state
 

@@ -157,6 +157,8 @@ unsafe impl<T, Owner: SharedOwner<SchedTask<T>>> FairTreeAdapter for FairAdapter
 /// two swap on deadline repeatedly.
 pub(crate) struct FairClass<T, Owner: SharedOwner<SchedTask<T>>> {
     pelt: Pelt,
+    /// Last examined key; pinned prefixes must not starve later candidates.
+    balance_cursor: Option<DeadlineKey>,
     ready: FairTree<FairAdapter<T, Owner>>,
     /// Cached minimum: finding the leftmost node itself takes O(log N).
     first_deadline: Option<Owner>,
@@ -183,6 +185,7 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
     pub(crate) fn new(now_ns: u64) -> Self {
         Self {
             pelt: Pelt::new(now_ns),
+            balance_cursor: None,
             ready: FairTree::new(FairAdapter::NEW),
             first_deadline: None,
             queued: 0,
@@ -239,6 +242,37 @@ impl<T, Owner: SharedOwner<SchedTask<T>>> FairClass<T, Owner> {
 
     pub(crate) fn pelt_avg(&self) -> PeltAvg {
         self.pelt.avg
+    }
+
+    /// Scan at most `scan_limit` waiters, refreshing each candidate's history.
+    pub(crate) fn steal_for_balance(
+        &mut self,
+        scan_limit: usize,
+        want: &mut dyn FnMut(&SchedTask<T>, PeltAvg) -> bool,
+        curr: Option<&SchedTask<T>>,
+        clk: &RqClock,
+        tok: RqLocked,
+    ) -> Option<Owner> {
+        let mut last_key = None;
+        let key = self
+            .ready
+            .iter_after(self.balance_cursor)
+            .take(scan_limit)
+            .find_map(|task| {
+                let key = Self::deadline_key(task, tok);
+                last_key = Some(key);
+                if task.is_cgroup_parked() {
+                    return None;
+                }
+                Self::sync_pelt(task, clk.now_ns(), false, tok);
+                want(task, task.fair().load.get(tok).pelt.avg).then_some(key)
+            });
+        // An exhausted suffix wraps on the next pass. Failed partial scans
+        // retain their last key so the work per lock hold stays bounded.
+        self.balance_cursor = last_key;
+        let removed = self.dequeue_key_with_lag(key?, curr, tok)?;
+        self.detach_pelt(&removed, clk.now_ns(), tok);
+        Some(removed)
     }
 
     pub(crate) fn update_pelt(&mut self, now_ns: u64, curr: Option<&SchedTask<T>>, tok: RqLocked) {

@@ -25,6 +25,7 @@ unittest::path_mod_test!(
 );
 
 unittest::path_mod_test!(mod tests_fair_tree, "../ut-tests/fair_tree.rs");
+unittest::path_mod_test!(mod tests_fair_balance, "../ut-tests/fair_balance.rs");
 
 extern crate alloc;
 
@@ -37,4 +38,4 @@ pub use entity::{KernelClass, SchedTask};
 pub use owner::SharedOwner;
 pub use pelt::PeltAvg;
 pub use policy::{DlParams, Nice, RtPrio, SchedAttr, SchedClass, SchedError, SchedPolicy};
-pub use scheduler::Scheduler;
+pub use scheduler::{FairBalanceStats, Scheduler};
