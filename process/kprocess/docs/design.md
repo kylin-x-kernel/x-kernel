@@ -289,34 +289,44 @@ not return to the old image. The `stat`
 signal fields are a compatibility view: they expose only the low 31 bits, as
 Linux's obsolete `do_task_stat` fields do.
 
-CPU accounting uses `Inactive`, `Kernel`, and `User` states. A mode change
-settles elapsed time to the previous mode, so a user interval is counted even
-when no timer interrupt occurs. Switch-out closes the running interval,
-switch-in starts a kernel interval, and sampling settles time in the current
-mode. A per-thread IRQ-safe spinlock serializes these operations and protects
-both counters and the interval origin. Exit closes the last interval and
-prevents later switch-ins from restarting accounting. Separate IRQ, steal and
-guest accounting remain outside this model.
+CPU accounting charges raw per-thread user/system counters: the owning CPU's
+periodic tick adds one tick to the counter selected by the interrupted frame's
+privilege. The user/kernel boundary publishes nothing and settles nothing, so
+the syscall fast path stays lock-free; a remote reader loads the committed
+counters without settling another thread. Views that need the split scale the
+raw sample against scheduler runtime through a per-thread and per-group
+monotonic adjustment history, so the published pair sums to the runtime and
+never goes backwards. Separate IRQ/steal/guest accounting remains outside this
+model.
 
-The process CPU clock instead sums the scheduler runtime of its published and
-exiting members with the group's exited-runtime total. The membership lock
-serializes live-to-exited transfers; a sequence check retries a snapshot if
+The process CPU clocks sample one group ledger: the scheduler runtime and raw
+user/system counters of published and exiting members plus the group's exited
+totals. The membership lock serializes live-to-exited transfers: the exit path
+accumulates the dead thread's counters and runtime into the group totals in
+the same critical section that retires its membership. A sequence check retries a snapshot if
 membership changes between fixed-size batches. The caller refreshes
 its own scheduler runtime before taking that lock; remote running tasks supply
 their last committed values. An exiting last thread remains in the accounting
 view through process cleanup, despite losing TID visibility, and transfers its
-runtime before process-exit publication. Task references acquired for the
+counters and runtime before process-exit publication. Task references acquired for the
 snapshot are retained until after each batch releases the membership lock;
 the snapshot uses only a fixed-size stack buffer and does not allocate.
+`process_cpu_time` returns the ledger's scheduler runtime;
+`process_cpu_times` adjusts the raw split against it and feeds times,
+getrusage and wait. CPU interval timers instead consume one raw
+`TaskCputime` snapshot per poll, set or get, so every timer in a pass shares
+a single time base and expiry never derives from the adjusted split — the
+same division Linux draws in `posix-cpu-timers`.
 
 The thread CPU clock samples the same scheduler ledger directly. Reading
-advances it: the running interval is charged before the value returns, so the
+advances it: the running delta is committed before the value returns, so the
 caller never observes its own elapsed on-CPU time as missing. The sampler
 takes no thread handle because only the owning run queue may advance a
 ledger; remote tasks contribute committed values only. This is the split
 Linux draws with `CPUCLOCK_SCHED` versus `CPUCLOCK_PROF`/`CPUCLOCK_VIRT`:
-the named CPU clocks read scheduler runtime, while the mode-settled
-user/system accounting above still feeds views that need the split.
+the named CPU clocks read scheduler runtime, while the tick-accounted
+user/system split above, adjusted against that runtime, feeds views that need
+the split.
 
 ## Execution context and calling constraints
 
@@ -336,7 +346,8 @@ introduced under that transaction. Callbacks passed to cgroup authorization,
 scheduler validation, TEE access or mapping access execute while the documented
 owner lock is held and must avoid recursive acquisition/incompatible lock order.
 Timer initialization is once-only and requires timer/signal/task runtime ready.
-The mode-settled CPU time state machine depends on monotonic time. The named
+Raw tick accounting depends on the periodic tick; the adjustment history
+depends on monotonic scheduler runtime. The named
 CPU clocks depend on the scheduler runtime ledger instead:
 `current_thread_cpu_clock` requires an initialized current task and run queue
 (any task, user thread or kernel task), never sleeps, and must be called
@@ -344,6 +355,10 @@ without the local run-queue lock; `Process::process_cpu_time` requires task
 context with neither the run-queue nor the membership lock held; it samples
 in bounded, allocation-free batches and retries on membership changes. A periodic CPU
 timer poll inherits both constraints through its sampling of these clocks.
+`Process::exited_thread_time` acquires the IRQ-safe `thread_membership` lock and
+must not be called while holding it. `Thread::cpu_time_adjusted` requires the
+caller to have refreshed the current task's scheduler-runtime sample before
+reading (remote threads contribute their last committed runtime instead).
 Task runtime hooks depend on MM CPU residency and architecture initialization.
 
 ## State transitions
@@ -363,9 +378,10 @@ of an already Published identity leaves it published. Cleanup removes only the
 same slot when it is Vacant/Retired, protecting reused PID/TID bindings. A
 `PublishedUserTask` owns a rollback record until activation consumes it.
 
-Thread accounting settles the elapsed interval before transitioning between
-`Inactive`, `User`, and `Kernel`. Thread exit and no-new-privileges are separately
-published atomic flags. Group/session changes create or select a
+Thread accounting has no mode state: the periodic tick charges the raw user
+or system counter selected by the interrupted frame, and queries adjust the
+committed split against scheduler runtime. Thread exit and no-new-privileges
+are separately published atomic flags. Group/session changes create or select a
 group and publish group/session identity together; existing-group movement
 requires the same session. The syscall owner checks additional leader/ID rules.
 

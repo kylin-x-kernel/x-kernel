@@ -25,6 +25,43 @@ fn idle_irq_return_skips_only_the_wait_instruction() {
     }
 }
 
+#[def_test(serial)]
+fn test_exception_context_user_mode() {
+    use super::ctx::PPLV_UMODE;
+
+    // PPLV = user: interrupted context ran in user mode.
+    let mut ctx = ExceptionContext::default();
+    ctx.prmd = PPLV_UMODE;
+    assert!(ctx.user_mode());
+    // PPLV = 0: interrupted context ran in the kernel.
+    ctx.prmd = 0;
+    assert!(!ctx.user_mode());
+    // PIE (bit 2) outside PPLV must not change the classification.
+    ctx.prmd = PPLV_UMODE | (1 << 2);
+    assert!(ctx.user_mode());
+    ctx.prmd = 1 << 2;
+    assert!(!ctx.user_mode());
+
+    // The entry frame UserContext::new builds from the same PPLV entity
+    // must classify as user mode.
+    let uctx = super::userspace::UserContext::new(0x1000, va!(0x2000), 0);
+    assert!(uctx.user_mode());
+
+    // The tick-classification accessor must report these same frames
+    // through the active-frame slot.
+    ctx.prmd = PPLV_UMODE;
+    {
+        let _guard = crate::ExceptionContextGuard::new(&ctx);
+        assert_eq!(crate::active_exception_user_mode(), Some(true));
+    }
+    ctx.prmd = 0;
+    {
+        let _guard = crate::ExceptionContextGuard::new(&ctx);
+        assert_eq!(crate::active_exception_user_mode(), Some(false));
+    }
+    assert_eq!(crate::active_exception_user_mode(), None);
+}
+
 #[def_test]
 fn test_syscall_restart_ignored_without_syscall_trap() {
     let mut ctx = ExceptionContext::default();

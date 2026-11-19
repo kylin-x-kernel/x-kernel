@@ -9,10 +9,8 @@ use loongArch64::register::{
     estat::{self, Exception, Trap},
 };
 
-use super::ctx::ExceptionContext;
+use super::ctx::{ExceptionContext, PRMD_PPLV_MASK};
 use crate::excp::PageFaultFlags;
-
-const PRMD_PPLV_MASK: usize = 0b11;
 
 core::arch::global_asm!(
     include_asm_macros!(),

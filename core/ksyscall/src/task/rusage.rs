@@ -18,7 +18,10 @@ struct Rusage {
 
 impl Rusage {
     fn from_thread(thread: &Thread) -> Self {
-        let (utime, stime) = thread.sample_cpu_time();
+        // RUSAGE_THREAD is always the calling thread: refresh its committed
+        // scheduler runtime first, then scale the raw tick split against it.
+        let rtime_ns = ktask::refresh_current_execution_runtime_ns();
+        let (utime, stime) = thread.cpu_time_adjusted(rtime_ns);
         Self { utime, stime }
     }
 

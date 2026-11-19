@@ -790,12 +790,12 @@ impl Process {
     /// Returns `KError::NoSuchProcess` when the weak process runtime can no longer
     /// be upgraded.
     pub fn get_itimer(&self, timer_type: ITimerType) -> KResult<(TimeSpan, TimeSpan)> {
-        let (process_utime, process_stime) = self.process_cpu_times();
+        let sample = self.thread_group_cputime();
         self.runtime().map(|runtime| {
             runtime
                 .timer_manager()
                 .lock()
-                .get_itimer(timer_type, process_utime, process_stime)
+                .get_itimer(timer_type, sample)
         })
     }
 
@@ -811,15 +811,9 @@ impl Process {
         interval: TimeSpan,
         remaining: TimeSpan,
     ) -> KResult<(TimeSpan, TimeSpan)> {
-        let (process_utime, process_stime) = self.process_cpu_times();
+        let sample = self.thread_group_cputime();
         self.with_timer_manager_mut(|manager| {
-            Ok(manager.set_itimer(
-                timer_type,
-                interval,
-                remaining,
-                process_utime,
-                process_stime,
-            ))
+            Ok(manager.set_itimer(timer_type, interval, remaining, sample))
         })
     }
 
@@ -831,6 +825,10 @@ impl Process {
 
     /// Polls CPU-driven timers while runtime remains attached.
     ///
+    /// One raw [`TaskCputime`](ktime_types::TaskCputime) snapshot feeds every
+    /// timer in the pass: like Linux `posix-cpu-timers`, expiry never consumes
+    /// the adjusted split, and all clocks share a single time base.
+    ///
     /// The periodic tick requests coalesced user-return work only while the
     /// process may have an armed CPU timer. Recheck that gate here so a
     /// concurrent disarm can avoid sampling. The timer manager re-derives it
@@ -839,11 +837,8 @@ impl Process {
         if !self.cpu_timers_armed() {
             return Ok(Vec::new());
         }
-        let (process_utime, process_stime) = self.process_cpu_times();
-        let process_sched_runtime = self.process_cpu_time();
-        self.with_timer_manager_mut(|manager| {
-            Ok(manager.poll_cpu_timers(process_utime, process_stime, process_sched_runtime))
-        })
+        let sample = self.thread_group_cputime();
+        self.with_timer_manager_mut(|manager| Ok(manager.poll_cpu_timers(sample)))
     }
 
     /// Updates the current executable metadata snapshot.
@@ -1019,17 +1014,19 @@ impl Process {
         self.runtime().map(|runtime| runtime.with_tipc_handles(f))
     }
 
-    /// Returns sampled user and system CPU time.
+    /// Returns the group's adjusted user and system CPU time.
+    ///
+    /// Samples the raw dead totals plus live members under the membership
+    /// consistency domain, then scales the split against the group's scheduler
+    /// runtime with the group `prev_cputime`, guaranteeing `utime + stime ==
+    /// runtime` and a monotonic split. This is the source for `times`,
+    /// `getrusage(RUSAGE_SELF)` and wait; CPU-timer expiry instead consumes
+    /// the raw sample directly, like Linux `posix-cpu-timers`.
     pub fn process_cpu_times(&self) -> (TimeSpan, TimeSpan) {
-        let (utime, stime) = self.exited_thread_time();
-        self.thread_tasks()
-            .into_iter()
-            .fold((utime, stime), |(utime, stime), task| {
-                let (thread_utime, thread_stime) = task.as_thread().sample_cpu_time();
-                (
-                    utime.saturating_add(thread_utime),
-                    stime.saturating_add(thread_stime),
-                )
-            })
+        let sample = self.thread_group_cputime();
+        let (utime, stime) =
+            self.group_prev_cputime
+                .adjust(sample.utime, sample.stime, sample.sum_exec_runtime);
+        (TimeSpan::from_nanos(utime), TimeSpan::from_nanos(stime))
     }
 }

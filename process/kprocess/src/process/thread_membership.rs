@@ -15,7 +15,7 @@ use kspin::SpinNoIrq;
 use ktask::{KtaskRef, WeakKtaskRef};
 
 use super::Process;
-use crate::{AsThread, Tid, process_domain, publication::process_publication};
+use crate::{AsThread, TaskCputime, Tid, process_domain, publication::process_publication};
 
 /// Published tasks and unreleased group-leader membership tracked per process.
 ///
@@ -26,6 +26,12 @@ use crate::{AsThread, Tid, process_domain, publication::process_publication};
 pub(super) struct ThreadMembership {
     members: BTreeMap<TaskIdentityToken, Arc<ThreadMemberSlot>>,
     is_last_thread_exit_reserved: bool,
+    /// Raw user/system nanoseconds of exited members. Accumulated by
+    /// `finish_exit` in the same critical section that removes the member, so
+    /// a scan sees the value either on the live member or here, never both and
+    /// never neither.
+    exited_utime_ns: u64,
+    exited_stime_ns: u64,
     exited_sched_runtime_ns: u64,
     // Like Linux stats_lock, detects a live-to-exited handoff during a scan.
     // Wrapping is safe unless one scan spans 2^64 membership updates.
@@ -65,7 +71,15 @@ impl ThreadMembership {
             .get(&task.as_thread().identity_token())
             .is_some_and(|slot| slot.finish_exit(task))
         {
+            // Accumulate the dead thread's raw user/system and scheduler
+            // runtime into the group totals in the same critical section that
+            // retires its live membership. The owning CPU is this exiting
+            // thread (or it is detached and off CPU), and the membership lock
+            // masks local IRQs, so its raw counters cannot advance here.
             self.sched_snapshot_seq = self.sched_snapshot_seq.wrapping_add(1);
+            let (utime, stime) = task.as_thread().raw_cpu_time();
+            self.exited_utime_ns = self.exited_utime_ns.saturating_add(utime);
+            self.exited_stime_ns = self.exited_stime_ns.saturating_add(stime);
             self.exited_sched_runtime_ns = self
                 .exited_sched_runtime_ns
                 .saturating_add(task.sum_exec_runtime_ns());
@@ -365,17 +379,26 @@ impl Process {
 
     /// Returns the scheduler runtime of all current and exited group members.
     ///
-    /// The current task is refreshed locally; other running tasks contribute
-    /// their most recently committed scheduler value. Membership changes cause
-    /// a retry, preserving the live-to-exited handoff across bounded batches.
     /// Call in task context without a run-queue or membership lock.
     pub fn process_cpu_time(&self) -> ktime_types::TimeSpan {
+        ktime_types::TimeSpan::from_nanos(self.thread_group_cputime().sum_exec_runtime)
+    }
+
+    /// Samples the group's raw user/system split and scheduler runtime.
+    ///
+    /// The current task is refreshed locally; other running tasks contribute
+    /// their most recently committed values. Dead totals and live members are
+    /// read under one consistency domain: a live-to-exited handoff bumps the
+    /// sequence and forces a retry across bounded batches, so each member's
+    /// value is carried exactly once. Call in task context without a run-queue
+    /// or membership lock.
+    pub(crate) fn thread_group_cputime(&self) -> TaskCputime {
         const BATCH_SIZE: usize = 4;
         self.refresh_current_sched_runtime();
         'snapshot: loop {
             let mut sequence = None;
             let mut cursor = None;
-            let mut total = 0u64;
+            let mut total = TaskCputime::default();
             loop {
                 // Keep upgraded task owners until after the IRQ-safe lock is
                 // released, including an owner that races the final release.
@@ -388,7 +411,11 @@ impl Process {
                     }
                     None => {
                         sequence = Some(membership.sched_snapshot_seq);
-                        total = membership.exited_sched_runtime_ns;
+                        total = TaskCputime {
+                            utime: membership.exited_utime_ns,
+                            stime: membership.exited_stime_ns,
+                            sum_exec_runtime: membership.exited_sched_runtime_ns,
+                        };
                     }
                     Some(_) => {}
                 }
@@ -400,7 +427,8 @@ impl Process {
                     };
                     cursor = Some(token);
                     if let Some(task) = slot.accounted_task() {
-                        total = total.saturating_add(task.sum_exec_runtime_ns());
+                        let (utime, stime) = task.as_thread().raw_cpu_time();
+                        total.add(utime, stime, task.sum_exec_runtime_ns());
                         *entry = Some(task);
                     }
                 }
@@ -408,10 +436,23 @@ impl Process {
                 drop(membership);
                 drop(retained);
                 if !has_more {
-                    return ktime_types::TimeSpan::from_nanos(total);
+                    return total;
                 }
             }
         }
+    }
+
+    /// Returns the group's accumulated raw exited-member user/system time.
+    ///
+    /// These are the dead totals only; a live member still carries its own
+    /// counters until `finish_exit` hands them over. Use
+    /// [`Self::process_cpu_times`] for the adjusted whole-group split.
+    pub fn exited_thread_time(&self) -> (ktime_types::TimeSpan, ktime_types::TimeSpan) {
+        let membership = self.thread_membership.lock();
+        (
+            ktime_types::TimeSpan::from_nanos(membership.exited_utime_ns),
+            ktime_types::TimeSpan::from_nanos(membership.exited_stime_ns),
+        )
     }
 
     pub(super) fn finish_exiting_thread_runtime(&self) {

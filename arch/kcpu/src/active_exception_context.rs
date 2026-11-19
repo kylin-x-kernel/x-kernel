@@ -83,6 +83,30 @@ pub fn active_exception_context() -> Option<ExceptionContext> {
     }
 }
 
+/// Returns whether the currently active trapframe on this CPU interrupted user
+/// mode, or `None` when no trapframe is active.
+///
+/// Reads only the interrupted context's privilege field instead of copying
+/// the whole trapframe, so the periodic tick can classify user vs system time
+/// without a per-tick register snapshot. Pins the slot lookup and read by
+/// masking ordinary IRQs, then restores the caller's mask.
+#[inline]
+pub fn active_exception_user_mode() -> Option<bool> {
+    ACTIVE_EXCEPTION_CONTEXT_PTR.with_current_irq_disabled(|slot| {
+        let ptr = slot.load(Ordering::Relaxed);
+        if ptr == 0 {
+            None
+        } else {
+            // SAFETY: `ptr` was installed from a live `&ExceptionContext` by
+            // `ExceptionContextGuard::new` on this CPU. Ordinary IRQs are masked
+            // here, so the trap handler stack owning the frame cannot unwind or
+            // migrate between the load and the read. Only the privilege field
+            // is read; the frame is neither copied nor retained.
+            Some(unsafe { (*(ptr as *const ExceptionContext)).user_mode() })
+        }
+    })
+}
+
 /// Calls `f` with a reference to a snapshot of the currently active trapframe.
 ///
 /// Unlike the trapframe pointer tracked by `ExceptionContextGuard`, the

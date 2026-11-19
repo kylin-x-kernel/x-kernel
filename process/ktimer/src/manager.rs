@@ -8,7 +8,7 @@ use alloc::{collections::BTreeMap, vec::Vec};
 
 use kerrno::{KError, KResult};
 use khal::time::monotonic_time;
-use ktime_types::{ProcessCpuInstant, TimeSpan};
+use ktime_types::{ProcessCpuInstant, TaskCputime, TimeSpan};
 use posix_types::ITimerType;
 
 use crate::{
@@ -93,29 +93,24 @@ impl ProcessTimerManager {
     }
 
     /// Returns the current interval timer state.
-    pub fn get_itimer(
-        &self,
-        timer_type: ITimerType,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
-    ) -> (TimeSpan, TimeSpan) {
-        self.itimers[timer_type as usize].snapshot(Self::timer_clock_now(
-            timer_type,
-            process_utime,
-            process_stime,
-        ))
+    ///
+    /// `sample` is one raw process CPU-time snapshot; like Linux
+    /// `posix-cpu-timers`, CPU-timer state never consumes the adjusted split.
+    pub fn get_itimer(&self, timer_type: ITimerType, sample: TaskCputime) -> (TimeSpan, TimeSpan) {
+        self.itimers[timer_type as usize].snapshot(Self::timer_clock_now(timer_type, sample))
     }
 
     /// Sets an interval timer and returns the previous state.
+    ///
+    /// `sample` is one raw process CPU-time snapshot; see [`Self::get_itimer`].
     pub fn set_itimer(
         &mut self,
         timer_type: ITimerType,
         interval: TimeSpan,
         remaining: TimeSpan,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
+        sample: TaskCputime,
     ) -> (TimeSpan, TimeSpan) {
-        let now = Self::timer_clock_now(timer_type, process_utime, process_stime);
+        let now = Self::timer_clock_now(timer_type, sample);
         let deadline = if remaining.is_zero() {
             None
         } else {
@@ -159,16 +154,20 @@ impl ProcessTimerManager {
         deliveries
     }
 
-    /// Polls the CPU-based interval timers against aggregated process CPU time.
+    /// Polls the CPU-based interval timers against one raw process CPU-time
+    /// sample.
+    ///
+    /// Every timer in this pass shares the sample's single time base. Like
+    /// Linux `posix-cpu-timers`, deadlines derive from the raw tick-classified
+    /// split and the scheduler runtime; the adjusted view is reserved for
+    /// `times`/`getrusage`/wait-style queries and never drives expiry.
     ///
     /// The iterated sets must stay in sync with `any_cpu_timer_armed`; see
     /// the sync note there.
-    pub fn poll_cpu_timers(
-        &mut self,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
-        process_sched_runtime: TimeSpan,
-    ) -> Vec<TimerDelivery> {
+    pub fn poll_cpu_timers(&mut self, sample: TaskCputime) -> Vec<TimerDelivery> {
+        let process_utime = TimeSpan::from_nanos(sample.utime);
+        let process_stime = TimeSpan::from_nanos(sample.stime);
+        let process_sched_runtime = TimeSpan::from_nanos(sample.sum_exec_runtime);
         let mut deliveries = Vec::new();
 
         if self.itimers[ITIMER_VIRTUAL_INDEX].update(TimerInstant::ProcessCpu(
@@ -508,19 +507,15 @@ impl ProcessTimerManager {
         false
     }
 
-    fn timer_clock_now(
-        timer_type: ITimerType,
-        process_utime: TimeSpan,
-        process_stime: TimeSpan,
-    ) -> TimerInstant {
+    fn timer_clock_now(timer_type: ITimerType, sample: TaskCputime) -> TimerInstant {
         match timer_type {
             ITimerType::Real => TimerInstant::Monotonic(monotonic_time()),
-            ITimerType::Virtual => {
-                TimerInstant::ProcessCpu(ProcessCpuInstant::from_span_since_origin(process_utime))
-            }
+            ITimerType::Virtual => TimerInstant::ProcessCpu(
+                ProcessCpuInstant::from_span_since_origin(TimeSpan::from_nanos(sample.utime)),
+            ),
             ITimerType::Prof => {
                 TimerInstant::ProcessCpu(ProcessCpuInstant::from_span_since_origin(
-                    process_utime.saturating_add(process_stime),
+                    TimeSpan::from_nanos(sample.utime.saturating_add(sample.stime)),
                 ))
             }
         }

@@ -87,8 +87,10 @@ separate from this schedule generation. Tests cover the last value,
 exhaustion, preserved timer state, cleanup and equal low-bit stale receipts.
 
 Manager tests cover unsupported-clock rejection and configuration consumption
-with ID/sequence assignment and disarmed-state publication. Existing timer
-arming/dequeue tests now enter through this same configuration interface.
+with ID/sequence assignment and disarmed-state publication, and pin expiry to
+the raw tick split: a deadline between the raw and adjusted values must not
+fire. Existing timer arming/dequeue tests now enter through this same
+configuration interface.
 An injected ID-allocation rejection exercises the same admission body, checks
 that no map entry or sequence is published, and retries the returned configuration
 through the public manager interface. CPU-clock and thread-target behavior remain
@@ -766,10 +768,13 @@ outbound `siginfo` union using its full-width pointer member.
 - `ProcessTimerManager` is serialized by the owning `ProcessRuntime`'s
   `Arc<Mutex<..>>` (`kprocess::process_runtime`). Its methods run on
   syscall and user-return paths; they do not sleep.
-- `poll_cpu_timers` relies on caller-supplied totals for the same process.
-  `ITIMER_VIRTUAL` uses user time, `ITIMER_PROF` uses user plus system, and
-  POSIX process-CPU timers use scheduler runtime. CPU timers are polled at
-  user return; a periodic timer IRQ gives a busy userspace task return points.
+- `poll_cpu_timers`, `get_itimer` and `set_itimer` take one caller-supplied
+  raw `TaskCputime` snapshot of the same process, so every timer in a pass
+  shares a single time base. `ITIMER_VIRTUAL` uses user time, `ITIMER_PROF`
+  uses user plus system, and POSIX process-CPU timers use scheduler runtime;
+  like Linux `posix-cpu-timers`, none of them consumes the adjusted split.
+  CPU timers are polled at user return; a periodic timer IRQ gives a busy
+  userspace task return points.
 - The alarm task (`spawn_alarm_task`) is a sleepable kernel task using
   `timeout_at` on the current conversion of the earliest deadline; the expired-owner
   callback re-enters `kprocess` polling and may therefore block on the

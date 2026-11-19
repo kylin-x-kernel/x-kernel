@@ -17,7 +17,7 @@ use khal::{
 use kpoll::PollRegistrations;
 use ksignal::Signo;
 use ktask::{TaskInner, prepare_task};
-use ktime_types::TimeSpan;
+use ktime_types::{TaskCputime, TimeSpan};
 use memspace::VmRuntimeRef;
 use unittest::{assert, assert_eq, def_test};
 
@@ -32,6 +32,14 @@ use crate::{
 
 fn new_wake_counter() -> &'static AtomicUsize {
     KBox::leak(KBox::new(AtomicUsize::new(0)).unwrap())
+}
+
+fn cpu_sample(utime_ns: u64, stime_ns: u64, runtime_ns: u64) -> TaskCputime {
+    TaskCputime {
+        utime: utime_ns,
+        stime: stime_ns,
+        sum_exec_runtime: runtime_ns,
+    }
 }
 
 #[def_test]
@@ -2245,8 +2253,13 @@ fn test_pidfd_exit_poll_registration_races_and_cancellation() {
 fn test_process_exit_notifies_pidfd_and_parent_waiters() {
     let init = ensure_init();
     let child = init.fork(580);
-    let _leader_task = publish_test_thread(&child, 580);
-    child.accumulate_exited_thread_time(TimeSpan::from_nanos(77), TimeSpan::from_nanos(88));
+    let leader_task = publish_test_thread(&child, 580);
+    // Drive the real group handoff: raw ticks on the member, then membership
+    // exit. The last thread's handoff completes in finalize_process_exit, so
+    // every exit notification observes the final exited-member totals.
+    leader_task.as_thread().account_tick(true, 77);
+    leader_task.as_thread().account_tick(false, 88);
+    assert!(process_exit::finish_thread_exit(&child, &leader_task, 0));
 
     let parent_counter = new_wake_counter();
     let parent_waker = counter_waker(parent_counter);
@@ -2595,21 +2608,35 @@ fn test_lifecycle_accumulates_exited_thread_and_child_cpu_time() {
     let init = ensure_init();
     let proc = init.fork(600);
 
-    proc.accumulate_exited_thread_time(TimeSpan::from_nanos(11), TimeSpan::from_nanos(22));
-    proc.accumulate_exited_thread_time(TimeSpan::from_nanos(33), TimeSpan::from_nanos(44));
-    proc.accumulate_child_time(TimeSpan::from_nanos(55), TimeSpan::from_nanos(66));
-    proc.accumulate_child_time(TimeSpan::from_nanos(77), TimeSpan::from_nanos(88));
+    // Two real membership handoffs: a non-last member hands its raw counters
+    // over immediately at exit, the last member's handoff completes at process
+    // publication. Reaped-child totals accumulate independently.
+    let first = publish_test_thread(&proc, 601);
+    let last = publish_test_thread(&proc, 600);
+    first.as_thread().account_tick(true, 11);
+    first.as_thread().account_tick(false, 22);
+    last.as_thread().account_tick(true, 33);
+    last.as_thread().account_tick(false, 44);
 
+    assert!(!process_exit::finish_thread_exit(&proc, &first, 0));
     assert_eq!(
         proc.exited_thread_time(),
-        (TimeSpan::from_nanos(44), TimeSpan::from_nanos(66))
+        (TimeSpan::from_nanos(11), TimeSpan::from_nanos(22))
     );
+
+    proc.accumulate_child_time(TimeSpan::from_nanos(55), TimeSpan::from_nanos(66));
+    proc.accumulate_child_time(TimeSpan::from_nanos(77), TimeSpan::from_nanos(88));
     assert_eq!(
         proc.child_time(),
         (TimeSpan::from_nanos(132), TimeSpan::from_nanos(154))
     );
 
+    assert!(process_exit::finish_thread_exit(&proc, &last, 0));
     proc.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    assert_eq!(
+        proc.exited_thread_time(),
+        (TimeSpan::from_nanos(44), TimeSpan::from_nanos(66))
+    );
     proc.free();
 }
 
@@ -3980,18 +4007,25 @@ fn periodic_cpu_timer_work_is_gated_and_coalesced() {
     let (process, task) = build_prepared_test_user_task();
     let task = prepare_task(task);
     let thread = task.as_thread();
-    ktask::UserTaskRuntime::on_periodic_tick(thread);
+    // Drives the periodic-tick entry directly, past `on_timer_fire`'s
+    // `periodic_due` gate (raw accounting is no longer unconditional across
+    // all timer IRQs). Within the entry raw ticks always land; only itimer
+    // work follows the `cpu_timers_armed` gate.
+    ktask::UserTaskRuntime::on_periodic_tick(thread, true, 1_000_000);
     assert!(!thread.has_pending_cpu_timer_work());
+    assert_eq!(thread.raw_cpu_time(), (1_000_000, 0));
 
     process.set_cpu_timers_armed(true);
-    ktask::UserTaskRuntime::on_periodic_tick(thread);
-    ktask::UserTaskRuntime::on_periodic_tick(thread);
+    ktask::UserTaskRuntime::on_periodic_tick(thread, true, 1_000_000);
+    ktask::UserTaskRuntime::on_periodic_tick(thread, false, 1_000_000);
     assert!(thread.has_pending_cpu_timer_work());
     assert!(thread.take_cpu_timer_work());
     assert!(!thread.take_cpu_timer_work());
+    assert_eq!(thread.raw_cpu_time(), (2_000_000, 1_000_000));
     process.set_cpu_timers_armed(false);
-    ktask::UserTaskRuntime::on_periodic_tick(thread);
+    ktask::UserTaskRuntime::on_periodic_tick(thread, true, 1_000_000);
     assert!(!thread.has_pending_cpu_timer_work());
+    assert_eq!(thread.raw_cpu_time(), (3_000_000, 1_000_000));
 }
 
 /// Checks the gate short-circuits the poll before the runtime is touched.
@@ -4067,7 +4101,7 @@ fn test_timer_completion_is_bound_to_originating_runtime() {
                 TimeSpan::ZERO,
             )
             .unwrap();
-        notifications.extend(manager.poll_cpu_timers(TimeSpan::from_nanos(3), TimeSpan::ZERO, TimeSpan::from_nanos(3)));
+        notifications.extend(manager.poll_cpu_timers(cpu_sample(3, 0, 3)));
         drop(manager);
         update.finish();
     }
@@ -4149,7 +4183,7 @@ fn test_ignored_periodic_timer_replays_with_accumulated_overruns() {
     let deliveries = runtime
         .timer_manager()
         .lock()
-        .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO, TimeSpan::from_nanos(1));
+        .poll_cpu_timers(cpu_sample(1, 0, 1));
     assert_eq!(deliveries.len(), 1);
     for delivery in deliveries {
         crate::dispatch_timer_delivery(owner.pid(), delivery);
@@ -4159,7 +4193,7 @@ fn test_ignored_periodic_timer_replays_with_accumulated_overruns() {
         runtime
             .timer_manager()
             .lock()
-            .poll_cpu_timers(TimeSpan::from_nanos(4), TimeSpan::ZERO, TimeSpan::from_nanos(4))
+            .poll_cpu_timers(cpu_sample(4, 0, 4))
             .is_empty()
     );
     assert_eq!(owner.get_posix_timer_overrun(timer_id).unwrap(), 0);
@@ -4219,7 +4253,7 @@ fn test_distinct_posix_timers_deliver_the_same_standard_signal() {
     let deliveries = runtime
         .timer_manager()
         .lock()
-        .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO, TimeSpan::from_nanos(1));
+        .poll_cpu_timers(cpu_sample(1, 0, 1));
     assert_eq!(deliveries.len(), 2);
     for delivery in deliveries {
         crate::dispatch_timer_delivery(owner.pid(), delivery);
@@ -4276,7 +4310,7 @@ fn test_timer_rearm_and_delete_cancel_pending_without_acknowledgement() {
                 )
                 .unwrap();
             let delivery = manager
-                .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO, TimeSpan::from_nanos(1))
+                .poll_cpu_timers(cpu_sample(1, 0, 1))
                 .into_iter()
                 .next()
                 .unwrap();
@@ -4342,7 +4376,7 @@ fn test_returned_record_progresses_rearmed_cpu_one_shot_without_another_tick() {
             )
             .unwrap();
         let old = manager
-            .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO, TimeSpan::from_nanos(1))
+            .poll_cpu_timers(cpu_sample(1, 0, 1))
             .remove(0);
         let update = manager
             .set_posix_timer(
@@ -4413,7 +4447,7 @@ fn test_timer_dispatch_uses_captured_target_not_numeric_envelope() {
                 )
                 .unwrap();
             let delivery = manager
-                .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO, TimeSpan::from_nanos(1))
+                .poll_cpu_timers(cpu_sample(1, 0, 1))
                 .into_iter()
                 .next()
                 .unwrap();

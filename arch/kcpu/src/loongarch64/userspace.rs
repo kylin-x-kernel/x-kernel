@@ -15,6 +15,7 @@ use loongArch64::register::{
 };
 use memaddr::VirtAddr;
 
+use super::ctx::PPLV_UMODE;
 pub use crate::userspace_common::{ExceptionKind, ReturnReason};
 use crate::{ExceptionContext, GeneralRegisters, excp::PageFaultFlags};
 
@@ -33,7 +34,6 @@ impl UserContext {
     /// and the argument.
     pub fn new(entry: usize, ustack_top: VirtAddr, arg0: usize) -> Self {
         let mut trap_frame = ExceptionContext::default();
-        const PPLV_UMODE: usize = 0b11;
         const PIE: usize = 1 << 2;
         trap_frame.regs.sp = ustack_top.as_usize();
         trap_frame.era = entry;
@@ -89,6 +89,10 @@ impl UserContext {
         let ret = match estat.cause() {
             Trap::Interrupt(_) => {
                 let interrupt_id: usize = estat.is().trailing_zeros() as usize;
+                // The user-return entry dispatches here instead of the kernel
+                // trap handler, so publish the interrupted user frame as this
+                // CPU's active trap context for tick classification.
+                let _tf_guard = crate::ExceptionContextGuard::new(&self.0);
                 // SAFETY: exception entry cleared CRMD.IE and enter_user
                 // restored kernel CPU state; on_user_exit retains the mask.
                 unsafe { handle_trap!(IRQ, interrupt_id) };

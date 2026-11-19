@@ -26,6 +26,47 @@ fn test_exception_context_ip_sp() {
     assert_eq!(ctx.sp(), 0x3000);
 }
 
+#[def_test(serial)]
+fn test_exception_context_user_mode() {
+    use x86_64::{PrivilegeLevel, registers::segmentation::SegmentSelector};
+
+    use super::gdt::{KCODE64, UCODE64};
+
+    // The user code selector this kernel loads carries RPL 3.
+    let mut ctx = ExceptionContext {
+        cs: UCODE64.0 as u64,
+        ..Default::default()
+    };
+    assert!(ctx.user_mode());
+    // Classification is RPL-based: any Ring3 selector is user mode.
+    ctx.cs = SegmentSelector::new(3, PrivilegeLevel::Ring3).0 as u64;
+    assert!(ctx.user_mode());
+    // Kernel code selectors carry RPL 0.
+    ctx.cs = KCODE64.0 as u64;
+    assert!(!ctx.user_mode());
+    ctx.cs = SegmentSelector::new(2, PrivilegeLevel::Ring0).0 as u64;
+    assert!(!ctx.user_mode());
+
+    // The entry frame UserContext::new builds from the same GDT selectors
+    // must classify as user mode.
+    let uctx = super::userspace::UserContext::new(0x1000, va!(0x2000), 0);
+    assert!(uctx.user_mode());
+
+    // The tick-classification accessor must report these same frames
+    // through the active-frame slot.
+    ctx.cs = UCODE64.0 as u64;
+    {
+        let _guard = crate::ExceptionContextGuard::new(&ctx);
+        assert_eq!(crate::active_exception_user_mode(), Some(true));
+    }
+    ctx.cs = KCODE64.0 as u64;
+    {
+        let _guard = crate::ExceptionContextGuard::new(&ctx);
+        assert_eq!(crate::active_exception_user_mode(), Some(false));
+    }
+    assert_eq!(crate::active_exception_user_mode(), None);
+}
+
 #[def_test]
 fn test_exception_context_sysno_retval() {
     let mut ctx = ExceptionContext::default();

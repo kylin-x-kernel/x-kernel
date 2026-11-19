@@ -26,6 +26,49 @@ fn test_exception_context_ip_sysno() {
     assert_eq!(ctx.sysno(), 42);
 }
 
+#[def_test(serial)]
+fn test_exception_context_user_mode() {
+    use aarch64_cpu::registers::SPSR_EL1;
+
+    // EL0t: interrupted context ran in user space.
+    let mut ctx = ExceptionContext {
+        spsr: SPSR_EL1::M::EL0t.value,
+        ..Default::default()
+    };
+    assert!(ctx.user_mode());
+    // EL1t / EL1h: interrupted context ran in the kernel.
+    ctx.spsr = SPSR_EL1::M::EL1t.value;
+    assert!(!ctx.user_mode());
+    ctx.spsr = SPSR_EL1::M::EL1h.value;
+    assert!(!ctx.user_mode());
+    // The N condition flag outside M must not change the classification.
+    // `Field` masks are unshifted; place N at its register position.
+    let n_flag = SPSR_EL1::N.mask << SPSR_EL1::N.shift;
+    ctx.spsr = n_flag;
+    assert!(ctx.user_mode());
+    ctx.spsr = n_flag | SPSR_EL1::M::EL1h.value;
+    assert!(!ctx.user_mode());
+
+    // The entry frame UserContext::new builds from the same SPSR entities
+    // must classify as user mode.
+    let uctx = super::userspace::UserContext::new(0x1000, va!(0x2000), 0);
+    assert!(uctx.user_mode());
+
+    // The tick-classification accessor must report these same frames
+    // through the active-frame slot.
+    ctx.spsr = SPSR_EL1::M::EL0t.value;
+    {
+        let _guard = crate::ExceptionContextGuard::new(&ctx);
+        assert_eq!(crate::active_exception_user_mode(), Some(true));
+    }
+    ctx.spsr = SPSR_EL1::M::EL1h.value;
+    {
+        let _guard = crate::ExceptionContextGuard::new(&ctx);
+        assert_eq!(crate::active_exception_user_mode(), Some(false));
+    }
+    assert_eq!(crate::active_exception_user_mode(), None);
+}
+
 #[def_test]
 fn test_exception_context_retval() {
     let mut ctx = ExceptionContext::default();

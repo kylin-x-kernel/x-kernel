@@ -466,7 +466,9 @@ pub(crate) fn set_sched_deadline_ns(deadline_ns: Option<u64>) {
 
 /// Hardware-timer IRQ entry for scheduling and owned timers:
 ///
-/// - Requests deferred user CPU-timer work when the periodic tick is due.
+/// - On a due periodic tick, charges one `TICK_NSEC` to the current user task's
+///   raw user/system counter, classified by the interrupted frame. Other timer
+///   IRQs do not settle CPU time.
 /// - Accounts real runtime for the current task first (so wake handling is not
 ///   charged to the wrong task). A due schedule slot runs Linux `entity_tick`
 ///   (`check_preempt_tick`); other timer IRQs only account.
@@ -506,7 +508,11 @@ pub fn on_timer_fire() {
         && let Some(current_task) = current_may_uninit()
         && let Some(runtime) = current_task.user_runtime()
     {
-        runtime.on_periodic_tick();
+        // Classify by the interrupted frame, not the mode this CPU is in while
+        // handling the IRQ. No active frame means kernel context, charged as
+        // system time.
+        let user_tick = khal::context::active_exception_user_mode().unwrap_or(false);
+        runtime.on_periodic_tick(user_tick, PERIODIC_TICK_NS);
     }
 
     let sched_due = {

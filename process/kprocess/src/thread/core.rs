@@ -18,7 +18,7 @@ use ktime_types::TimeSpan;
 use tee_task_iface::TeeSessionCtxTrait;
 
 use super::{
-    cpu_time::{CpuTimeState, CpuTimeStatistics},
+    cpu_time::{PrevCputime, ThreadCpuTime},
     restart::RestartSlot,
 };
 use crate::{
@@ -179,18 +179,21 @@ pub struct Thread {
     clear_child_tid: AtomicUsize,
     robust_list_head: AtomicUsize,
     signal: Arc<ThreadSignalManager>,
-    time: SpinNoIrq<CpuTimeStatistics>,
+    time: ThreadCpuTime,
+    /// Monotonic adjustment history for this thread's user/system split.
+    prev_cputime: PrevCputime,
     /// Coalesces periodic CPU-timer work requests until this task returns to
     /// userspace.
     ///
     /// Publication relationship covered by every ordering on this bit:
     /// producer is the local timer tick ([`Thread::request_cpu_timer_work`]),
-    /// whose `Release` store publishes a pending request after checking if
-    /// timers are armed. Observers are the user-return probe
+    /// whose `Release` store publishes the relaxed raw tick additions the
+    /// same tick just performed ([`ThreadCpuTime`]) and the armed-gate
+    /// value it read. Observers are the user-return probe
     /// ([`Thread::has_pending_cpu_timer_work`], `Acquire` load) and the
     /// consumer in the return tail ([`Thread::take_cpu_timer_work`], `AcqRel`
     /// swap). Their `Acquire` side pairs with the tick's `Release`, so a poll
-    /// observes the published request before sampling CPU time. The
+    /// runs on samples at least as recent as the tick that requested it. The
     /// swap is a single `AcqRel` RMW: it consumes exactly one coalesced
     /// request even when a tick on the way to another return re-arms the bit
     /// concurrently, and its `Release` side orders that re-request after the
@@ -295,7 +298,8 @@ impl Thread {
                 cred: RwLock::new(cred),
                 clear_child_tid: AtomicUsize::new(0),
                 robust_list_head: AtomicUsize::new(0),
-                time: SpinNoIrq::new(CpuTimeStatistics::new()),
+                time: ThreadCpuTime::new(),
+                prev_cputime: PrevCputime::new(),
                 cpu_timer_work_pending: AtomicBool::new(false),
                 nice: AtomicI32::new(NiceValue::default().as_i32()),
                 scheduler: Mutex::new(SchedulerState::default()),
@@ -760,50 +764,40 @@ impl Thread {
         self.process().pid()
     }
 
-    /// Settles the elapsed interval and returns sampled user and kernel CPU time.
+    /// Reads the committed raw user/system counters.
     ///
-    /// May sample another thread. The accounting lock serializes the sample
-    /// with that thread's mode changes and context switches.
-    pub fn sample_cpu_time(&self) -> (TimeSpan, TimeSpan) {
-        self.time.lock().sample(khal::time::monotonic_time())
+    /// Lock-free and settlement-free: a query may sample another thread from
+    /// any context that may read it. Only the owning CPU's periodic tick writes
+    /// these counters, so a remote read never advances them.
+    pub(crate) fn raw_cpu_time(&self) -> (u64, u64) {
+        self.time.raw()
     }
 
-    /// Settles the previous mode and starts the next user or kernel interval.
+    /// Charges one periodic accounting tick to the interrupted context.
     ///
-    /// Call for the current thread with IRQs masked at the architecture
-    /// transfer boundary. Releasing the accounting lock defers preemption to
-    /// the runtime's normal checkpoints.
-    pub fn switch_cpu_time_mode(&self, state: CpuTimeState) {
-        ktask::with_preempt_check_deferred(|| {
-            self.time
-                .lock()
-                .switch_mode(state, khal::time::monotonic_time());
-        });
+    /// Owning-CPU only, from the periodic tick with IRQs masked. `user_tick`
+    /// classifies the interrupted frame; `tick_ns` is `TICK_NSEC`.
+    pub(crate) fn account_tick(&self, user_tick: bool, tick_ns: u64) {
+        self.time.account_tick(user_tick, tick_ns);
     }
 
-    /// Starts a fresh accounting interval after this thread is switched in.
-    pub fn activate_cpu_time(&self) {
-        self.time.lock().activate(khal::time::monotonic_time());
-    }
-
-    /// Settles and closes the accounting interval before this thread switches out.
-    pub fn deactivate_cpu_time(&self) {
-        self.time.lock().deactivate(khal::time::monotonic_time());
-    }
-
-    /// Publishes the exit sample and refuses later switch-in intervals.
+    /// Returns this thread's adjusted user/system time.
     ///
-    /// Distinct from [`Self::set_exit`]: that flag is visible to PI adoption
-    /// while this thread can still be charged for cleanup.
-    pub fn finalize_cpu_time(&self) {
-        self.time.lock().finalize(khal::time::monotonic_time());
+    /// `rtime_ns` is the thread's scheduler-runtime sample. The caller refreshes
+    /// the current task before reading it; a remote thread contributes its
+    /// committed runtime. The raw tick split is scaled against that runtime and
+    /// kept monotonic by `prev_cputime`.
+    pub fn cpu_time_adjusted(&self, rtime_ns: u64) -> (TimeSpan, TimeSpan) {
+        let (utime, stime) = self.time.raw();
+        let (utime, stime) = self.prev_cputime.adjust(utime, stime, rtime_ns);
+        (TimeSpan::from_nanos(utime), TimeSpan::from_nanos(stime))
     }
 
     /// Requests a CPU-timer poll for this task at its next user return.
     ///
     /// Called from interrupt context by the periodic tick. Requests are
-    /// coalesced: the `Release` store publishes this tick's CPU-time
-    /// settlements, and repeated ticks before a return add no work. Gated by
+    /// coalesced: the `Release` store publishes this tick's raw counter
+    /// additions, and repeated ticks before a return add no work. Gated by
     /// the process armed flag, so a task group with no CPU timers never sets
     /// the bit. See [`Thread::cpu_timer_work_pending`] for the ordering
     /// contract.
@@ -825,7 +819,7 @@ impl Thread {
     /// Consumes one coalesced CPU-timer work request.
     ///
     /// Returns `true` at most once per tick request; the `AcqRel` swap both
-    /// observes the requesting tick's settlements and orders a concurrent
+    /// observes the requesting tick's raw additions and orders a concurrent
     /// re-request after this consumption. See
     /// [`Thread::cpu_timer_work_pending`] for the full ordering contract.
     pub(crate) fn take_cpu_timer_work(&self) -> bool {

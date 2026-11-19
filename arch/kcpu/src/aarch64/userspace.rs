@@ -174,6 +174,11 @@ impl UserContext {
 
         let ret = match trap_kind {
             ArchTrap::Irq => {
+                // The EL0 entry returns to here instead of dispatch_exception,
+                // so publish the interrupted user frame as this CPU's active
+                // trap context for tick classification; the EL1 path already
+                // installs its own guard in dispatch_exception.
+                let _tf_guard = crate::ExceptionContextGuard::new(&self.tf);
                 // SAFETY: user return captured an IRQ, restored kernel CPU
                 // state and kept ordinary IRQs masked through on_user_exit.
                 unsafe { handle_trap!(IRQ, 0) };

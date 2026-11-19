@@ -130,9 +130,13 @@ pub trait UserTaskRuntime: Send + Sync + Any {
     fn on_enter(&self) {}
     /// Called on the outgoing task before saving its context.
     fn on_leave(&self) {}
-    /// Requests bounded owner work for a due periodic tick.
-    /// Runs in interrupt context with IRQs masked and must not block or allocate.
-    fn on_periodic_tick(&self) {}
+    /// Accounts one periodic accounting tick for the interrupted task.
+    ///
+    /// `user_tick` classifies the interrupted context; `tick_ns` is `TICK_NSEC`.
+    /// Runs in interrupt context for the interrupted task with IRQs masked;
+    /// implementations must be lock-free and non-blocking, and must not settle
+    /// a remote task.
+    fn on_periodic_tick(&self, _user_tick: bool, _tick_ns: u64) {}
     /// Marks that the current CPU may retain TLB state for this task's user
     /// address space.
     fn set_user_mm_resident_cpu(&self, _cpu_id: LogicalCpuId) {}
@@ -1000,7 +1004,9 @@ impl TaskInner {
     /// Restores only the effective mask after a failed migration.
     ///
     /// The requested mask belongs to userspace and the bound to cpuset; a
-    /// transient stop failure must not overwrite either of them.
+    /// transient stop failure must not overwrite either of them. Only the
+    /// SMP migration path (`run_queue::migrate`) calls this, so it shares
+    /// that module's `smp` gate.
     #[cfg(feature = "smp")]
     #[inline]
     pub(crate) fn restore_effective_cpus(&self, cpumask: KCpuMask) {

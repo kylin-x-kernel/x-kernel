@@ -11,6 +11,7 @@
 
 use core::{arch::naked_asm, fmt};
 
+use aarch64_cpu::registers::SPSR_EL1;
 use memaddr::VirtAddr;
 
 /// Saved registers when a trap (exception) occurs.
@@ -113,6 +114,15 @@ impl ExceptionContext {
     /// Sets the instruction pointer.
     pub const fn set_ip(&mut self, val: usize) {
         self.elr = val as u64;
+    }
+
+    /// Returns whether this trap interrupted user mode (EL0).
+    ///
+    /// `SPSR_EL1.M == EL0t` means the interrupted context ran at EL0, decoded
+    /// with the same register entities the user entry frame is built from.
+    /// `FieldValue` masks and values are shifted into register position.
+    pub const fn user_mode(&self) -> bool {
+        self.spsr & SPSR_EL1::M::EL0t.mask() == SPSR_EL1::M::EL0t.value
     }
 
     /// Get the syscall number (x8).

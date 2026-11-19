@@ -267,6 +267,14 @@ impl ExceptionContext {
         self.sepc = pc;
     }
 
+    /// Returns whether this trap interrupted user mode.
+    ///
+    /// `sstatus.SPP` (Supervisor Previous Privilege) is `User` when the
+    /// interrupted context ran in U-mode.
+    pub fn user_mode(&self) -> bool {
+        self.sstatus.spp() == sstatus::SPP::User
+    }
+
     /// Gets the stack pointer.
     pub const fn sp(&self) -> usize {
         self.regs.sp

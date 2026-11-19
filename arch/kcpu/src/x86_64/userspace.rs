@@ -259,6 +259,10 @@ impl UserContext {
             }
             LEGACY_SYSCALL_VECTOR => ReturnReason::Syscall,
             IRQ_VECTOR_START..=IRQ_VECTOR_END => {
+                // The user-return entry dispatches here instead of the kernel
+                // trap handler, so publish the interrupted user frame as this
+                // CPU's active trap context for tick classification.
+                let _tf_guard = crate::ExceptionContextGuard::new(&self.tf);
                 // SAFETY: the user interrupt gate cleared IF and enter_user
                 // restored kernel CPU state before this saved-vector dispatch.
                 unsafe { handle_trap!(IRQ, vector as _) };

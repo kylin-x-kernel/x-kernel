@@ -4,7 +4,7 @@
 
 use khal::time::monotonic_time;
 use ksignal::Signo;
-use ktime_types::TimeSpan;
+use ktime_types::{TaskCputime, TimeSpan};
 use linux_raw_sys::general::{CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID};
 use posix_types::ITimerType;
 use unittest::def_test;
@@ -33,6 +33,14 @@ fn configuration(
         alloc::sync::Weak::<InactiveOrigin>::new(),
         ksignal::TimerSignalTarget::process(alloc::sync::Weak::new()),
     )
+}
+
+fn cpu_sample(utime_ns: u64, stime_ns: u64, runtime_ns: u64) -> TaskCputime {
+    TaskCputime {
+        utime: utime_ns,
+        stime: stime_ns,
+        sum_exec_runtime: runtime_ns,
+    }
 }
 
 #[def_test]
@@ -70,14 +78,8 @@ fn process_cpu_posix_timer_uses_scheduler_runtime() {
         .unwrap()
         .finish();
 
-    let raw = TimeSpan::from_nanos(100);
-    assert!(manager.poll_cpu_timers(raw, raw, TimeSpan::from_nanos(14)).is_empty());
-    assert_eq!(
-        manager
-            .poll_cpu_timers(TimeSpan::ZERO, TimeSpan::ZERO, TimeSpan::from_nanos(15))
-            .len(),
-        1
-    );
+    assert!(manager.poll_cpu_timers(cpu_sample(100, 100, 14)).is_empty());
+    assert_eq!(manager.poll_cpu_timers(cpu_sample(0, 0, 15)).len(), 1);
 }
 
 #[def_test]
@@ -323,7 +325,7 @@ fn rejected_admission_returns_configuration_without_publishing() {
         )
         .unwrap()
         .finish();
-    let deliveries = manager.poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO, TimeSpan::from_nanos(1));
+    let deliveries = manager.poll_cpu_timers(cpu_sample(1, 0, 1));
     assert_eq!(deliveries.len(), 1);
     assert!(matches!(
         deliveries.as_slice(),
@@ -347,8 +349,7 @@ fn test_any_cpu_timer_armed_tracks_arm_and_disarm() {
         ITimerType::Real,
         TimeSpan::from_nanos(10),
         TimeSpan::from_nanos(10),
-        TimeSpan::ZERO,
-        TimeSpan::ZERO,
+        cpu_sample(0, 0, 0),
     );
     assert!(!manager.any_cpu_timer_armed());
 
@@ -356,13 +357,12 @@ fn test_any_cpu_timer_armed_tracks_arm_and_disarm() {
         ITimerType::Virtual,
         TimeSpan::ZERO,
         TimeSpan::from_nanos(10),
-        TimeSpan::ZERO,
-        TimeSpan::ZERO,
+        cpu_sample(0, 0, 0),
     );
     assert!(manager.any_cpu_timer_armed());
 
     // One-shot expiry disarms through update(); the gate mirrors that.
-    manager.poll_cpu_timers(TimeSpan::from_nanos(10), TimeSpan::ZERO, TimeSpan::from_nanos(10));
+    manager.poll_cpu_timers(cpu_sample(10, 0, 10));
     assert!(!manager.any_cpu_timer_armed());
 
     // Process-CPU POSIX timers participate in the gate.
@@ -402,8 +402,7 @@ fn test_process_timer_manager_set_itimer_returns_previous_values() {
         ITimerType::Virtual,
         TimeSpan::from_nanos(11),
         TimeSpan::from_nanos(22),
-        TimeSpan::ZERO,
-        TimeSpan::ZERO,
+        cpu_sample(0, 0, 0),
     );
     assert_eq!(old_interval.as_secs(), 0);
     assert_eq!(old_remained.as_secs(), 0);
@@ -412,16 +411,58 @@ fn test_process_timer_manager_set_itimer_returns_previous_values() {
         ITimerType::Virtual,
         TimeSpan::from_nanos(33),
         TimeSpan::from_nanos(44),
-        TimeSpan::ZERO,
-        TimeSpan::ZERO,
+        cpu_sample(0, 0, 0),
     );
     assert_eq!(old_interval.subsec_nanos(), 11);
     assert_eq!(old_remained.subsec_nanos(), 22);
 
-    let (interval, remained) =
-        manager.get_itimer(ITimerType::Virtual, TimeSpan::ZERO, TimeSpan::ZERO);
+    let (interval, remained) = manager.get_itimer(ITimerType::Virtual, cpu_sample(0, 0, 0));
     assert_eq!(interval.subsec_nanos(), 33);
     assert_eq!(remained.subsec_nanos(), 44);
+}
+
+/// CPU-timer expiry consumes the raw tick split, never the adjusted view.
+///
+/// Review counterexample: raw `(utime, stime) = (1ms, 1ms)` against a 10ms
+/// scheduler runtime adjusts to a 5ms/5ms split. A 4ms ITIMER_VIRTUAL or
+/// ITIMER_PROF deadline must not fire at that raw sample — Linux
+/// `posix-cpu-timers` feeds raw values into expiry, and the adjusted view is
+/// reserved for times/getrusage/wait.
+#[def_test]
+fn cpu_timer_expiry_uses_raw_split_not_adjusted() {
+    let mut manager = ProcessTimerManager::new(1);
+    // Raw 1ms user + 1ms system against 10ms runtime: adjustment would scale
+    // the split to 5ms/5ms (PROF sum 10ms), past both 4ms deadlines.
+    let sample = cpu_sample(1_000_000, 1_000_000, 10_000_000);
+
+    manager.set_itimer(
+        ITimerType::Virtual,
+        TimeSpan::ZERO,
+        TimeSpan::from_millis(4),
+        sample,
+    );
+    manager.set_itimer(
+        ITimerType::Prof,
+        TimeSpan::ZERO,
+        TimeSpan::from_millis(4),
+        sample,
+    );
+    // The deadlines sit on the raw clock: VIRTUAL at 1ms + 4ms = 5ms user
+    // time, PROF at 2ms + 4ms = 6ms user+system. An adjusted now (5ms user)
+    // would already reach the VIRTUAL deadline and fire early.
+    assert!(manager.poll_cpu_timers(sample).is_empty());
+    // The reported remaining is raw too: at 2ms raw user time the 5ms
+    // deadline has 3ms left.
+    let (_, remained) = manager.get_itimer(
+        ITimerType::Virtual,
+        cpu_sample(2_000_000, 1_000_000, 10_000_000),
+    );
+    assert_eq!(remained, TimeSpan::from_millis(3));
+
+    // Positive control: once the raw counters reach the deadlines both fire
+    // (user 5ms >= VIRTUAL 5ms; user + system 6ms >= PROF 6ms).
+    let reached = cpu_sample(5_000_000, 1_000_000, 10_000_000);
+    assert_eq!(manager.poll_cpu_timers(reached).len(), 2);
 }
 
 #[def_test]
@@ -453,7 +494,7 @@ fn test_posix_timer_signal_seq_invalidates_stale_signal() {
     assert!(delivery.is_none());
 
     let delivery = manager
-        .poll_cpu_timers(TimeSpan::from_nanos(1), TimeSpan::ZERO, TimeSpan::from_nanos(1))
+        .poll_cpu_timers(cpu_sample(1, 0, 1))
         .into_iter()
         .next()
         .expect("timer delivery");
@@ -520,7 +561,7 @@ fn dequeued_notification_absorbs_intervals_due_before_delivery() {
     // The first interval produces the notification; the two intervals that
     // elapse afterwards are still uncollected when it is dequeued.
     let delivery = manager
-        .poll_cpu_timers(TimeSpan::from_nanos(2), TimeSpan::ZERO, TimeSpan::from_nanos(2))
+        .poll_cpu_timers(cpu_sample(2, 0, 2))
         .into_iter()
         .next()
         .expect("timer delivery");
@@ -540,12 +581,12 @@ fn dequeued_notification_absorbs_intervals_due_before_delivery() {
     // They were absorbed, so the timer stays quiet until the next interval.
     assert!(
         manager
-            .poll_cpu_timers(TimeSpan::from_nanos(8), TimeSpan::ZERO, TimeSpan::from_nanos(8))
+            .poll_cpu_timers(cpu_sample(8, 0, 8))
             .is_empty()
     );
     assert_eq!(
         manager
-            .poll_cpu_timers(TimeSpan::from_nanos(11), TimeSpan::ZERO, TimeSpan::from_nanos(11))
+            .poll_cpu_timers(cpu_sample(11, 0, 11))
             .len(),
         1
     );
@@ -650,7 +691,7 @@ fn dequeue_cpu_time_gate_matches_the_manager_admission() {
         .unwrap()
         .finish();
     let delivery = manager
-        .poll_cpu_timers(TimeSpan::from_nanos(2), TimeSpan::ZERO, TimeSpan::from_nanos(2))
+        .poll_cpu_timers(cpu_sample(2, 0, 2))
         .into_iter()
         .next()
         .expect("timer delivery");

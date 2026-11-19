@@ -318,16 +318,6 @@ impl Process {
         self.lifecycle.exit_event()
     }
 
-    /// Adds exited-thread CPU time to this process's accumulated counters.
-    pub(crate) fn accumulate_exited_thread_time(&self, utime: TimeSpan, stime: TimeSpan) {
-        self.lifecycle.accumulate_exited_thread_time(utime, stime);
-    }
-
-    /// Returns accumulated exited-thread user and kernel time.
-    pub fn exited_thread_time(&self) -> (TimeSpan, TimeSpan) {
-        self.lifecycle.exited_thread_time()
-    }
-
     /// Adds reaped-child CPU time to this process's accumulated counters.
     pub(crate) fn accumulate_child_time(&self, utime: TimeSpan, stime: TimeSpan) {
         self.lifecycle.accumulate_child_time(utime, stime);
@@ -670,14 +660,17 @@ impl Process {
         };
 
         let exit_code = child.exit_code();
-        let (thread_utime, thread_stime) = child.exited_thread_time();
+        // Report the reaped child's adjusted thread-group user/system plus its
+        // own accumulated descendant totals. The group split is already
+        // adjusted; the descendant totals were accumulated adjusted at each reap.
+        let (own_utime, own_stime) = child.process_cpu_times();
         let (child_utime, child_stime) = child.child_time();
         let waited = WaitedChild {
             process: child.clone(),
             pid,
             exit_code,
-            total_utime: thread_utime.saturating_add(child_utime),
-            total_stime: thread_stime.saturating_add(child_stime),
+            total_utime: own_utime.saturating_add(child_utime),
+            total_stime: own_stime.saturating_add(child_stime),
             consumed: mode == WaitReapMode::Consume,
         };
 

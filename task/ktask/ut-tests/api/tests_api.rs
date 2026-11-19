@@ -134,7 +134,7 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
     }
 
     impl crate::UserTaskRuntime for RuntimeProbe {
-        fn on_periodic_tick(&self) {
+        fn on_periodic_tick(&self, _user_tick: bool, _tick_ns: u64) {
             if karch::local_irq_enabled() || !kirq::context::is_in_hardirq() {
                 self.invalid_context.store(true, Ordering::Relaxed);
             }
@@ -222,11 +222,6 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
                     }
                 };
                 if !started {
-                    while worker_periodic_ticks.load(Ordering::Acquire) == before_periodic
-                        && khal::time::monotonic_time_nanos() < limit_ns
-                    {
-                        core::hint::spin_loop();
-                    }
                     continue;
                 }
                 while !delivered.load(Ordering::Acquire)
@@ -237,6 +232,8 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
                 if delivered.load(Ordering::Acquire)
                     && fired_ns.load(Ordering::Relaxed) < deadline_ns
                 {
+                    // The early IRQ must not consume the periodic tick or move
+                    // its deadline; only the periodic dispatch advances them.
                     worker_valid.store(
                         observed_periodic_ticks.load(Ordering::Relaxed) == before_periodic
                             && observed_deadline.load(Ordering::Relaxed) == deadline_ns,

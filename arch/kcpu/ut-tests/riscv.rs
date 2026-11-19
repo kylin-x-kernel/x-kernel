@@ -26,6 +26,41 @@ fn test_syscall_restart_ignored_without_syscall_trap() {
     );
 }
 
+#[def_test(serial)]
+fn test_exception_context_user_mode() {
+    use riscv::register::sstatus::{SPP, Sstatus};
+
+    // SPP = User: interrupted context ran in U-mode.
+    let mut ctx = ExceptionContext {
+        sstatus: Sstatus::from_bits(0),
+        ..Default::default()
+    };
+    ctx.sstatus.set_spp(SPP::User);
+    assert!(ctx.user_mode());
+    // SPP = Supervisor: interrupted context ran in S-mode.
+    ctx.sstatus.set_spp(SPP::Supervisor);
+    assert!(!ctx.user_mode());
+
+    // The entry frame UserContext::new builds from the same SPP entity
+    // must classify as user mode.
+    let uctx = super::userspace::UserContext::new(0x1000, va!(0x2000), 0);
+    assert!(uctx.user_mode());
+
+    // The tick-classification accessor must report these same frames
+    // through the active-frame slot.
+    ctx.sstatus.set_spp(SPP::User);
+    {
+        let _guard = crate::ExceptionContextGuard::new(&ctx);
+        assert_eq!(crate::active_exception_user_mode(), Some(true));
+    }
+    ctx.sstatus.set_spp(SPP::Supervisor);
+    {
+        let _guard = crate::ExceptionContextGuard::new(&ctx);
+        assert_eq!(crate::active_exception_user_mode(), Some(false));
+    }
+    assert_eq!(crate::active_exception_user_mode(), None);
+}
+
 #[def_test]
 fn test_syscall_restart_after_syscall_trap() {
     let mut ctx = ExceptionContext {

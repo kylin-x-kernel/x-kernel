@@ -91,14 +91,14 @@ registration is not proof that their pages remain accessible.
 ## Unsafe inventory and memory invariants
 
 User-transfer callbacks call `krcu::enter_user_quiescent` and
-`krcu::exit_user_quiescent`. POSIX owns their placement relative to the CPU-time
-settlement and trap dispatch. The watching state, reader cleanup policy and
-GP service belong to `krcu`. Task storage remains owned by `ktask`. These callbacks do not expose general consumer read or reclamation
+`krcu::exit_user_quiescent`. POSIX owns their placement relative to trap
+dispatch; the callbacks publish no accounting state and read no clock. The
+watching state, reader cleanup policy and GP service belong to `krcu`. Task storage remains owned by `ktask`. These callbacks do not expose general consumer read or reclamation
 admission.
 
 | Location | Operation and necessary invariant | Guard/provider |
 |---|---|---|
-| `src/runtime.rs`, `run_user_thread_loop` callbacks | Enter/exit user quiescence with no protected borrow spanning the window; restore watching before trap dispatch. | IRQs are masked; only audited RCU-free architecture transfer runs between transitions. User-entry settlement precedes quiescence and trap-entry settlement follows watched restoration. Both defer preemption checks. No scheduling may span the quiescent window. |
+| `src/runtime.rs`, `run_user_thread_loop` callbacks | Enter/exit user quiescence with no protected borrow spanning the window; restore watching before trap dispatch. | IRQs are masked; only audited RCU-free architecture transfer runs between transitions. The callbacks only enter/exit user quiescence: they publish no accounting state and read no clock. Both defer preemption checks. No scheduling may span the quiescent window. |
 | `src/runtime.rs`, `run_user_thread_loop` (LoongArch only) | Calls unsafe `UserContext::emulate_unaligned`; the saved context must still describe the faulting misaligned instruction. | Only reached for the `Misaligned` exception returned by that context's `run`; matches its adjacent SAFETY explanation. |
 | `src/runtime.rs`, `exit_robust_list` | Forms a raw address of the embedded list sentinel without loading the field. | The pointer is the registered robust-list head; the address is used only for termination comparison, and actual contents are copied with `read_vm`, as stated by the SAFETY comment. |
 

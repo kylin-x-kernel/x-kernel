@@ -84,17 +84,11 @@ impl UserTaskRuntime for Thread {
         Some(mask)
     }
 
-    fn on_enter(&self) {
-        // `activate_cpu_time` ignores a thread whose exit sample is already
-        // published. `is_exiting` is set earlier and must not skip the interval.
-        self.activate_cpu_time();
-    }
-
-    fn on_leave(&self) {
-        self.deactivate_cpu_time();
-    }
-
-    fn on_periodic_tick(&self) {
+    fn on_periodic_tick(&self, user_tick: bool, tick_ns: u64) {
+        // The owning CPU charges one tick to the interrupted context's raw
+        // counter, then requests coalesced CPU-timer work for the next user
+        // return. Switch boundaries do not settle time.
+        self.account_tick(user_tick, tick_ns);
         self.request_cpu_timer_work();
     }
 

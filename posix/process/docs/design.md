@@ -110,21 +110,18 @@ across its exit cleanup.
 
 ## Runtime and teardown flow
 
-`UserContext::run` owns the IRQ-masked user-transfer boundary. The entry
-callback settles kernel CPU time and starts the user interval before calling
-`krcu::enter_user_quiescent`. The return callback restores RCU watching with
-`krcu::exit_user_quiescent`, then settles user CPU time and starts the kernel
-interval before IRQ dispatch or syscall and fault handling. Each accounting
-transition reads the monotonic clock under the thread's IRQ-safe accounting
-lock and defers preemption checks to the runtime's normal checkpoints.
+`UserContext::run` owns the IRQ-masked user-transfer boundary. Its entry callback
+calls `krcu::enter_user_quiescent`; its return callback calls
+`krcu::exit_user_quiescent`. The boundary publishes no accounting state and
+reads no clock; the periodic tick classifies CPU time from the interrupted
+frame's privilege. The return callback precedes architecture IRQ
+dispatch as well as syscall/fault processing in this loop. No RCU read scope or protected borrow may span user
+execution; retained task/thread references use independent ownership. RCU
+system state, GP service and private read-admission policy belong to `krcu`,
+with algorithms in `krcu-core`, not POSIX. `ktask` retains task reader storage
+and scheduler boundaries. No public consumer read interface is opened here.
 
-No RCU read scope or protected borrow may span user execution. Retained
-task and thread references use independent ownership. RCU system state,
-GP service and private read-admission policy belong to `krcu`, with algorithms
-in `krcu-core`. `ktask` retains task reader storage and scheduler boundaries.
-
-The loop alternates user execution, trap handling, kernel CPU accounting and
-signal checks. After the trap, one lock-free probe packs the independent
+The loop alternates user execution, trap handling and signal checks. After the trap, one lock-free probe packs the independent
 return-work projections — deliverable signal, interrupted task, armed CPU
 timer, pending reschedule, signal-return action and syscall restart errno. When
 it is clear, the loop skips signal scanning, timer polling, the scheduling
@@ -182,27 +179,27 @@ every Go program that execs (runc init, containerd-shim) fails.
    cgroup membership.
 3. Call `finish_thread_exit`. `kprocess` removes membership and reserves the
    unique last-thread qualification under its membership lock only if this call
-   actually removes the final published member. It releases the lock and retires
+   actually removes the final published member. The same critical section hands
+   the thread's raw user/system counters and scheduler runtime to the group
+   totals; the last member's transfer completes in `complete_process_exit`
+   after cleanup. It releases the lock and retires
    the global TID publication before returning. Repeated exits cannot qualify
    again, and later task publication into the reserved process is rejected.
-4. Close the CPU-accounting interval and accumulate final thread CPU time.
-   The exit flag is published earlier, before the PI sweep; switch-in keeps
-   charging cleanup until this close.
-5. For the last thread, run the optional named `exit_tee` stage. It calls
+4. For the last thread, run the optional named `exit_tee` stage. It calls
    `tee_ta_release_sessions` after TID retirement, with the current user runtime
    still installed and the filesystem context available for the manager path.
    It may sleep without holding the membership lock, touches no user memory or
    process descriptors, and shares a one-second exchange deadline. Failure is
    logged and exit continues. Only this side effect is feature-gated; TEE and
    non-TEE builds use the same membership and reservation algorithm.
-6. For the last thread, detach signal handlers and the mm owner, clear SysV shm
+5. For the last thread, detach signal handlers and the mm owner, clear SysV shm
    accounting and optional TEE runtime-private state, then detach the filesystem
    context and namespaces. With TIPC enabled, close process-local handles before
    publishing process exit.
-7. Complete process exit/parent notification only after the last-thread cleanup
+6. Complete process exit/parent notification only after the last-thread cleanup
    and resource detach. If group exit was requested and not already marked,
    mark it and send SIGKILL to surviving sibling threads.
-8. Return to the kernel continuation; the trap loop stops before user reentry.
+7. Return to the kernel continuation; the trap loop stops before user reentry.
    `check_signals` rejects an already exiting thread before touching its signal
    queue or constructing a user frame, including the next signal-loop iteration
    after a fatal signal itself called `do_exit`.

@@ -80,6 +80,9 @@ pub use firmware::cmdline;
 /// - [`in_exception_context`](context::in_exception_context): Returns whether the current CPU is still inside
 ///   an exception context without exposing the trapframe itself.
 ///
+/// - [`active_exception_user_mode`](context::active_exception_user_mode): Returns whether the active trapframe
+///   interrupted user mode, reading only the privilege field.
+///
 /// - [`suspend_active_exception_context`](context::suspend_active_exception_context) and [`resume_active_exception_context`](context::resume_active_exception_context):
 ///   Temporarily remove and later restore the current CPU marker across a task
 ///   switch, so a sleepable trap backend does not leave a stale marker on the
@@ -87,9 +90,9 @@ pub use firmware::cmdline;
 pub mod context {
     pub use kcpu::{
         SuspendedExceptionContext, TaskContext, TrapFrame, active_exception_context,
-        current_task_ptr, in_exception_context, in_exception_context_irqoff,
-        resume_active_exception_context, set_current_task_ptr, suspend_active_exception_context,
-        with_active_exception_context,
+        active_exception_user_mode, current_task_ptr, in_exception_context,
+        in_exception_context_irqoff, resume_active_exception_context, set_current_task_ptr,
+        suspend_active_exception_context, with_active_exception_context,
     };
 }
 

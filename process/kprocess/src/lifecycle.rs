@@ -22,10 +22,6 @@ struct ProcessEvents {
 }
 
 struct ProcessCpuTotals {
-    /// Accumulated user-mode nanoseconds of exited threads in this process.
-    exited_thread_utime_ns: AtomicU64,
-    /// Accumulated kernel-mode nanoseconds of exited threads in this process.
-    exited_thread_stime_ns: AtomicU64,
     /// Accumulated user-mode nanoseconds of reaped children.
     child_utime_ns: AtomicU64,
     /// Accumulated kernel-mode nanoseconds of reaped children.
@@ -65,16 +61,6 @@ impl ProcessLifecycleState {
     /// Wakes waiters that are blocked on this process exiting.
     pub(crate) fn notify_exit(&self) {
         self.events.notify_exit();
-    }
-
-    /// Adds exited-thread CPU time to the accumulated counters.
-    pub(crate) fn accumulate_exited_thread_time(&self, utime: TimeSpan, stime: TimeSpan) {
-        self.cpu_totals.accumulate_exited_thread_time(utime, stime);
-    }
-
-    /// Returns accumulated exited-thread user and kernel time.
-    pub(crate) fn exited_thread_time(&self) -> (TimeSpan, TimeSpan) {
-        self.cpu_totals.exited_thread_time()
     }
 
     /// Adds CPU time from a child reaped via `wait*()` to the accumulated
@@ -121,25 +107,9 @@ impl ProcessEvents {
 impl ProcessCpuTotals {
     fn new() -> Self {
         Self {
-            exited_thread_utime_ns: AtomicU64::new(0),
-            exited_thread_stime_ns: AtomicU64::new(0),
             child_utime_ns: AtomicU64::new(0),
             child_stime_ns: AtomicU64::new(0),
         }
-    }
-
-    fn accumulate_exited_thread_time(&self, utime: TimeSpan, stime: TimeSpan) {
-        self.exited_thread_utime_ns
-            .fetch_add(span_to_raw_nanos(utime), Ordering::Relaxed);
-        self.exited_thread_stime_ns
-            .fetch_add(span_to_raw_nanos(stime), Ordering::Relaxed);
-    }
-
-    fn exited_thread_time(&self) -> (TimeSpan, TimeSpan) {
-        (
-            TimeSpan::from_nanos(self.exited_thread_utime_ns.load(Ordering::Relaxed)),
-            TimeSpan::from_nanos(self.exited_thread_stime_ns.load(Ordering::Relaxed)),
-        )
     }
 
     fn accumulate_child_time(&self, utime: TimeSpan, stime: TimeSpan) {

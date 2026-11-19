@@ -44,8 +44,9 @@ mod active_exception_context;
 
 pub use active_exception_context::{
     ExceptionContextGuard, SuspendedExceptionContext, active_exception_context,
-    in_exception_context, in_exception_context_irqoff, resume_active_exception_context,
-    suspend_active_exception_context, with_active_exception_context,
+    active_exception_user_mode, in_exception_context, in_exception_context_irqoff,
+    resume_active_exception_context, suspend_active_exception_context,
+    with_active_exception_context,
 };
 
 mod cpuinfo;

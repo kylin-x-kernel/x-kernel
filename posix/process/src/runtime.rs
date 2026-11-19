@@ -13,9 +13,8 @@ use kerrno::{KError, KResult, LinuxError};
 use khal::uspace::{ExceptionKind, ReturnReason, UserContext};
 use kidentity::PidHandle;
 use kprocess::{
-    AsThread, CpuTimeState, Pid, Thread, Tid, UserThreadRuntimeAction,
-    current_user_process_address_space, current_user_thread, poll_cpu_timers_for, process_exit,
-    process_signals, scheduler,
+    AsThread, Pid, Thread, Tid, UserThreadRuntimeAction, current_user_process_address_space,
+    current_user_thread, poll_cpu_timers_for, process_exit, process_signals, scheduler,
 };
 use ksignal::{SignalInfo, SignalOsAction, SignalSet, Signo};
 use ktask::{PreparedTaskEntry, TaskInner, current};
@@ -97,7 +96,6 @@ pub(crate) fn run_user_thread_loop(
         let _ = ktask::freezer::checkpoint();
         let reason = uctx.run(
             || {
-                thr.switch_cpu_time_mode(CpuTimeState::User);
                 // SAFETY: UserContext masks IRQs and performs only audited
                 // RCU-free architecture transfer after this callback. The loop
                 // holds no RCU scope; task/thread references have independent ownership.
@@ -108,7 +106,6 @@ pub(crate) fn run_user_thread_loop(
                 // with IRQs masked, before dispatching any returned trap. Restore
                 // watching before dispatching the trap.
                 unsafe { krcu::exit_user_quiescent() };
-                thr.switch_cpu_time_mode(CpuTimeState::Kernel);
             },
         );
         let mut runtime_action = UserThreadRuntimeAction::Continue;
@@ -586,14 +583,12 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     // publish process completion while a sibling still owns descriptors.
     thr.files().exit_files();
     thr.detach_cgroup();
+    // Membership removal hands this thread's raw user/system and scheduler
+    // runtime to the group totals under the membership lock, reserves the
+    // sole last-thread continuation and retires the global TID. The last
+    // thread's handoff completes in `complete_process_exit` after cleanup,
+    // before the parent can observe it.
     let is_last_thread = process_exit::finish_thread_exit(process, &curr, exit_code);
-
-    // Membership removal reserves the sole last-thread continuation and retires
-    // the global TID. Close its accounting interval before process cleanup and
-    // parent-visible completion; the current runtime remains installed.
-    thr.finalize_cpu_time();
-    let (thread_utime, thread_stime) = thr.sample_cpu_time();
-    process_exit::record_exited_thread_cpu_time(process, thread_utime, thread_stime);
 
     if is_last_thread {
         #[cfg(feature = "tee")]

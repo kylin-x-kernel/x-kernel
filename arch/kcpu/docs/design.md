@@ -170,6 +170,19 @@ arch/kcpu/
 └── README.md
 ```
 
+### Cross-crate interface: active-frame privilege classification
+
+`active_exception_user_mode()` is a public crate-root interface (re-exported
+through `khal::context`). Provider: `kcpu`, reading the privilege bit of the
+per-CPU active trapframe published by `ExceptionContextGuard` on every trap
+entry, including the user-return IRQ arms that bypass the kernel trap handler.
+Consumer: the scheduler CPU-timer tick classification in `ktask`
+(`on_timer_fire`), which charges the due periodic tick as user or system time
+for the interrupted task. Calling context: IRQ context on the owning CPU, with
+ordinary IRQs masked for the slot load; it returns `None` when no frame is
+active, which the consumer treats as kernel/system context. It reads only the
+privilege bit and never copies or retains the frame.
+
 ## Test Layout
 
 Guest tests are mounted into their original parent modules through `unittest::path_mod_test!`, and the files are located in `ut-tests/` at the crate root. Module names, visibility, `super` access, and registration paths remain unchanged; the original outer architecture conditions and `cfg(unittest)` are retained, and the macro also provides the guest gate.
@@ -178,17 +191,17 @@ Guest tests are mounted into their original parent modules through `unittest::pa
 | --- | --- | --- |
 | `lib.rs` | 1 | None |
 | `excp.rs` | 3 | None |
-| `active_exception_context.rs` | 5 | None, all serial |
+| `active_exception_context.rs` | 8 | None, all serial |
 | `userspace_common.rs` | 3 | None |
-| `aarch64.rs` | 7 | AArch64 |
+| `aarch64.rs` | 8 | AArch64, of which 1 case is serial |
 | `aarch64_current_unittest.rs` | 1 | AArch64, existing file changed to path mounting |
-| `x86_64.rs` | 6 | x86_64 |
+| `x86_64.rs` | 7 | x86_64, of which 1 case is serial |
 | `x86_cpuinfo.rs` | 13 | x86_64 |
 | `x86_xstate.rs` | 3 | x86_64 (YMM cases need `fp-simd`) |
 | `x86_64_userspace.rs` | 2 | x86_64 and `fp-simd` |
-| `riscv.rs` | 4 | riscv32 or riscv64 |
+| `riscv.rs` | 5 | riscv32 or riscv64, of which 1 case is serial |
 | `riscv_hwprobe.rs` | 7 | riscv32 or riscv64, of which 2 cases are serial |
-| `loongarch64.rs` | 5 | LoongArch64 |
+| `loongarch64.rs` | 6 | LoongArch64, of which 1 case is serial |
 
 The actual number of guest cases is determined jointly by the architecture, features and test filters, according to the runtime registration list.
 `tests/host/aarch64_userspace_host.rs`, which `src/aarch64/userspace.rs` originally mounted under `cfg(test)`,

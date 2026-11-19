@@ -210,6 +210,16 @@ attempts restoration on the original slot and the current CPU slot; before switc
 CPU's slot, and restores it to the current CPU after switching back. This API immediately copies the trapframe by value and returns a snapshot,
 avoiding exposing to the caller a borrowed reference that could become invalid after the trap returns.
 
+### 2a. `active_exception_user_mode()` privilege-field read (`active_exception_context.rs:94-108`)
+
+```rust
+Some(unsafe { (*(ptr as *const ExceptionContext)).user_mode() })
+```
+
+**Invariant**: `ptr` must point to a live `ExceptionContext` installed on this CPU, and ordinary IRQs must stay masked between loading the slot and reading the field.
+
+**Why it is safe**: the pointer is installed only by `ExceptionContextGuard::new` from a live `&ExceptionContext` on this CPU. The read runs inside `with_current_irq_disabled`, so the trap-handler stack owning the frame cannot unwind or migrate between the load and the dereference. Unlike entry 2 it reads only the privilege field (`user_mode()`) instead of copying the whole frame and retains nothing, so no borrowed reference escapes. A zero slot yields `None` without dereferencing.
+
 ### 3. `prepare_initial_frame` (`x86_64/ctx.rs:367-379`)
 
 ```rust

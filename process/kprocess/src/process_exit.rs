@@ -6,7 +6,6 @@ use alloc::sync::Arc;
 
 use ksignal::{ChildExitInfo, ChildExitSignalInfo, SigchldChildExitSignalInfo, Signo};
 use ktask::KtaskRef;
-use ktime_types::TimeSpan;
 
 use crate::{
     Process, ProcessExitPublication, process::exit::ReparentedZombie, process_signals, wait_reap,
@@ -40,11 +39,6 @@ pub fn finish_thread_exit(process: &Arc<Process>, task: &KtaskRef, exit_code: i3
 /// Marks the process thread group as group-exited.
 pub fn mark_group_exited(process: &Process) {
     process.group_exit();
-}
-
-/// Records CPU time accumulated by a thread that has just exited.
-pub fn record_exited_thread_cpu_time(process: &Process, utime: TimeSpan, stime: TimeSpan) {
-    process.accumulate_exited_thread_time(utime, stime);
 }
 
 /// Transitions the process into waitable zombie state and reparents surviving children.

@@ -273,10 +273,8 @@ The periodic deadline is CPU-local and changes only with local IRQs and
 preemption excluded. A busy-to-busy switch retains it; an idle switch clears
 it. A delayed IRQ advances the phase once, without a loop of callbacks. It
 shares the existing arbitration and suspend gate; it does not own a timer
-node. Only a due periodic tick requests deferred CPU-timer work for the
-current user task. That request must not block or allocate in hard IRQ
-context. User and kernel execution time are settled at mode boundaries,
-context switches and on demand by thread accounting.
+node. The accounting hook runs only on a due periodic tick, in hard-IRQ
+context with IRQs masked.
 
 | Threat | Asset / trigger / impact | Response |
 | --- | --- | --- |

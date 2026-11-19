@@ -78,6 +78,25 @@ fn test_with_active_exception_context() {
 }
 
 #[def_test(serial)]
+fn test_active_exception_user_mode() {
+    let was_enabled = karch::local_irq_enabled();
+    assert_eq!(active_exception_user_mode(), None);
+
+    let ctx = ExceptionContext::default();
+    {
+        let _guard = ExceptionContextGuard::new(&ctx);
+        // Slot mechanics only: the accessor sees the installed frame. The
+        // privilege decode itself is pinned against known user/kernel frames
+        // by the per-arch tests in ut-tests/<arch>.rs.
+        assert!(active_exception_user_mode().is_some());
+        // The slot read masks IRQs and restores the caller's mask.
+        assert_eq!(karch::local_irq_enabled(), was_enabled);
+    }
+    assert_eq!(active_exception_user_mode(), None);
+    assert_eq!(karch::local_irq_enabled(), was_enabled);
+}
+
+#[def_test(serial)]
 fn test_nested_exception_context_state() {
     let outer = ExceptionContext::default();
     let inner = ExceptionContext::default();

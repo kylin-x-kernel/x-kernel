@@ -142,7 +142,7 @@ pub fn with_current_user_thread<R>(f: impl FnOnce(&Thread) -> R) -> R {
 /// Samples the calling thread's CPU clock from the scheduler runtime ledger.
 ///
 /// This is the scheduler view Linux reports as `CPUCLOCK_SCHED`: time picked
-/// to run, not the user/system split settled for interval timers and rusage.
+/// to run, not the user/system split adjusted for interval timers and rusage.
 /// Reading advances the clock; the running interval is charged before the
 /// value returns, as Linux refreshes `current` in `task_sched_runtime()`.
 /// The sampler takes no thread handle because only the owning run queue may

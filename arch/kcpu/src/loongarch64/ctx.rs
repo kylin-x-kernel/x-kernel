@@ -15,6 +15,11 @@ use core::mem::offset_of;
 
 use memaddr::VirtAddr;
 
+/// `CSR_PRMD.PPLV` field mask (Previous Privilege Level).
+pub(super) const PRMD_PPLV_MASK: usize = 0x3;
+/// User privilege level; the kernel runs at PLV 0.
+pub(super) const PPLV_UMODE: usize = 0b11;
+
 /// General registers of LoongArch64.
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -213,6 +218,15 @@ impl ExceptionContext {
     /// Sets the instruction pointer.
     pub const fn set_ip(&mut self, pc: usize) {
         self.era = pc;
+    }
+
+    /// Returns whether this trap interrupted user mode (PLV 3).
+    ///
+    /// `CSR_PRMD.PPLV` (Previous Privilege Level) equals [`PPLV_UMODE`], the
+    /// same privilege [`UserContext::new`](super::userspace::UserContext::new)
+    /// builds the entry frame with.
+    pub const fn user_mode(&self) -> bool {
+        self.prmd & PRMD_PPLV_MASK == PPLV_UMODE
     }
 
     /// Gets the stack pointer.

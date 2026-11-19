@@ -37,8 +37,8 @@ use thread_membership::{ThreadGroupExitState, ThreadMembership};
 use tree::{ChildSlotAdapter, GroupMembership, ParentRelation};
 
 use crate::{
-    AsThread, Pid, ProcessGroup, ProcessRuntime, Session, lifecycle::ProcessLifecycleState,
-    process_domain, publication::PublishedProcessSlot,
+    AsThread, Pid, PrevCputime, ProcessGroup, ProcessRuntime, Session,
+    lifecycle::ProcessLifecycleState, process_domain, publication::PublishedProcessSlot,
 };
 
 /// Sentinel stored in [`Process::visible_parent`] when the parent has no PID
@@ -56,6 +56,11 @@ pub struct Process {
     /// transaction lock and is updating parent/children/publication state.
     exit_state: AtomicProcessExitState,
     thread_membership: SpinNoIrq<ThreadMembership>,
+    /// Monotonic adjustment history for the group's user/system split. Its
+    /// lock is independent of the membership domain; `process_cpu_times`
+    /// adjusts after the raw sample is released, so concurrent group queries
+    /// never publish a backwards split.
+    group_prev_cputime: PrevCputime,
     cgroup_target: Mutex<Option<Arc<kcgroup::Cgroup>>>,
     group_exit: SpinNoIrq<ThreadGroupExitState>,
     /// Process-wide `exec` serialization gate (Linux `cred_guard_mutex`).
@@ -424,6 +429,7 @@ impl Process {
             leader_task_number,
             exit_state: AtomicProcessExitState::new(ProcessExitState::Running),
             thread_membership: SpinNoIrq::new(ThreadMembership::default()),
+            group_prev_cputime: PrevCputime::new(),
             cgroup_target: Mutex::new(None),
             group_exit: SpinNoIrq::new(ThreadGroupExitState::default()),
             exec_gate: exec_gate::ExecGate::new(),

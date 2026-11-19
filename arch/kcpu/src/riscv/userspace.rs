@@ -100,6 +100,10 @@ impl UserContext {
             let stval = stval::read();
             match cause {
                 Trap::Interrupt(_) => {
+                    // The user-return entry dispatches here instead of the kernel
+                    // trap handler, so publish the interrupted user frame as this
+                    // CPU's active trap context for tick classification.
+                    let _tf_guard = crate::ExceptionContextGuard::new(&self.0);
                     // SAFETY: supervisor trap entry cleared SIE and enter_user
                     // restored kernel CPU state; on_user_exit retains the mask.
                     unsafe { handle_trap!(IRQ, scause.bits()) };

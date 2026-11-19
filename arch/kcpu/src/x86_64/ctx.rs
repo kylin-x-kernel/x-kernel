@@ -12,7 +12,10 @@
 use core::{arch::naked_asm, fmt::Debug};
 
 use memaddr::VirtAddr;
-use x86_64::registers::mxcsr::MxCsr;
+use x86_64::{
+    PrivilegeLevel,
+    registers::{mxcsr::MxCsr, segmentation::SegmentSelector},
+};
 
 use super::xstate::ExtendedState;
 
@@ -140,6 +143,14 @@ impl ExceptionContext {
     /// Sets the instruction pointer.
     pub const fn set_ip(&mut self, rip: usize) {
         self.rip = rip as _;
+    }
+
+    /// Returns whether this trap interrupted user mode (CPL 3).
+    ///
+    /// The saved `CS` RPL equals [`PrivilegeLevel::Ring3`], the same privilege
+    /// the user code selector (`gdt::UCODE64`) is built with.
+    pub fn user_mode(&self) -> bool {
+        SegmentSelector(self.cs as u16).rpl() == PrivilegeLevel::Ring3
     }
 
     /// Gets the stack pointer.
