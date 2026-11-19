@@ -13,5 +13,8 @@ use ktime_types::MonotonicInstant;
 /// depending on the host kernel's clock API directly.
 pub trait TimeOp: Sync {
     /// Return the current monotonic time.
+    ///
+    /// Must not allocate or sleep, and must be callable in task, IRQ and
+    /// softirq context, including under a short IRQ-safe accounting lock.
     fn monotonic_time(&self) -> MonotonicInstant;
 }

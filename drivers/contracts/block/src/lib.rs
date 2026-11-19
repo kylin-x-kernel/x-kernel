@@ -63,13 +63,14 @@ pub mod ramdisk_static;
 pub mod ramdisk_image;
 
 mod queue;
+mod stats;
 
 // #[cfg(feature = "sdmmc")]
 // pub mod sdmmc;
-
 #[doc(no_inline)]
 pub use driver_base::{Device, DeviceKind, DriverError, DriverResult};
 pub use queue::{BlkMqOperations, QueueLimits, Request, RequestQueue, SECTOR_SHIFT, SECTOR_SIZE};
+pub use stats::{BlockIoStats, init_io_clock};
 
 bitflags::bitflags! {
     /// Access mode passed from an opened block-device file to the block driver.
@@ -211,6 +212,9 @@ pub struct Gendisk {
     operations: Arc<dyn BlockDeviceOperations>,
     queue: Arc<RequestQueue>,
     part0: Weak<BlockDevice>,
+    // Completion may run in IRQ/softirq context; never hold this across I/O,
+    // notification, registry access, or allocation.
+    io_accounting: kspin::SpinNoIrq<stats::IoAccounting>,
 }
 
 /// An owning disk reference, counted through its canonical whole device.
@@ -249,7 +253,8 @@ impl Gendisk {
     ///
     /// # Errors
     ///
-    /// Returns [`DriverError::InvalidInput`] for an empty name, an invalid
+    /// Returns [`DriverError::InvalidInput`] for a name that is not a single
+    /// nonempty path component (or contains ASCII controls), an invalid
     /// minor range, invalid queue geometry, or a byte capacity that overflows
     /// `u64`.
     pub fn alloc(
@@ -305,6 +310,10 @@ impl Gendisk {
             .checked_mul(limits.logical_block_sectors())
             .ok_or(DriverError::InvalidInput)?;
         if name.is_empty()
+            || matches!(name.as_str(), "." | "..")
+            || name
+                .bytes()
+                .any(|byte| byte == b'/' || byte.is_ascii_control())
             || minors == 0
             || first_minor.checked_add(minors - 1).is_none()
             || capacity_sectors > u64::MAX >> SECTOR_SHIFT
@@ -327,6 +336,7 @@ impl Gendisk {
                 operations,
                 queue,
                 part0: part0.clone(),
+                io_accounting: kspin::SpinNoIrq::new(stats::IoAccounting::default()),
             });
             BlockDevice::whole(disk, capacity_sectors)
         });
@@ -501,6 +511,15 @@ impl Drop for BlockDeviceClaim {
 }
 
 impl BlockDevice {
+    /// Samples disk-wide I/O statistics without waiting for outstanding I/O.
+    ///
+    /// May run in task or IRQ/softirq context. The short IRQ-safe critical
+    /// section includes the non-sleeping clock sample, never driver callbacks.
+    pub fn io_stats(&self) -> BlockIoStats {
+        let mut accounting = self.disk.io_accounting.lock();
+        accounting.snapshot(stats::now_ns())
+    }
+
     fn whole(disk: Arc<Gendisk>, capacity_sectors: u64) -> Self {
         let device_number = disk.device_number();
         Self {
@@ -815,7 +834,7 @@ impl BlockDevice {
     /// Requires sleepable task context. Validation errors also complete the bio;
     /// return does not imply completion.
     pub fn submit_bio(&self, mut bio: Bio) {
-        let validate = || -> DriverResult<u64> {
+        let validate = || -> DriverResult<(u64, u64)> {
             if !core::ptr::eq(self, bio.device().as_ref()) {
                 return Err(DriverError::InvalidInput);
             }
@@ -824,7 +843,7 @@ impl BlockDevice {
             }
             let sectors = bio.validate()?;
             if bio.operation() == BioOperation::Flush {
-                return Ok(0);
+                return Ok((0, 0));
             }
             let end = bio
                 .sector()
@@ -839,10 +858,11 @@ impl BlockDevice {
             {
                 return Err(DriverError::InvalidInput);
             }
-            Ok(sector)
+            Ok((sector, sectors))
         };
         match validate() {
-            Ok(sector) => {
+            Ok((sector, sectors)) => {
+                bio.start_accounting(sectors);
                 bio.remap(sector);
                 self.queue.submit(bio);
             }
@@ -872,8 +892,28 @@ impl Gendisk {
     }
 }
 
-static BLOCK_DEVICES: Lazy<Mutex<BTreeMap<DeviceNumber, GendiskRef>>> =
-    Lazy::new(|| Mutex::new(BTreeMap::new()));
+type BlockSubscriber = Arc<dyn Fn() + Send + Sync>;
+
+#[derive(Default)]
+struct BlockRegistry {
+    disks: BTreeMap<DeviceNumber, GendiskRef>,
+    subscribers: Vec<BlockSubscriber>,
+}
+
+static BLOCK_DEVICES: Lazy<Mutex<BlockRegistry>> =
+    Lazy::new(|| Mutex::new(BlockRegistry::default()));
+
+/// Installs a permanent inventory subscriber and atomically snapshots the disks.
+///
+/// Requires sleepable task context. Notifications run after releasing the
+/// registry lock and may coalesce concurrent changes by taking a fresh snapshot.
+/// Subscribers must not perform driver I/O; kernel-lifetime services use this
+/// to project identity and statistics without owning disk publication.
+pub fn subscribe_block_devices(subscriber: Arc<dyn Fn() + Send + Sync>) -> Vec<Arc<BlockDevice>> {
+    let mut registry = BLOCK_DEVICES.lock();
+    registry.subscribers.push(subscriber);
+    registry.disks.values().map(|disk| disk.part0()).collect()
+}
 
 /// Publishes a generic disk's existing whole-device `part0` view.
 ///
@@ -881,16 +921,19 @@ static BLOCK_DEVICES: Lazy<Mutex<BTreeMap<DeviceNumber, GendiskRef>>> =
 ///
 /// Returns [`DriverError::InvalidInput`] when no major has been assigned, or
 /// [`DriverError::AlreadyExists`] when the device-number range conflicts with
-/// an existing disk.
+/// an existing disk, or when the disk name is already published.
 pub fn add_disk(disk: GendiskRef) -> DriverResult<Arc<BlockDevice>> {
     if disk.major() == 0 {
         return Err(DriverError::InvalidInput);
     }
     let device_number = disk.device_number();
-    let mut devices = BLOCK_DEVICES.lock();
+    let mut registry = BLOCK_DEVICES.lock();
     let first_minor = disk.first_minor();
     let last_minor = first_minor + disk.minors() - 1;
-    let conflicts = devices.values().any(|registered| {
+    let conflicts = registry.disks.values().any(|registered| {
+        if registered.name() == disk.name() {
+            return true;
+        }
         if registered.major() != disk.major() {
             return false;
         }
@@ -898,22 +941,36 @@ pub fn add_disk(disk: GendiskRef) -> DriverResult<Arc<BlockDevice>> {
         let registered_last = registered_first + registered.minors() - 1;
         first_minor <= registered_last && registered_first <= last_minor
     });
-    if conflicts || devices.contains_key(&device_number) {
+    if conflicts || registry.disks.contains_key(&device_number) {
         return Err(DriverError::AlreadyExists);
     }
-    devices.insert(device_number, disk.clone());
+    registry.disks.insert(device_number, disk.clone());
+    let subscribers = registry.subscribers.clone();
+    drop(registry);
+    for subscriber in subscribers {
+        subscriber();
+    }
     Ok(disk.part0())
 }
 
 /// Removes a generic disk and its block-device views.
 pub fn del_gendisk(device_number: DeviceNumber) -> Option<GendiskRef> {
-    BLOCK_DEVICES.lock().remove(&device_number)
+    let (disk, subscribers) = {
+        let mut registry = BLOCK_DEVICES.lock();
+        let disk = registry.disks.remove(&device_number)?;
+        (disk, registry.subscribers.clone())
+    };
+    for subscriber in subscribers {
+        subscriber();
+    }
+    Some(disk)
 }
 
 /// Looks up a registered block-device view by `dev_t`.
 pub fn lookup_block_device(device_number: DeviceNumber) -> Option<Arc<BlockDevice>> {
     BLOCK_DEVICES
         .lock()
+        .disks
         .get(&device_number)
         .map(|disk| disk.part0())
 }
@@ -922,6 +979,7 @@ pub fn lookup_block_device(device_number: DeviceNumber) -> Option<Arc<BlockDevic
 pub fn block_devices() -> Vec<Arc<BlockDevice>> {
     BLOCK_DEVICES
         .lock()
+        .disks
         .values()
         .map(|disk| disk.part0())
         .collect()

@@ -25,7 +25,7 @@ components by the cdev registration API; virtual uevent attributes are read-only
 
 ## Analysis scope
 
-This analysis covers `src/lib.rs` and the kernel tests in `ut-tests/lib.rs`;
+This analysis covers `src/lib.rs`, `src/block_nodes.rs` and their kernel tests;
 no source module or test-only path is excluded. `kdevice` owns
 device-node identity, numbering, state, and ordered lifecycle callbacks;
 `kdevice-uevent` owns formatting and netlink delivery; KVFS owns filesystem
@@ -112,8 +112,8 @@ payloads, or user credentials.
 
 ## Known limitations
 
-- Only the input and DRM class projections required by current drivers are
-  implemented.
+- Input/DRM character classes and registered whole block disks are projected.
+  Block partitions and physical-bus canonical block paths are not implemented.
 - Driver directories expose binding identity but do not implement bind/unbind
   control files.
 - Ordinary attributes use mode `0444`; `uevent` uses `0644`. There is no
@@ -147,3 +147,26 @@ payloads, or user credentials.
 global CPU/memory masks are all `0444`. The projection is read-only by design:
 there is no online write path, no hotplug state machine, and no userspace input
 that can change device presence or online state in this layer.
+
+## Block statistics trust and lifetime
+
+The block registry validates single-component names and rejects duplicate names
+and device-number ranges. Sysfs accepts identity only from that registry. It
+never exposes an arbitrary driver-provided pathname. Block attributes have mode
+0444; VFS rejects writes before the read callback. The stat callback copies a
+consistent disk-owned snapshot under a short accounting lock, releases it and
+then formats text. It performs no media access and exposes no data contents.
+
+Block registry callbacks run outside its lock. Sysfs serializes re-snapshot,
+tree rebuild and dentry invalidation through its existing event lock. Each open
+attribute checks canonical device identity on every read: withdrawal and dev_t
+reuse cannot redirect an old handle to a replacement disk. A read admitted
+before withdrawal may return its prior snapshot; reads do not retain a device
+registry lock across formatting or accounting. Unlike hardware DeviceNode
+removal, block inventory does not quiesce already admitted attribute reads.
+
+All counters come from block I/O; sysfs does not increment them. Unsupported
+merges/discards are zero and times reflect the host monotonic clock without a
+synthetic minimum. Current backends cannot report partial bytes on failure, so
+failed operations contribute no successful sectors. The interface is diagnostic
+and does not itself prove durable storage or expose partition statistics.

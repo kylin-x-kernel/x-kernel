@@ -266,11 +266,31 @@ impl BioVec {
 /// in IRQ-enabled softirq context.
 #[must_use]
 pub struct Bio {
-    device: Arc<BlockDevice>,
+    target: BioTarget,
     sector: u64,
     operation: BioOperation,
     vectors: Vec<BioVec>,
     end_io: BioEndIo,
+}
+
+/// Keeps the disk available to retire the bio's in-flight count on drop.
+struct BioTarget {
+    device: Arc<BlockDevice>,
+    accounting: Option<IoStart>,
+}
+
+impl Drop for BioTarget {
+    fn drop(&mut self) {
+        if self.accounting.is_some() {
+            let mut accounting = self.device.disk.io_accounting.lock();
+            accounting.retire_in_flight(crate::stats::now_ns());
+        }
+    }
+}
+
+struct IoStart {
+    started_ns: Option<u64>,
+    sectors: u64,
 }
 
 pub(crate) enum BioEndIo {
@@ -304,7 +324,10 @@ impl Bio {
         end_io: BioEndIo,
     ) -> Self {
         Self {
-            device,
+            target: BioTarget {
+                device,
+                accounting: None,
+            },
             sector,
             operation,
             vectors,
@@ -314,7 +337,7 @@ impl Bio {
 
     /// Returns the target device view.
     pub fn device(&self) -> &Arc<BlockDevice> {
-        &self.device
+        &self.target.device
     }
 
     /// Returns the device-relative sector before dispatch, whole-disk sector afterwards.
@@ -397,7 +420,18 @@ impl Bio {
 
     /// Consumes the bio to publish its terminal result and return its memory.
     /// The backend must retire all device access before calling this method.
-    pub fn end_io(self, status: DriverResult) {
+    /// Disk statistics retire before callbacks or waiter notification, so a
+    /// caller observing completion also observes the completed operation.
+    pub fn end_io(mut self, status: DriverResult) {
+        if let Some(start) = self.target.accounting.take() {
+            let mut accounting = self.target.device.disk.io_accounting.lock();
+            accounting.complete(
+                self.operation,
+                if status.is_ok() { start.sectors } else { 0 },
+                start.started_ns,
+                crate::stats::now_ns(),
+            );
+        }
         match self.end_io {
             BioEndIo::Callback(callback) => callback(status, self.vectors),
             BioEndIo::Wait(state) => {
@@ -407,6 +441,9 @@ impl Bio {
     }
 
     pub(crate) fn validate(&self) -> DriverResult<u64> {
+        if self.target.accounting.is_some() {
+            return Err(DriverError::InvalidInput);
+        }
         if self.operation == BioOperation::Flush {
             return if self.vectors.is_empty() && self.sector == 0 {
                 Ok(0)
@@ -423,7 +460,7 @@ impl Bio {
             return Err(DriverError::InvalidInput);
         }
         let bytes = BioVec::total_len(&self.vectors)?;
-        if bytes == 0 || !bytes.is_multiple_of(self.device.block_size()) {
+        if bytes == 0 || !bytes.is_multiple_of(self.device().block_size()) {
             return Err(DriverError::InvalidInput);
         }
         Ok((bytes / SECTOR_SIZE as usize) as u64)
@@ -431,6 +468,16 @@ impl Bio {
 
     pub(crate) fn remap(&mut self, sector: u64) {
         self.sector = sector;
+    }
+
+    pub(crate) fn start_accounting(&mut self, sectors: u64) {
+        let mut accounting = self.target.device.disk.io_accounting.lock();
+        let started_ns = crate::stats::now_ns();
+        accounting.start(started_ns);
+        self.target.accounting = Some(IoStart {
+            started_ns,
+            sectors,
+        });
     }
 }
 
@@ -441,8 +488,8 @@ pub trait BioOperations: crate::BlockDeviceOperations {
     /// including on failure, after retiring all device access.
     ///
     /// Ownership prevents duplicate completion, but cannot require completion.
-    /// Dropping the bio does not publish a result or cancel device access;
-    /// omitting `end_io` leaves synchronous callers blocked indefinitely.
+    /// Dropping an accepted bio retires only its in-flight statistics. The driver
+    /// still owns DMA retirement, and synchronous callers wait for `end_io`.
     fn submit_bio(&self, bio: Bio);
 }
 

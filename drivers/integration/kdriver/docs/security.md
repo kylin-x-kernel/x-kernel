@@ -844,3 +844,11 @@ VirtIO block activation is owned by the block binding's typed `Data`, not by a
 failure paths; the production remove path closes explicitly. Non-block VirtIO
 kinds retain their legacy class/devres cleanup and are not claimed as audited
 for the stop contract.
+
+## Block I/O statistics clock
+
+init_drivers installs resource_provider() as the block core's TimeOp before
+discovery or consumer I/O. The X-Kernel provider reads khal's monotonic clock;
+reusable block code imports only driver_os_api. Clock samples may occur under a
+short IRQ-safe accounting lock in task or completion IRQ/softirq context and
+must not allocate or sleep.

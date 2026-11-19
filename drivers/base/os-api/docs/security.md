@@ -42,3 +42,9 @@ Network close/reset, fallible action teardown and legacy remove-error continuati
 remain separate limitations. Framework cleanup registration
 still assumes infallible kernel allocation policy. No credentials, persistent
 data or network protocol state are stored.
+
+## Monotonic clock context
+
+TimeOp::monotonic_time is non-allocating and non-sleeping in task, IRQ and
+softirq context, including under a short IRQ-safe block-accounting lock. Hosts
+must not implement this operation with a sleepable lock or task-only resource.

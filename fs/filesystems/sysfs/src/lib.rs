@@ -6,7 +6,8 @@
 //!
 //! This crate projects [`kdevice::DeviceNode`] registrations into dynamic
 //! `/sys/devices`, `/sys/class`, `/sys/dev/char`, and `/sys/bus` trees. It also
-//! exposes device attributes and accepts validated user-triggered kobject
+//! exposes registered whole disks at `/sys/block` with live I/O statistics.
+//! It exposes device attributes and accepts validated user-triggered kobject
 //! uevents for device-management clients.
 //! Mount the filesystem through the VFS using [`FILE_SYSTEM_TYPE`]; callers do
 //! not construct its singleton superblock directly.
@@ -26,6 +27,8 @@
 #![no_std]
 
 extern crate alloc;
+
+mod block_nodes;
 
 use alloc::{
     borrow::Cow,
@@ -133,6 +136,7 @@ enum SystemAttributeKind {
 enum TreeEntry {
     Directory(Arc<DirectoryEntry>),
     CharacterAttribute(kvfs::CharacterDeviceRegistration, Vec<u8>),
+    BlockAttribute(Arc<block::BlockDevice>, block_nodes::Attribute),
     Attribute(Arc<ProjectedDevice>, Vec<u8>),
     Symlink(String),
     Uevent(Arc<ProjectedDevice>, UeventScope),
@@ -152,6 +156,10 @@ enum TreeEntry {
 impl TreeEntry {
     fn has_same_identity(&self, other: &Self) -> bool {
         match (self, other) {
+            (
+                Self::BlockAttribute(left, left_attribute),
+                Self::BlockAttribute(right, right_attribute),
+            ) => Arc::ptr_eq(left, right) && left_attribute == right_attribute,
             (
                 Self::CharacterAttribute(left, left_data),
                 Self::CharacterAttribute(right, right_data),
@@ -208,6 +216,7 @@ struct DeviceProjection {
     nodes: BTreeMap<kdevice::DeviceNodeKey, Arc<ProjectedDevice>>,
     characters: Vec<kvfs::CharacterDeviceRegistration>,
     systems: Vec<SystemDeviceState>,
+    blocks: Vec<Arc<block::BlockDevice>>,
     tree: BTreeMap<String, TreeEntry>,
 }
 
@@ -216,17 +225,20 @@ impl DeviceProjection {
         let nodes = BTreeMap::new();
         let characters = Vec::new();
         let systems = Vec::new();
-        let tree = build_tree_with_systems(&nodes, &characters, &systems);
+        let blocks = Vec::new();
+        let tree = build_tree_with_systems(&nodes, &characters, &systems, &blocks);
         Self {
             nodes,
             characters,
             systems,
+            blocks,
             tree,
         }
     }
 
     fn rebuild_tree(&mut self) -> Vec<String> {
-        let mut tree = build_tree_with_systems(&self.nodes, &self.characters, &self.systems);
+        let mut tree =
+            build_tree_with_systems(&self.nodes, &self.characters, &self.systems, &self.blocks);
         for (path, entry) in &mut tree {
             if let TreeEntry::Directory(directory) = entry
                 && let Some(TreeEntry::Directory(previous)) = self.tree.get(path)
@@ -410,6 +422,7 @@ pub fn init_device_projection() {
         }
         projection.characters = kvfs::subscribe_character_devices(Arc::new(handle_character_event));
         projection.systems = system_device_snapshot();
+        projection.blocks = block::subscribe_block_devices(Arc::new(handle_block_event));
         projection.rebuild_tree();
         drop(projection);
     });
@@ -419,6 +432,15 @@ fn handle_character_event() {
     let _event = device_projection_events().lock();
     let mut projection = device_projection().lock();
     projection.characters = kvfs::registered_character_devices();
+    let changed = projection.rebuild_tree();
+    drop(projection);
+    invalidate_changed_paths(&changed);
+}
+
+fn handle_block_event() {
+    let _event = device_projection_events().lock();
+    let mut projection = device_projection().lock();
+    projection.blocks = block::block_devices();
     let changed = projection.rebuild_tree();
     drop(projection);
     invalidate_changed_paths(&changed);
@@ -1126,8 +1148,9 @@ fn add_system_entries(tree: &mut BTreeMap<String, TreeEntry>, systems: &[SystemD
 fn build_tree(
     nodes: &BTreeMap<kdevice::DeviceNodeKey, Arc<ProjectedDevice>>,
     characters: &[kvfs::CharacterDeviceRegistration],
+    blocks: &[Arc<block::BlockDevice>],
 ) -> BTreeMap<String, TreeEntry> {
-    build_tree_with_systems(nodes, characters, &[])
+    build_tree_with_systems(nodes, characters, &[], blocks)
 }
 
 #[expect(
@@ -1139,6 +1162,7 @@ fn build_tree_with_systems(
     nodes: &BTreeMap<kdevice::DeviceNodeKey, Arc<ProjectedDevice>>,
     characters: &[kvfs::CharacterDeviceRegistration],
     systems: &[SystemDeviceState],
+    blocks: &[Arc<block::BlockDevice>],
 ) -> BTreeMap<String, TreeEntry> {
     let mut tree = BTreeMap::new();
     for directory in [
@@ -1147,6 +1171,9 @@ fn build_tree_with_systems(
         "class/input",
         "class/drm",
         "dev/char",
+        "block",
+        "class/block",
+        "dev/block",
         "fs/cgroup",
         "fs/bpf",
         "bus/pci/drivers",
@@ -1154,6 +1181,8 @@ fn build_tree_with_systems(
     ] {
         add_directory(&mut tree, directory);
     }
+
+    block_nodes::add_entries(&mut tree, blocks);
 
     for registration in characters {
         if !registration.is_registered() {
@@ -1415,6 +1444,10 @@ impl SimpleDirOps for SysfsDirectory {
             .cloned()
             .ok_or(VfsError::NotFound)?;
         match entry {
+            TreeEntry::BlockAttribute(device, attribute) => lookup.file(
+                name,
+                block_nodes::attribute_file(self.fs.clone(), device, attribute),
+            ),
             TreeEntry::CharacterAttribute(registration, contents) => lookup.file(
                 name,
                 SimpleFile::new_regular_with_permission(

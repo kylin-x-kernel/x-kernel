@@ -142,6 +142,8 @@ fn iomap_first_mmio(
 /// IRQ, and boot-console infrastructure.
 pub fn init_drivers() {
     #[cfg(feature = "block")]
+    block::init_io_clock(resource::resource_provider());
+    #[cfg(feature = "block")]
     block::completion::init_wait_provider(&block_completion::HostBlockWaitProvider);
     info!("Initialize device drivers...");
 

@@ -42,6 +42,10 @@ introducing another kind of device object.
 
 ## Publication And Lookup
 
+Disk names are single nonempty path components, excluding `.`/`..`, slashes
+and ASCII control bytes. Publication rejects duplicate names as well as
+conflicting device numbers so devfs and sysfs identify the same disk.
+
 `Gendisk::alloc` creates `QueueLimits` and `RequestQueue` from the logical block
 size reported by the backend, converts the backend block count to sector
 capacity, and constructs canonical `part0` at the same time. Unpublished disks
@@ -53,8 +57,8 @@ disk/part0 identity into the registry without reconstructing it. Devfs, KVFS
 block-special open, filesystem mount, and boot root selection all use this
 registry.
 
-The registry is the single `Mutex<BTreeMap<DeviceNumber, GendiskRef>>`
-(`BLOCK_DEVICES`). `add_disk`, `del_gendisk`, `lookup_block_device`, and
+The registry is `BLOCK_DEVICES`, a Mutex holding the disk map and permanent
+inventory subscribers. `add_disk`, `del_gendisk`, `lookup_block_device`, and
 `block_devices` hold its lock during insertion, removal, and lookup. The lock
 protects only the map; read-only state, claims, and capacity use the objects'
 own synchronization primitives. No driver I/O or callback runs under the
@@ -66,6 +70,46 @@ Existing `Arc<BlockDevice>` references retain the complete `Gendisk`, and
 withdrawn disk. New media must use a new `Gendisk` even when reusing the same
 `dev_t`, yielding a new canonical `BlockDevice` identity. Republishing the same
 `Gendisk` retains its original `part0`.
+
+## Inventory subscriptions and I/O statistics
+
+`subscribe_block_devices` installs a kernel-lifetime subscriber and returns an
+atomic inventory snapshot. Successful add/remove clones subscribers under the
+registry lock, then invokes them after releasing it. Consumers such as sysfs
+re-snapshot current inventory; callbacks may coalesce concurrent changes. They
+run in sleepable task context and must not perform driver I/O. Failed publication
+and removal of an absent number send no update.
+
+`src/stats.rs` owns BlockIoStats and disk-local accounting. Validated submission
+starts accounting just before either direct-bio or request dispatch. Bio retains
+the original sector count and optional start time independently of Request's
+partial-transfer cursor. Terminal Bio::end_io retires accounting before result
+publication and caller notification. Invalid input never starts accounting.
+Backend failure still counts an operation and its latency but receives no
+successful sectors: the current completion API cannot report partial transfers.
+
+The bio's `BioTarget` holds its device reference and accounting start record.
+Terminal completion consumes that record. If the driver drops an accepted Bio
+or Request, BioTarget's destructor settles busy and weighted time up to the drop
+and decrements the in-flight count. Only terminal completion contributes to
+operation counts, sectors and per-operation latency.
+
+One short SpinNoIrq critical section per Gendisk protects submission, IRQ/softirq
+completion, drop, and snapshots. No I/O, allocation, registry access or notification
+occurs under it. Busy time integrates having any outstanding I/O; weighted time
+integrates the outstanding count. Snapshots advance these integrals for pending
+I/O; idle intervals contribute nothing. Per-operation latency accumulates
+separately. Nanosecond totals preserve sub-millisecond operations until sysfs
+converts the totals to milliseconds. Operation/sector counts wrap; durations
+saturate on overflow. Every view contributes to its whole disk; independent
+partition statistics are not implemented.
+
+kdriver installs its existing driver_os_api::TimeOp provider with init_io_clock
+before consumers start; block imports no host clock implementation. Without a
+clock, counts work but timing remains unavailable (zero); no duration is
+manufactured. A backend that drops a Bio without terminal completion leaves
+its synchronous waiter blocked. The driver remains responsible for DMA
+retirement and truthful reporting of persistence.
 
 ## Ownership And Final Release
 

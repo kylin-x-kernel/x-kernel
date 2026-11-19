@@ -96,3 +96,9 @@ DeviceDma policy or NativeIrq entry is introduced. Mainline device lifecycle and
 block claim/open/sector-I/O behavior are preserved. UT cover provider pairing,
 failure paths, typed coherent views, CPU memory, MMIO and IRQ guards; kdevice UT
 exercise the real managed-cleanup implementation.
+
+## Monotonic clock context
+
+TimeOp::monotonic_time is non-allocating and non-sleeping in task, IRQ and
+softirq context, including under a short IRQ-safe block-accounting lock. Hosts
+must not implement this operation with a sleepable lock or task-only resource.

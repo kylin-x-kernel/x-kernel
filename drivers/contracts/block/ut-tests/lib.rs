@@ -231,6 +231,7 @@ fn bio_validates_whole_transfer_and_remaps_once() {
         Some(DriverError::InvalidInput)
     );
     assert!(backend.storage.lock().iter().all(|byte| *byte == 0));
+    assert_eq!(whole.io_stats(), BlockIoStats::default());
     partition
         .submit_bio_wait(0, BioOperation::Write, vectors())
         .0
@@ -262,6 +263,13 @@ fn bio_validates_whole_transfer_and_remaps_once() {
         Some(DriverError::ReadOnly)
     );
     partition.flush().unwrap();
+    let stats = whole.io_stats();
+    assert_eq!(stats.read_ios, 1);
+    assert_eq!(stats.read_sectors, 8);
+    assert_eq!(stats.write_ios, 1);
+    assert_eq!(stats.write_sectors, 8);
+    assert_eq!(stats.flush_ios, 1);
+    assert_eq!(stats.in_flight, 0);
 }
 
 #[def_test]
@@ -552,6 +560,11 @@ fn add_disk_publishes_canonical_part0_and_checks_minor_ranges() {
     assert!(matches!(add_disk(overlap), Err(DriverError::AlreadyExists)));
 
     let adjacent = disk("test-range-b", 240, 80, 1);
+    let duplicate_name = disk("test-range-a", 239, 80, 1);
+    assert!(matches!(
+        add_disk(duplicate_name),
+        Err(DriverError::AlreadyExists)
+    ));
     add_disk(adjacent.clone()).expect("adjacent range is valid");
     del_gendisk(adjacent.device_number()).expect("remove adjacent disk");
     del_gendisk(first.device_number()).expect("remove first disk");
@@ -858,6 +871,107 @@ struct ProbeDisk {
     is_deferred: bool,
 }
 
+struct PendingRequestDisk {
+    request: kspin::SpinNoIrq<Option<Request>>,
+}
+
+impl BlockDeviceOperations for PendingRequestDisk {
+    fn num_blocks(&self) -> u64 {
+        8
+    }
+
+    fn block_size(&self) -> usize {
+        4096
+    }
+}
+
+impl BlkMqOperations for PendingRequestDisk {
+    fn queue_rq(&self, request: Request) {
+        *self.request.lock() = Some(request);
+    }
+}
+
+#[def_test]
+fn request_statistics_keep_original_length_after_cursor_progress() {
+    let backend = Arc::new(PendingRequestDisk {
+        request: kspin::SpinNoIrq::new(None),
+    });
+    let device = Gendisk::alloc_mq("request-stat".into(), 241, 0, 1, backend.clone())
+        .unwrap()
+        .part0();
+    for status in [Ok(()), Err(DriverError::Io)] {
+        let memory = TrackedMemory {
+            buffer: vec![0; 8192],
+            drops: Arc::new(core::sync::atomic::AtomicUsize::new(0)),
+        };
+        let vector = BioVec::from_memory(memory, 0..8192)
+            .unwrap_or_else(|(error, _)| panic!("range: {error:?}"));
+        let (bio, waiter) =
+            completion::BioWait::prepare(device.clone(), 0, BioOperation::Write, vec![vector])
+                .unwrap_or_else(|(error, _)| panic!("prepare: {error:?}"));
+        device.submit_bio(bio);
+        assert_eq!(device.io_stats().in_flight, 1);
+        let mut request = backend.request.lock().take().unwrap();
+        request.advance(4096).unwrap();
+        assert_eq!(request.sector(), 8);
+        request.complete(status);
+        assert_eq!(waiter.wait().0, status);
+        let stats = device.io_stats();
+        assert_eq!(stats.in_flight, 0);
+        assert_eq!(stats.write_sectors, 16);
+    }
+    assert_eq!(device.io_stats().write_ios, 2);
+}
+
+#[def_test]
+fn dropping_a_request_retires_only_its_own_in_flight_count() {
+    let backend = Arc::new(PendingRequestDisk {
+        request: kspin::SpinNoIrq::new(None),
+    });
+    let device = Gendisk::alloc_mq("request-drop".into(), 241, 0, 1, backend.clone())
+        .unwrap()
+        .part0();
+    let (bio, waiter) =
+        completion::BioWait::prepare(device.clone(), 0, BioOperation::Flush, Vec::new())
+            .unwrap_or_else(|(error, _)| panic!("prepare: {error:?}"));
+    device.submit_bio(bio);
+    let live = backend.request.lock().take().unwrap();
+    let abandoned = Bio::new(
+        device.clone(),
+        0,
+        BioOperation::Flush,
+        Vec::new(),
+        |_, _| panic!("a dropped request must not publish completion"),
+    );
+    device.submit_bio(abandoned);
+    let abandoned = backend.request.lock().take().unwrap();
+    assert_eq!(device.io_stats().in_flight, 2);
+    drop(abandoned);
+    let stats = device.io_stats();
+    assert_eq!(stats.in_flight, 1);
+    assert_eq!(stats.flush_ios, 0);
+    assert_eq!(stats.flush_time_ns, 0);
+
+    live.complete(Ok(()));
+    assert_eq!(waiter.wait().0, Ok(()));
+    let stats = device.io_stats();
+    assert_eq!(stats.in_flight, 0);
+    assert_eq!(stats.flush_ios, 1);
+}
+
+#[def_test]
+fn disk_names_are_validated_before_becoming_sysfs_components() {
+    let backend = Arc::new(PendingRequestDisk {
+        request: kspin::SpinNoIrq::new(None),
+    });
+    for name in ["", ".", "..", "../escape", "disk/name", "line\n", "nul\0"] {
+        assert!(matches!(
+            Gendisk::alloc_mq(name.into(), 241, 0, 1, backend.clone()),
+            Err(DriverError::InvalidInput)
+        ));
+    }
+}
+
 impl BlockDeviceOperations for ProbeDisk {
     fn num_blocks(&self) -> u64 {
         8
@@ -886,6 +1000,44 @@ impl BioOperations for ProbeDisk {
             bio.end_io(Ok(()));
         }
     }
+}
+
+#[def_test]
+#[expect(
+    clippy::allow_attributes,
+    reason = "CG-024-lint-exceptions: Dylint lint is unknown to ordinary Clippy"
+)]
+#[allow(
+    unknown_lints,
+    std_box_in_kernel_tests,
+    reason = "CG-049-no-std-box-in-kernel-tests: Gendisk::alloc and BioVec::new take boxed owners"
+)]
+fn dropping_a_dispatched_bio_retires_statistics_without_completing_it() {
+    let backend = Arc::new(ProbeDisk {
+        pending: Mutex::new(None),
+        observed: Mutex::new(Vec::new()),
+        is_deferred: true,
+    });
+    let device = Gendisk::alloc("bio-drop".into(), 241, 0, 1, Box::new(backend.clone()))
+        .unwrap()
+        .part0();
+    let vector = BioVec::new(vec![0; BLOCK_SIZE].into_boxed_slice());
+    let bio = Bio::new(
+        device.clone(),
+        0,
+        BioOperation::Read,
+        vec![vector],
+        |_, _| panic!("a dropped bio must not publish completion"),
+    );
+    device.submit_bio(bio);
+    let pending = backend.pending.lock().take().unwrap();
+    assert_eq!(device.io_stats().in_flight, 1);
+    drop(pending);
+    let stats = device.io_stats();
+    assert_eq!(stats.in_flight, 0);
+    assert_eq!(stats.read_ios, 0);
+    assert_eq!(stats.read_sectors, 0);
+    assert_eq!(stats.read_time_ns, 0);
 }
 
 #[def_test]
@@ -985,13 +1137,18 @@ fn bio_range_retains_storage_after_wait_handle_is_dropped() {
                 .unwrap_or_else(|(error, _)| panic!("prepare: {error:?}"));
         device.submit_bio(bio);
         drop(waiter);
+        assert_eq!(device.io_stats().in_flight, 1);
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         let pending = backend.pending.lock().take().unwrap();
         assert_eq!(backend.observed.lock().last().unwrap().1, address);
         pending.end_io(status);
+        assert_eq!(device.io_stats().in_flight, 0);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
     assert!(BioVec::from_memory(vec![0; 512].into_boxed_slice(), 1..513).is_err());
+    let stats = device.io_stats();
+    assert_eq!(stats.read_ios, 2);
+    assert_eq!(stats.read_sectors, 1);
     assert!(BioVec::from_memory(vec![0; 512].into_boxed_slice(), 7..7).is_err());
 }
 

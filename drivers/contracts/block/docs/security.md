@@ -3,7 +3,7 @@
 ## Scope
 
 This analysis covers the block-core contract in `src/lib.rs`,
-`src/completion.rs`, `src/backing_dev.rs`, `src/bio.rs`, `src/queue.rs`, `src/word_io.rs`, and `src/ioctl.rs`. The concrete backends (`src/ahci.rs`,
+`src/completion.rs`, `src/backing_dev.rs`, `src/bio.rs`, `src/queue.rs`, `src/stats.rs`, `src/word_io.rs`, and `src/ioctl.rs`. The concrete backends (`src/ahci.rs`,
 `src/bcm2835sdhci.rs`, `src/sdmmc.rs`, `src/ramdisk*.rs`) are hardware
 adapters excluded from this document and audited separately; the
 registry, validation, and completion invariants below are the core's
@@ -227,3 +227,29 @@ return original owners independently of status; reads may be partially modified.
 Request cursor advancement never removes or replaces these owners. Completion callbacks must not sleep and run outside
 device locks. Public asynchronous construction requires owned storage; only the private
 synchronous adapter lends borrowed ranges until terminal completion.
+
+## Inventory and statistics boundaries
+
+Disk names are validated as path components and must be unique at publication.
+Inventory subscription and its initial snapshot share the registry lock; all
+notifications run after unlocking. Subscribers are permanent kernel services.
+They must re-snapshot inventory and cannot assume one callback per transition.
+Statistics never invoke them or take registry locks on the I/O path.
+
+A Bio starts accounting only after full validation, retains its original length
+through backend cursor advances, and owns one in-flight count. Completion
+consumes its start record before publishing a result. Dropping an accepted Bio
+with that record still present retires the count and accounts for elapsed queue
+and busy time. This cleanup neither signals the waiter nor cancels DMA.
+Failed I/O retires in-flight state and records latency without claiming
+transferred sectors. The accounting lock is IRQ-safe because completion
+may run in non-sleepable IRQ/softirq context. The TimeOp provider must never
+allocate or sleep when sampled under this lock. Caller callbacks and notification
+run after unlocking. Snapshot copies retain no lock or borrowed device state.
+
+Counts wrap and elapsed-time totals saturate on overflow. No minimum duration is
+injected to satisfy tests. An uninitialized host clock leaves times at zero;
+production kdriver initializes it before discovery. Merges/discards are absent
+from the current operation model, and sysfs reports their counters as zero.
+The driver still owns truthful completion and eventual completion; statistics
+do not establish durability beyond that existing contract.

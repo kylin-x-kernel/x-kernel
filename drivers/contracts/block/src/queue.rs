@@ -136,8 +136,8 @@ pub trait BlkMqOperations: Send + Sync {
     /// including on failure.
     ///
     /// Ownership prevents duplicate completion, but cannot require completion.
-    /// Dropping the request does not publish a result or cancel device access;
-    /// omitting `complete` leaves synchronous callers blocked indefinitely.
+    /// Dropping an accepted request retires only its in-flight statistics. The
+    /// driver still owns DMA retirement, and synchronous callers wait for `complete`.
     fn queue_rq(&self, request: Request);
 }
 

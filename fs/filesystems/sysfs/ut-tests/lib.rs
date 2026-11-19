@@ -115,7 +115,7 @@ fn virtual_character_projection_tracks_registration_and_retirement() {
     kvfs::cdev_del(device, 1).unwrap();
     assert!(!identity.is_registered());
     assert!(!device_projection().lock().tree.contains_key(path));
-    assert!(!build_tree(&BTreeMap::new(), &[registration]).contains_key(path));
+    assert!(!build_tree(&BTreeMap::new(), &[registration], &[]).contains_key(path));
 }
 
 #[def_test]
@@ -186,7 +186,7 @@ fn platform_devices_expose_a_modalias_uevent() {
     let projected = Arc::new(ProjectedDevice::new(node.clone()));
     let mut nodes = BTreeMap::new();
     nodes.insert(node.key(), projected);
-    let tree = build_tree(&nodes, &[]);
+    let tree = build_tree(&nodes, &[], &[]);
 
     // libdrm's `drmParseOFBusInfo` and `drmParseOFDeviceInfo` read
     // `OF_FULLNAME`/`OF_COMPATIBLE_N` first and fall back to `MODALIAS` on the
@@ -250,7 +250,7 @@ fn drm_nodes_project_a_render_minor() {
     let projected = Arc::new(ProjectedDevice::new(node.clone()));
     let mut nodes = BTreeMap::new();
     nodes.insert(node.key(), projected);
-    let tree = build_tree(&nodes, &[]);
+    let tree = build_tree(&nodes, &[], &[]);
 
     let render = format!("devices/platform/static9002/drm/renderD{minor}");
     assert!(tree.contains_key(&render));
@@ -340,7 +340,7 @@ fn tty0_projects_the_active_console_alias() {
         .find(|registration| registration.class() == "tty" && registration.name() == "tty0")
         .expect("the fixed VT console registers tty0");
 
-    let tree = build_tree(&BTreeMap::new(), core::slice::from_ref(tty0));
+    let tree = build_tree(&BTreeMap::new(), core::slice::from_ref(tty0), &[]);
     let path = "devices/virtual/tty/tty0/active";
     let Some(TreeEntry::CharacterAttribute(identity, contents)) = tree.get(path) else {
         panic!("tty0 must expose the `active` alias");

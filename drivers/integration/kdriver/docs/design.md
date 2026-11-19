@@ -974,3 +974,11 @@ buffer. The current entropy integration uses one worker per selected VirtIO RNG 
 issuing reads serially.
 
 The `hwrng` feature compiles this provider for injection into concrete drivers.
+
+## Block I/O statistics clock
+
+init_drivers installs resource_provider() as the block core's TimeOp before
+discovery or consumer I/O. The X-Kernel provider reads khal's monotonic clock;
+reusable block code imports only driver_os_api. Clock samples may occur under a
+short IRQ-safe accounting lock in task or completion IRQ/softirq context and
+must not allocate or sleep.
