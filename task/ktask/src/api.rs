@@ -512,7 +512,7 @@ pub fn on_timer_fire() {
         // handling the IRQ. No active frame means kernel context, charged as
         // system time.
         let user_tick = khal::context::active_exception_user_mode().unwrap_or(false);
-        runtime.on_periodic_tick(user_tick, PERIODIC_TICK_NS);
+        runtime.on_periodic_tick(user_tick, ktime::TICK_NS);
     }
 
     let sched_due = {
