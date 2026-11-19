@@ -63,7 +63,10 @@ pub fn init_current_cpu() {
         daemon_name(cpu_id),
         kbuild_config::TASK_STACK_SIZE,
     );
-    let task = prepare_task(task);
+    // SAFETY: PM keeps IRQ/device resources live until the CPU Stop callback
+    // excludes softirq execution, and restores them before releasing that CPU.
+    // Hardware restoration must not require a lock retained by this daemon.
+    let task = prepare_task(unsafe { task.with_pm_infrastructure() });
     task.set_cpumask(KCpuMask::one_shot_logical(cpu_id));
     activate_task(&task);
 }

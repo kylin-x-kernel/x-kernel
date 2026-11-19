@@ -176,6 +176,24 @@ pub struct SystemFrozenTasks {
     _gate: PublicationGate,
 }
 
+/// Snapshots explicitly declared CPU-park-governed kernel infrastructure.
+/// PM must still keep its resources live until every CPU is parked and restore
+/// them before CPU release. This does not grant a device/IRQ/DMA barrier.
+///
+/// # Errors
+/// Returns Busy if scheduler admission is already owned by another freezer.
+pub fn infrastructure_tasks() -> Result<Vec<KtaskRef>, FreezeError> {
+    let gate = PublicationGate::acquire()?;
+    let mut tasks = gate.snapshot();
+    let current = crate::current().clone();
+    tasks.retain(|task| {
+        task.is_pm_infrastructure
+            && task.user_runtime().is_none()
+            && !KtaskRef::ptr_eq(task, &current)
+    });
+    Ok(tasks)
+}
+
 /// Freezes every admitted non-idle task except the coordinator and listed kernel infrastructure.
 ///
 /// Closing admission and registering a first activation use the same lock.

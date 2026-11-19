@@ -1004,3 +1004,32 @@ no IRQ reader or raw pointer is added. It introduces no new unsafe code or
 Send/Sync implementation. The prepared handle retains its task and remains
 neither Send nor Sync. Ordinary waker hints survive confirmed freezing, while
 request cancellation never independently releases a successfully returned guard.
+
+## Reset-aware CPU callback lifetime
+
+Stop callbacks cannot borrow stack metadata that their caller may reclaim.
+ParkedCpus boxes state before queueing and joins every queued callback even on
+preparation timeout. A CPU that stops servicing Stop work can therefore prevent
+rollback: timeout is not proof of safe storage reclamation. CPU topology must
+remain stable. Hardware-reset context preservation remains a separate platform obligation;
+this spin-only rendezvous cannot authorize firmware sleep. Local scheduling is enabled only with fixed owner affinity.
+Freezer-aware futures must not retain a device or lock needed by PM while Pending.
+
+## CPU parking and PM infrastructure tasks
+
+The unsafe `TaskInner::with_pm_infrastructure` in `src/task.rs` bypasses
+cooperative freeze acknowledgement. Callers may mark only unpublished kernel
+infrastructure whose execution is governed by CPU parking. User tasks and
+ordinary kernel work must participate in cooperative freezing. PM must keep this task's resources available until its CPU acknowledges
+parking, and restore them before release. Recovery must not require a lock
+the task could hold while parked.
+Before marking the task, the caller must establish both the platform's resource
+lifetime and restoration ordering and the recovery path's lock requirements.
+`with_pm_infrastructure` only sets the tag. It performs no runtime check of
+when the platform restores resources or which locks recovery will acquire.
+
+In `src/softirqd.rs`, IRQ and device resources stay available until the CPU
+Stop callback excludes softirq execution. PM restores them before CPU release
+without acquiring locks retained by the daemon. In `src/stop_machine.rs`,
+the pinned Stop thread owns the CPU rendezvous and runs its callbacks with
+interrupts disabled. Recovery must not acquire resources held by that thread.

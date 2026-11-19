@@ -430,6 +430,7 @@ pub struct TaskInner {
     pub(crate) is_freezer_wait: AtomicBool,
     /// Published on the incoming stack after terminal switch cleanup.
     pub(crate) is_exit_complete: AtomicBool,
+    pub(crate) is_pm_infrastructure: bool,
     pub(crate) suspend_registration: klazy::Once<Arc<crate::freezer::system::Registration>>,
 
     /// Requested, cgroup-bounded, and effective CPU affinity.
@@ -533,6 +534,20 @@ const _: () = assert!(
 );
 
 impl TaskInner {
+    /// Marks pre-publication kernel infrastructure governed by CPU parking.
+    ///
+    /// # Safety
+    /// PM must keep this task's resources available until its CPU acknowledges
+    /// parking, and restore them before release. Recovery must not need any
+    /// lock the task could retain while parked. Never use this for user tasks
+    /// or ordinary business work; it bypasses cooperative task acknowledgment.
+    /// The task cannot check when the platform restores resources or which
+    /// locks recovery will acquire. The caller must establish both conditions.
+    pub unsafe fn with_pm_infrastructure(mut self) -> Self {
+        self.is_pm_infrastructure = true;
+        self
+    }
+
     fn new_with_identity<F>(
         entry: F,
         name: String,
@@ -1184,6 +1199,7 @@ impl TaskInner {
             freeze_request: kspin::SpinNoIrq::new(None),
             is_freezer_wait: AtomicBool::new(false),
             is_exit_complete: AtomicBool::new(false),
+            is_pm_infrastructure: false,
             suspend_registration: klazy::Once::new(),
             // By default, the task is allowed to run on all CPUs.
             affinity: SpinNoIrq::new(TaskAffinity::new(cpumask)),

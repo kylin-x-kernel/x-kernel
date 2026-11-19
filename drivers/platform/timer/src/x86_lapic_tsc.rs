@@ -262,8 +262,8 @@ pub fn early_init(config: TimerConfig) {
         );
     } else {
         if matches!(selected, TscFrequency::PitDegraded(_)) {
-            log::warn!(
-                "TSC frequency discovery is degraded: best PIT bounds are wider than {}%",
+            kernel_boot::bootln!(
+                "Warning: TSC frequency discovery is degraded: best PIT bounds are wider than {}%",
                 PIT_SAMPLE_SPREAD_PERCENT
             );
         }

@@ -49,6 +49,7 @@ unittest::path_mod_test!(tests_timer_irq, "../ut-tests/tests_timer_irq.rs");
 
 #[macro_use]
 mod api;
+pub mod cpu_park;
 mod lock_owner;
 mod park;
 mod pi;

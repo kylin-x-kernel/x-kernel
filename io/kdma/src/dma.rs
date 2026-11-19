@@ -85,25 +85,10 @@ impl DmaAllocator {
         }
     }
 
-    /// Allocate arbitrary number of bytes. Returns the left bound of the
-    /// allocated region.
-    ///
-    /// DMA memory is allocated in page granularity so page-table attributes and
-    /// platform share/unshare hooks remain balanced for every allocation.
-    ///
-    /// # Safety
-    ///
-    /// The caller must treat the returned [`DmaInfo`] as coherent DMA memory:
-    /// deallocate it exactly once with the same `layout`, do not forge or
-    /// offset the returned CPU address, and only hand the bus address to a
-    /// device that is allowed to DMA that range.
+    /// Allocate privately, then publish the address only after invalidation and
+    /// platform preparation succeed. No allocator lock spans the shootdown.
     #[track_caller]
-    pub(crate) unsafe fn allocate_dma_memory(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
-        self.alloc_coherent_pages(layout)
-    }
-
-    #[track_caller]
-    fn alloc_coherent_pages(&mut self, layout: Layout) -> AllocResult<DmaInfo> {
+    pub(crate) fn alloc_coherent_pages(layout: Layout) -> AllocResult<DmaInfo> {
         let num_pages = layout_pages(&layout);
         let vaddr_raw = global_allocator().alloc_dma_pages(
             num_pages,
@@ -111,31 +96,38 @@ impl DmaAllocator {
             UsageKind::Dma,
         )?;
         let vaddr = va!(vaddr_raw);
-        if let Some(completion) =
-            self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent)?
-        {
-            self.pending_completions.push(completion);
+        let mapping = Self::update_mapping_mode(vaddr, num_pages, DmaMappingMode::Coherent);
+        if let Err(error) = confirm_mapping(mapping) {
+            // The platform has not seen these pages. Attempt a normal-mode
+            // restore; a second failure leaves them out of circulation.
+            Self::restore_and_release(vaddr_raw, num_pages);
+            return Err(error);
         }
-        self.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
+        let mut allocator = ALLOCATOR.lock();
+        allocator.prepare_platform_dma(v2p(vaddr), num_pages * PAGE_SIZE_4K)?;
         let dma_info = DmaInfo {
-            // SAFETY: `vaddr_raw` is the start of the freshly allocated DMA mapping
-            // and therefore cannot be null.
+            // SAFETY: the allocator returned the start of a live kernel allocation.
             cpu_addr: unsafe { NonNull::new_unchecked(vaddr_raw as *mut u8) },
             bus_addr: v2b(vaddr),
         };
-        self.trace_coherent_alloc(dma_info, num_pages);
+        allocator.trace_coherent_alloc(dma_info, num_pages);
         #[cfg(unittest)]
-        self.test_coherent_allocs.insert(
-            dma_info.cpu_addr.as_ptr() as usize,
-            num_pages * PAGE_SIZE_4K,
-        );
+        allocator
+            .test_coherent_allocs
+            .insert(vaddr_raw, num_pages * PAGE_SIZE_4K);
         Ok(dma_info)
+    }
+
+    fn restore_and_release(virt_raw: usize, num_pages: usize) {
+        let restore = Self::update_mapping_mode(va!(virt_raw), num_pages, DmaMappingMode::Normal);
+        if confirm_mapping(restore).is_ok() {
+            global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+        }
     }
 
     /// Applies one mapping mode and returns the invalidation the provider
     /// detached from its lock, if it did not complete it in place.
     fn update_mapping_mode(
-        &mut self,
         vaddr: VirtAddr,
         num_pages: usize,
         mode: DmaMappingMode,
@@ -185,28 +177,14 @@ impl DmaAllocator {
         let size = num_pages * PAGE_SIZE_4K;
         let vaddr = va!(virt_raw);
 
-        // Deallocation cannot fail; the helper already logs platform release errors.
-        let _ = self.release_platform_dma(v2p(vaddr), size);
-        // The pages may return to the general allocator only after every CPU
-        // has dropped its uncached translation: otherwise a CPU that still
-        // holds the coherent mapping could observe a cached alias of the
-        // reused page. The provider detaches that invalidation from the
-        // allocator lock, so release the pages inside the completion, which
-        // the public wrapper runs after unlocking.
-        match self.update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal) {
-            Ok(Some(flush)) => {
-                self.pending_completions
-                    .push(DmaMappingCompletion::new(move || {
-                        let is_invalidated = flush.complete();
-                        global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
-                        is_invalidated
-                    }));
-            }
-            // The provider completed the invalidation in place, or the mode
-            // restore failed after logging; no flush is pending.
-            Ok(None) | Err(_) => {
-                global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
-            }
+        if self.release_platform_dma(v2p(vaddr), size).is_err() {
+            return;
+        }
+        let restore = Self::update_mapping_mode(vaddr, num_pages, DmaMappingMode::Normal);
+        if let Some(completion) = release_after_restore(restore, move || {
+            global_allocator().dealloc_dma_pages(virt_raw, num_pages, UsageKind::Dma);
+        }) {
+            self.pending_completions.push(completion);
         }
     }
 
@@ -244,7 +222,7 @@ impl DmaAllocator {
         }
 
         fence(Ordering::SeqCst);
-        let (dma_info, layout) = self.alloc_bounce_buffer(len)?;
+        let (dma_info, layout) = self.bounce_pool.allocate(len)?;
 
         // Stage the current bytes for every direction, including DeviceToDriver.
         // The device's writes still overwrite them, but a mapping that is
@@ -362,21 +340,28 @@ impl DmaAllocator {
         self.recycle_bounce_buffer(mapping.cpu_addr, mapping.layout);
     }
 
-    fn alloc_bounce_buffer(&mut self, len: usize) -> AllocResult<(DmaInfo, Layout)> {
-        let pool = self.bounce_pool_mut()?;
-        pool.allocate(len)
-    }
-
     fn recycle_bounce_buffer(&mut self, cpu_addr: usize, layout: Layout) {
         self.bounce_pool.deallocate(cpu_addr, layout);
     }
 
-    fn bounce_pool_mut(&mut self) -> AllocResult<&mut BouncePool> {
-        if !self.bounce_pool.is_initialized() {
-            let dma = self.alloc_coherent_pages(layout_for_pages(DMA_BOUNCE_POOL_PAGES))?;
-            self.bounce_pool.initialize(dma, bounce_pool_size());
+    pub(crate) fn ensure_bounce_pool() -> AllocResult<()> {
+        if ALLOCATOR.lock().bounce_pool.is_initialized() {
+            return Ok(());
         }
-        Ok(&mut self.bounce_pool)
+        let layout = layout_for_pages(DMA_BOUNCE_POOL_PAGES);
+        let candidate = Self::alloc_coherent_pages(layout);
+        let mut allocator = ALLOCATOR.lock();
+        if !allocator.bounce_pool.is_initialized() {
+            allocator
+                .bounce_pool
+                .initialize(candidate?, bounce_pool_size());
+        } else if let Ok(extra) = candidate {
+            drop(allocator);
+            // SAFETY: another CPU installed its backing first. This private
+            // allocation was never published, and the layout is unchanged.
+            unsafe { crate::deallocate_dma_memory(extra, layout) };
+        }
+        Ok(())
     }
 
     #[cfg(feature = "dma-trace")]
@@ -514,4 +499,37 @@ fn layout_for_pages(num_pages: usize) -> Layout {
                   power of two"
     )]
     Layout::from_size_align(num_pages * PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap()
+}
+
+/// Return pages to the allocator only after every required invalidation succeeds.
+/// The caller drains deferred work outside the DMA allocator lock.
+fn release_after_restore(
+    restore: AllocResult<Option<DmaMappingCompletion>>,
+    release: impl FnOnce() + Send + 'static,
+) -> Option<DmaMappingCompletion> {
+    match restore {
+        Ok(Some(flush)) => Some(DmaMappingCompletion::new(move || {
+            if !flush.complete() {
+                return false;
+            }
+            release();
+            true
+        })),
+        Ok(None) => {
+            release();
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+unittest::path_mod_test!(tests, "../ut-tests/coherent_release.rs");
+
+/// The allocation path may expose the bus address only on success.
+fn confirm_mapping(mapping: AllocResult<Option<DmaMappingCompletion>>) -> AllocResult<()> {
+    if mapping?.is_some_and(|flush| !flush.complete()) {
+        error!("DMA mapping change did not confirm remote TLB invalidation");
+        return Err(AllocError::NoMemory);
+    }
+    Ok(())
 }

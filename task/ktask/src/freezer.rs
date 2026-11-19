@@ -22,7 +22,7 @@ use ktime_types::TimeSpan;
 use crate::{KtaskRef, TaskState, completion::CompletionWait};
 
 pub(crate) mod system;
-pub use system::{SystemFrozenTasks, freeze_system_tasks};
+pub use system::{SystemFrozenTasks, freeze_system_tasks, infrastructure_tasks};
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -229,6 +229,19 @@ pub fn freeze_tasks(
         return Err(FreezeError::Cancelled);
     }
     if !confirmed() {
+        for (task, request) in &frozen.requests {
+            if !request.is_confirmed.load(Ordering::Acquire)
+                && !task.is_exit_complete.load(Ordering::Acquire)
+            {
+                let mut name = [0u8; 96];
+                let length = task.copy_name(&mut name);
+                let name = core::str::from_utf8(&name[..length]).unwrap_or("<invalid task name>");
+                log::warn!(
+                    "task freeze missing checkpoint: name={name} state={:?}",
+                    task.state()
+                );
+            }
+        }
         return Err(FreezeError::TimedOut);
     }
     Ok(frozen)

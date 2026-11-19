@@ -77,17 +77,14 @@ io/kdma/
 ## Architecture
 
 ```text
-drivers
-  |  allocate_dma_memory(layout)          map_dma_buffer(buf, dir)
-  v                                              |
-SpinNoIrq<DmaAllocator>  <--- one global lock ---+
-  |  alloc_coherent_pages                             |
-  |    kalloc alloc_dma_pages (UsageKind::Dma)        v
-  |    kiface_mm_api::DmaMappingIf::set_mode (UNCACHED|SHARED)
-  |      -> detached completion completed after unlock          BouncePool (lazy, 1024 pages)
-  |    kplat::dma::prepare / release                 TLSF byte allocator
-  |    p2b -> DmaInfo{cpu_addr, bus_addr}            copy-in/out + SeqCst fences
-  |                                           active_mappings: BTreeMap<bus, BounceMapping>
+allocate_dma_memory(layout)
+  -> allocate DMA pages and set UNCACHED|SHARED mapping
+  -> confirm detached TLB invalidation
+  -> lock allocator, prepare platform DMA, publish DmaInfo
+
+map_dma_buffer(buf, dir)
+  -> ensure bounce pool, then lock allocator
+  -> TLSF allocation, copy-in/out, active_mappings bookkeeping
 ```
 
 ## Execution Context
@@ -95,8 +92,8 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
 - All public functions take a `SpinNoIrq` lock: callers must not sleep
   while holding the API, and the functions are safe from any context
   where spin locks are legal (task context; not from NMI-level code).
-- A coherent mode change detaches its remote TLB invalidation. The public
-  wrappers complete it after releasing the allocator lock, because a CPU
+- A coherent mode change detaches its remote TLB invalidation. Allocation confirms it before
+  taking the allocator lock for platform preparation and publication. A CPU
   waiting for that lock with interrupts disabled cannot acknowledge the
   shootdown. A completion that cannot confirm the invalidation is logged; the
   mode change is not silently assumed to have taken effect.
@@ -105,11 +102,14 @@ SpinNoIrq<DmaAllocator>  <--- one global lock ---+
   flush, so a CPU that still holds the page's uncached translation cannot
   observe a cached alias of the reused page. The public wrapper runs the
   completion after unlocking, so CPUs spinning on the allocator lock with
-  interrupts disabled can still answer the shootdown.
+  interrupts disabled can still answer the shootdown. A failed platform release,
+  mapping restore, or final shootdown leaves these pages allocated.
 - Coherent allocation participates in the global page allocator and page
   table updates, so it must run after `kalloc` and the address-space
   subsystem are initialized; first use of the bounce path lazily
-  allocates the pool through the same path.
+  allocates the pool through the same path. Allocation confirms the coherent
+  mapping before platform preparation or publication. Concurrent first users
+  install one confirmed backing and release any unused candidate.
 - `map_dma_buffer`/`unmap_dma_buffer` copy up to the buffer length on the
   calling thread; they are intended for driver submit/completion paths.
 - Completion softirqs can submit pending requests on the interrupted idle

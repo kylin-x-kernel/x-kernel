@@ -131,8 +131,7 @@ pub fn b2p(baddr: DmaBusAddress) -> PhysAddr {
 /// returned bus address to devices that are allowed to DMA that buffer.
 #[track_caller]
 pub unsafe fn allocate_dma_memory(layout: Layout) -> AllocResult<DmaInfo> {
-    // SAFETY: forwards the caller's DMA allocation preconditions to the global DMA allocator.
-    unsafe { run_allocator(|allocator| allocator.allocate_dma_memory(layout)) }
+    DmaAllocator::alloc_coherent_pages(layout)
 }
 
 /// Frees coherent memory previously allocated.
@@ -188,6 +187,10 @@ pub unsafe fn map_dma_buffer(
     buffer: NonNull<[u8]>,
     direction: DmaDirection,
 ) -> AllocResult<DmaInfo> {
+    if buffer.is_empty() {
+        return Err(alloc_engine::AllocError::InvalidInput);
+    }
+    DmaAllocator::ensure_bounce_pool()?;
     // SAFETY: forwards the caller's exclusive-buffer contract to the DMA mapper.
     unsafe { run_allocator(|allocator| allocator.map_dma_buffer(buffer, direction)) }
 }
