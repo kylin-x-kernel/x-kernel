@@ -10,18 +10,22 @@ use kvfs::{
 };
 use unittest::{assert, assert_eq, def_test};
 
-use super::add_root_entries;
+use super::{add_root_entries, add_sys_entries};
 
 static TEST_FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::internal("procfs-printk-test");
 
+fn build_basic_root(fs: Arc<SimpleFs>) -> kvfs::DirMaker {
+    let mut root = DirMapping::new();
+    let mut sys = DirMapping::new();
+    add_root_entries(&mut root, fs.clone());
+    add_sys_entries(&mut sys, fs.clone());
+    root.add("sys", SimpleDir::new_maker(fs.clone(), Arc::new(sys)));
+    SimpleDir::new_maker(fs, Arc::new(root))
+}
+
 #[def_test(serial)]
 fn pty_nodes_report_limits_and_reject_root_writes() {
-    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
-        let mut root = DirMapping::new();
-        add_root_entries(&mut root, fs.clone());
-        SimpleDir::new_maker(fs, Arc::new(root))
-    })
-    .unwrap();
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, build_basic_root).unwrap();
     let root = Mount::new_root(&super_block).root_path();
     for (path, expected) in [
         ("/sys/kernel/pty/max", ktty::tty::pty_limit()),
@@ -56,12 +60,7 @@ fn pty_nodes_report_limits_and_reject_root_writes() {
 /// they must not interleave with another test that reads or writes it.
 #[def_test(serial)]
 fn printk_and_log_filter_nodes_read_and_write_the_console_filter() {
-    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
-        let mut root = DirMapping::new();
-        add_root_entries(&mut root, fs.clone());
-        SimpleDir::new_maker(fs, Arc::new(root))
-    })
-    .unwrap();
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, build_basic_root).unwrap();
     let root = Mount::new_root(&super_block).root_path();
     let open = |path: &str| {
         Filename::new(path)
@@ -153,12 +152,7 @@ fn printk_and_log_filter_nodes_read_and_write_the_console_filter() {
 /// while an unprivileged task that changed fsuid to zero must not.
 #[def_test(serial)]
 fn inotify_sysctl_open_uses_effective_uid() {
-    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
-        let mut root = DirMapping::new();
-        add_root_entries(&mut root, fs.clone());
-        SimpleDir::new_maker(fs, Arc::new(root))
-    })
-    .unwrap();
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, build_basic_root).unwrap();
     let root = Mount::new_root(&super_block).root_path();
     let path = "/sys/fs/inotify/max_user_watches";
     let open = |flags: OpenFlags, cred: kcred::Cred| {
@@ -253,12 +247,7 @@ fn proc_nodes_are_pollable_like_linux() {
 
 #[def_test]
 fn quota_statistics_share_the_existing_filesystem_sysctl_tree() {
-    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
-        let mut root = DirMapping::new();
-        add_root_entries(&mut root, fs.clone());
-        SimpleDir::new_maker(fs, Arc::new(root))
-    })
-    .unwrap();
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, build_basic_root).unwrap();
     let root = Mount::new_root(&super_block).root_path();
     for path in [
         "/sys/fs/quota/allocated_dquots",
@@ -283,12 +272,7 @@ fn quota_statistics_share_the_existing_filesystem_sysctl_tree() {
 
 #[def_test(serial)]
 fn cpuinfo_supports_partial_reads_and_rejects_writes() {
-    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
-        let mut root = DirMapping::new();
-        add_root_entries(&mut root, fs.clone());
-        SimpleDir::new_maker(fs, Arc::new(root))
-    })
-    .unwrap();
+    let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, build_basic_root).unwrap();
     let root = Mount::new_root(&super_block).root_path();
     let file = Filename::new("/cpuinfo")
         .open_with_flags_at(

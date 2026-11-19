@@ -11,7 +11,7 @@ use unittest::{assert, def_test};
 
 use super::*;
 use crate::{
-    buf::PacketOwner,
+    buf::{PacketBuf, PacketOwner},
     device::LoopbackDevice,
     ip::{Ipv4Address, Ipv4Cidr},
     ipv4,

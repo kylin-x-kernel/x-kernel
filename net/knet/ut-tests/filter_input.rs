@@ -69,16 +69,14 @@ fn receive(
     filter: &FilterConfig,
     packet: impl Into<RxPacket>,
 ) -> (Vec<PacketBuf>, Vec<Vec<u8>>) {
-    let mut accepted = vec![];
-    let mut control = vec![];
+    let mut batch = crate::stack::ingress::IngressBatch::new(1);
     ingress.handle_rx_packets(
         MonotonicInstant::from_span_since_origin(TimeSpan::from_secs(1)),
         filter,
         &mut vec![packet.into()],
-        &mut accepted,
-        &mut control,
+        &mut batch,
     );
-    (accepted, control)
+    (batch.local, batch.control)
 }
 
 fn input_packets(filter: &FilterConfig) -> u64 {

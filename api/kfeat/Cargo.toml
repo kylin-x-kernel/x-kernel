@@ -122,7 +122,8 @@ fs_times = ["fs_ext4", "kext4/times"]
 #
 # Subsystem-only. The NIC / vsock transport driver is selected separately via
 # the `driver_*` features below.
-net = ["dep:knet", "kruntime/net"]
+net = ["dep:knet", "kruntime/net", "procfs?/net"]
+procfs_net = ["dep:procfs", "procfs/net"]
 vsock = ["net", "kruntime/vsock", "knet/vsock", "ksyscall/vsock"]
 
 # Display (subsystem only; pick a driver via `driver_*`).

@@ -51,6 +51,11 @@ pub struct LegacyTableHandle<'a> {
 }
 
 impl LegacyTableHandle<'static> {
+    /// Names of the built-in IPv4 tables served by this adapter.
+    pub fn registered_names() -> &'static [&'static str] {
+        &["filter"]
+    }
+
     /// Finds the global `filter` table by its ABI name.
     ///
     /// The last name byte is reserved for NUL. Returns `ENOENT` for unknown names.

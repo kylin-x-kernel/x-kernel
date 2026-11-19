@@ -2,13 +2,19 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{sync::Arc, vec};
+use alloc::{string::String, sync::Arc, vec};
 
 use ksync::Mutex;
 use unittest::{assert, assert_eq, def_test};
 
 use super::*;
-use crate::device::{LinkSendSnapshot, LinkSnapshot, LoopbackDevice};
+use crate::{
+    device::{LinkSendSnapshot, LinkSnapshot, LoopbackDevice},
+    netfilter::{
+        BaseMatch, Chain, FilterHook, FilterTable, InterfacePattern, Negated, Rule as FilterRule,
+        Target, Verdict,
+    },
+};
 
 type SentPackets = Arc<Mutex<Vec<(IpAddress, PacketBuf)>>>;
 
@@ -107,6 +113,32 @@ fn router() -> (Router, SentPackets) {
     (router, sent)
 }
 
+fn filter(target: Target) -> FilterConfig {
+    let base = BaseMatch {
+        input_interface: Some(Negated::new(
+            InterfacePattern::exact(String::from("in0")).unwrap(),
+            false,
+        )),
+        output_interface: Some(Negated::new(
+            InterfacePattern::exact(String::from("out0")).unwrap(),
+            false,
+        )),
+        ..BaseMatch::default()
+    };
+    FilterConfig::new(
+        FilterTable::new(vec![
+            Chain::built_in(FilterHook::LocalIn, Verdict::Drop, vec![]),
+            Chain::built_in(
+                FilterHook::Forward,
+                Verdict::Accept,
+                vec![FilterRule::new(base, vec![], target).unwrap()],
+            ),
+            Chain::built_in(FilterHook::LocalOut, Verdict::Drop, vec![]),
+        ])
+        .unwrap(),
+    )
+}
+
 fn packet(router: &Router, ttl: u8) -> PacketBuf {
     let bytes = ipv4::build_ipv4_packet(
         Ipv4Address::new(192, 0, 2, 7),
@@ -130,18 +162,19 @@ fn input(router: &Router, ttl: u8) -> Ipv4ForwardInput {
 }
 
 #[def_test]
-fn forward_batch_resumes_fragments_without_repeating_ttl_update() {
+fn forward_batch_counts_once_before_fragmentation() {
     let (mut router, sent) = router();
+    let filter = filter(Target::Continue);
     let mut inputs = vec![input(&router, 64)];
     router.set_ipv4_forwarding(1);
     router.enqueue_forward_packets(&mut inputs);
     assert_eq!(
-        router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1),
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 1, &filter),
         (1, true)
     );
     assert_eq!(sent.lock().len(), 1);
     assert_eq!(
-        router.dispatch_budgeted(MonotonicInstant::ORIGIN, 1),
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 1, &filter),
         (1, false)
     );
     let sent = sent.lock();
@@ -158,6 +191,9 @@ fn forward_batch_resumes_fragments_without_repeating_ttl_update() {
             router.devices.device_id_by_name("out0").unwrap().ifindex()
         );
     }
+    let counters = filter.with_state(|state| state.collect_counters());
+    assert_eq!(counters[1].rules[0].packets, 1);
+    assert_eq!(counters[1].rules[0].bytes, 116);
 }
 
 #[def_test]
@@ -203,4 +239,17 @@ fn forward_queue_backpressure_and_cleanup_preserve_local_tx_capacity() {
         (0, false)
     );
     assert_eq!(sent.lock().len(), 2);
+}
+
+#[def_test]
+fn forward_drop_does_not_submit_transmission_packets() {
+    let (mut router, sent) = router();
+    let filter = filter(Target::Verdict(Verdict::Drop));
+    router.set_ipv4_forwarding(1);
+    router.enqueue_forward_packets(&mut vec![input(&router, 64)]);
+    assert_eq!(
+        router.dispatch_output_budgeted(MonotonicInstant::ORIGIN, 1, &filter),
+        (1, false)
+    );
+    assert!(sent.lock().is_empty());
 }

@@ -388,13 +388,19 @@ truncated payloads; unfinished output derives its length from packet storage.
 fragmentation, and ICMP failure preparation. Its input is already normalized by
 IPv4 ingress. It preserves remote endpoints and inherited fragment fields;
 failures retain the original header for a separately routed ICMP reply.
-Routing and scheduling remain caller responsibilities; live ingress is not
-connected to forwarding in this stage.
+Routing and scheduling belong to Router.
 
 Router owns forwarding route selection and output queues. The selected device,
 next hop and neighbor source stay with pending fragments, with one fragment per
 TX work item. Disabling forwarding or retiring the device/source drops pending
-output. Ingress and the userspace control are connected separately.
+output. Ingress transfers validated forwarding inputs through `IngressBatch`
+and the bounded Router queue. Each namespace starts with forwarding disabled;
+`/proc/sys/net/ipv4/ip_forward` controls it under the Router lock. Physical
+receive traffic still belongs to the initial stack.
+
+FORWARD inspects the route-selected datagram after TTL preparation and before
+fragmentation. Remaining fragments resume after that decision without repeating
+filter counters or TTL updates. Forwarded traffic bypasses local INPUT/OUTPUT.
 
 ### IPv4 Filter Table Model
 
@@ -490,8 +496,7 @@ INPUT acceptance. Unmatched loopback UDP keeps its `PreparedUdpPacket` in the
 deferred queue and resumes local delivery without evaluating or counting INPUT
 again, including across a table replacement. `PacketBuf` carries no filter progress.
 Interface-name updates take Router before ingress; packet matching takes ingress
-before the filter read lock and never calls back into Router. FORWARD is not
-connected to packet processing yet.
+before the filter read lock and never calls back into Router.
 
 ### Local IPv4 output
 
@@ -502,6 +507,9 @@ TX queues and dispatch budgets count complete datagrams; queue rejection precede
 OUTPUT, and fragments or device retries do not repeat evaluation or counting.
 Queued packets use the table current at dispatch time; a later DROP is not
 reported to the sending socket.
+
+The adapter exposes its built-in table names for `/proc/net/ip_tables_names`;
+unqualified iptables-save enumerates the same global filter table it can query.
 
 ### Legacy IPv4 Table Compatibility
 

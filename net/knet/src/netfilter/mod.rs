@@ -25,3 +25,10 @@ pub(crate) mod compat;
 mod filter;
 
 pub(crate) use filter::config::{FilterConfig, global};
+#[cfg(unittest)]
+pub(crate) use filter::{
+    chain::{Chain, FilterHook},
+    matcher::{BaseMatch, InterfacePattern, Negated},
+    rule::{Rule, Target, Verdict},
+    table::FilterTable,
+};

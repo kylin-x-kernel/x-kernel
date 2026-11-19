@@ -5,6 +5,14 @@ config KFEAT_NET
     help
       Enable the kernel networking stack and NIC driver integration.
 
+config KFEAT_PROCFS_NET
+    bool
+    depends on KFEAT_FS && KFEAT_NET
+    default y
+    help
+      Include network procfs nodes when filesystem and networking support
+      are both enabled.
+
 config KFEAT_VSOCK
     bool "Enable virtio-vsock support"
     depends on KFEAT_NET

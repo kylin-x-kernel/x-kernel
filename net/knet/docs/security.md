@@ -146,6 +146,14 @@ Router retains a bounded forwarding queue and a single fragmented datagram.
 Device/source removal clears pending output under its lock. Each dispatched
 fragment consumes TX budget; TTL preparation is not repeated on resumption.
 
+Ingress retains batches across lock contention without repeating validation.
+The namespace registry lock is released before taking a stack lock. Forwarding
+admission is disabled by default and every sysctl write checks CAP_NET_ADMIN.
+
+FORWARD rejection prevents fragment submission. Interface names are resolved
+under the Router lock; an input device removed while queued causes a drop.
+Pending fragments retain the original verdict across scheduling rounds.
+
 INPUT runs on complete, validated local IPv4 datagrams before transport delivery
 or protocol/port-unreachable replies. Fragment queues do not evaluate partial datagrams.
 Unknown input interfaces and invalid match contexts drop the packet. Interface

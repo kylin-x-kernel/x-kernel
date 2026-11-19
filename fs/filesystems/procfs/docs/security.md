@@ -324,3 +324,15 @@ counting. Mount-option snapshots use the filesystem operation table; build
 configuration bytes are produced from the resolved build inputs, not runtime
 user data. All three introspection paths expose state rather than accepting
 policy changes.
+
+## IPv4 forwarding control
+
+Every write checks the current caller's `CAP_NET_ADMIN`, including on inherited
+descriptors. The inode retains the namespace captured at lookup, so an open
+descriptor does not retarget after `setns`. Namespace-dependent dentries are not
+cached across lookups. A missing stack returns an error rather than falling back
+to the global stack.
+
+`/proc/net/ip_tables_names` lists the built-in IPv4 tables exposed by knet,
+with mode 0440 and no write operation. Table enumeration is global, like the
+current legacy table adapter; independent namespace rule stores are unsupported.

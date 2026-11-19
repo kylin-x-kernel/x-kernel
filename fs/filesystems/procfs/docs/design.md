@@ -191,13 +191,14 @@ Paths in this table are relative to `fs/filesystems/procfs/`.
 
 | Source | Responsibility |
 | --- | --- |
-| `src/lib.rs`, `src/root.rs` | Registration, superblock construction, composition of static and dynamic entries |
+| `src/lib.rs`, `src/root.rs` | Registration, superblock construction, composition of static (`/proc` and `/proc/sys`) and dynamic entries |
 | `src/name.rs` | Strict canonical-decimal parsing of numeric proc entry names (Linux `name_to_int()`) |
 | `src/task_nodes/root.rs` | PID/TID directories, task metadata, maps, FD magic links, fdinfo rendering (including inotify watches), namespaces, process controls |
 | `src/task_nodes/mounts.rs` | Mount-tree traversal and mounts/mountinfo/mountstats formatting |
 | `src/task_nodes/tee.rs` | Feature-gated TA metadata through `tee_task_iface` |
-| `src/basic_nodes/root.rs` | Boot command line, root entry registration, filesystem information, kernel settings and the `/proc/sys/fs/inotify` live limits |
+| `src/basic_nodes/root.rs` | Boot command line, core root entries, filesystem information, `/proc/sys/kernel` settings and `/proc/sys/fs` (`inotify`, `quota`) controls |
 | `src/basic_nodes/cpuinfo.rs` | Per-CPU text formatting and Linux feature-name table over kcpu snapshots |
+| `src/net_nodes/root.rs` | Feature-gated `/proc/net` and `/proc/sys/net` entries backed by `knet` and `kns` |
 | `src/boot_id.rs` | Per-boot random UUID behind `/proc/sys/kernel/random/boot_id`, drawn once from the entropy pool |
 | `src/mem_nodes/root.rs` | Allocator-derived memory statistics |
 | `src/device_nodes/root.rs` | Device, bus, driver, and topology views through `kdevice` |

@@ -163,6 +163,11 @@ impl FilterConfig {
         self.evaluate_ipv4(FilterHook::LocalOut, packet, "", outdev) == Ok(Verdict::Accept)
     }
 
+    /// Applies FORWARD after route selection and TTL update, before fragmentation.
+    pub(crate) fn accept_forward(&self, packet: &PacketBuf, indev: &str, outdev: &str) -> bool {
+        self.evaluate_ipv4(FilterHook::Forward, packet, indev, outdev) == Ok(Verdict::Accept)
+    }
+
     /// Evaluates a normalized IPv4 packet against one complete generation.
     ///
     /// Matched rules and chain completions count the IPv4 length without padding.

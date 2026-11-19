@@ -22,7 +22,7 @@
 use alloc::{collections::BTreeMap, sync::Arc};
 
 use kalloc_types::KBox;
-use kerrno::KResult;
+use kerrno::{KError, KResult};
 use ksync::{Mutex, static_lock};
 
 use crate::{
@@ -39,6 +39,38 @@ static_lock! {
 /// The initial namespace's stack is the global `SERVICE` singleton and never
 /// enters this map.
 static NAMESPACE_STACKS: Mutex<BTreeMap<u64, Arc<Service>>> = Mutex::new(BTreeMap::new());
+}
+
+/// Reads the IPv4 forwarding switch of an installed namespace stack.
+/// Requires sleepable task context without stack or namespace-registry locks.
+/// Returns `NotFound` when the namespace has no installed stack.
+pub fn ipv4_forwarding(namespace: &kns::NetNamespace) -> KResult<i32> {
+    with_stack(namespace, Service::ipv4_forwarding)
+}
+
+/// Sets the IPv4 forwarding control; zero disables it, other values enable it.
+///
+/// The caller checks administrative permission. Requires sleepable task context
+/// without stack or namespace-registry locks. Disabling discards queued forwards.
+/// Returns `NotFound` when the namespace has no installed stack.
+pub fn set_ipv4_forwarding(namespace: &kns::NetNamespace, value: i32) -> KResult<()> {
+    with_stack(namespace, |service| service.set_ipv4_forwarding(value))
+}
+
+fn with_stack<R>(
+    namespace: &kns::NetNamespace,
+    operation: impl FnOnce(&Service) -> R,
+) -> KResult<R> {
+    let id = namespace.id().as_u64();
+    if kns::NetNamespace::initial_id() == Some(id) {
+        return Ok(operation(&crate::SERVICE));
+    }
+    let service = NAMESPACE_STACKS
+        .lock()
+        .get(&id)
+        .cloned()
+        .ok_or(KError::NotFound)?;
+    Ok(operation(&service))
 }
 
 /// Drops the stack of a destroyed network namespace.

@@ -4794,6 +4794,7 @@ dependencies = [
  "kirq",
  "klockstat",
  "klogger",
+ "knet",
  "kns",
  "kprocess",
  "ksync",

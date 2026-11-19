@@ -25,7 +25,6 @@ use smoltcp::{
 
 use crate::{
     LISTEN_TABLE, SOCKET_SET,
-    buf::PacketBuf,
     device::{
         LINK_FLAG_UP, LinkConfigUpdate, LinkSendSnapshot, LinkSnapshot, NeighborEvent,
         NeighborSnapshot, NeighborState, NeighborUpdate, NetDeviceId, RxDeviceSelection,
@@ -41,7 +40,7 @@ use crate::{
     router::{Ipv4OutputRoute, NeighborUpdatePolicy, Router},
     stack::{
         device::StackDevice,
-        ingress::{IngressProcessor, prepare_smoltcp_ingress},
+        ingress::{IngressBatch, IngressProcessor, prepare_smoltcp_ingress},
         socket_set::SocketSetState,
         time::{earliest_poll_deadline, has_immediate_timer_work, now, to_smoltcp_instant},
     },
@@ -123,8 +122,7 @@ pub(crate) struct Service {
     router: Mutex<Router>,
     ingress: Mutex<IngressProcessor>,
     rx_batch: Mutex<Vec<RxPacket>>,
-    accepted_batch: Mutex<Vec<PacketBuf>>,
-    control_batch: Mutex<Vec<Vec<u8>>>,
+    ingress_batch: Mutex<IngressBatch>,
     timeout_deadline_micros: AtomicU64,
     ipv4_reassembly_deadline_micros: AtomicU64,
     timeout_poll: Arc<PollSet>,
@@ -133,6 +131,14 @@ pub(crate) struct Service {
 }
 
 impl Service {
+    pub(crate) fn ipv4_forwarding(&self) -> i32 {
+        self.router.lock().ipv4_forwarding()
+    }
+
+    pub(crate) fn set_ipv4_forwarding(&self, value: i32) {
+        self.router.lock().set_ipv4_forwarding(value);
+    }
+
     pub(crate) fn new(mut router: Router) -> Self {
         let config = smoltcp::iface::Config::new(HardwareAddress::Ip);
         let iface = Interface::new(
@@ -147,8 +153,7 @@ impl Service {
             router: Mutex::new(router),
             ingress: Mutex::new(IngressProcessor::new()),
             rx_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
-            accepted_batch: Mutex::new(Vec::with_capacity(RX_INGRESS_BATCH_PACKETS)),
-            control_batch: Mutex::new(Vec::new()),
+            ingress_batch: Mutex::new(IngressBatch::new(RX_INGRESS_BATCH_PACKETS)),
             timeout_deadline_micros: AtomicU64::new(0),
             ipv4_reassembly_deadline_micros: AtomicU64::new(0),
             timeout_poll: Arc::new(PollSet::new()),
@@ -190,17 +195,16 @@ impl Service {
     pub(crate) fn poll_budgeted(&self, budget: PollBudget) -> PollProgress {
         let round_started_at = monotonic_time();
         let device_timestamp = round_started_at;
-        let mut control_packets = self.control_batch.lock();
         let mut rx_batch = self.rx_batch.lock();
-        let mut accepted_packets = self.accepted_batch.lock();
+        let mut batch = self.ingress_batch.lock();
 
         let ipv4_expiration = self.try_expire_ipv4_fragments(
             device_timestamp,
             budget.timer_events,
-            &mut control_packets,
+            &mut batch.control,
         );
         let mut timer_events = ipv4_expiration.timer_events;
-        if !self.try_flush_ingress_batches(&mut accepted_packets, &mut control_packets) {
+        if !self.try_flush_ingress_batches(&mut batch) {
             return deferred_poll_progress(0, 0, timer_events);
         }
 
@@ -240,8 +244,7 @@ impl Service {
                 budget.rx_packets
             },
             &mut rx_batch,
-            &mut accepted_packets,
-            &mut control_packets,
+            &mut batch,
         );
         let mut rx_packets = rx_progress.packets;
         has_reached_time_limit |= rx_progress.has_reached_time_limit;
@@ -349,8 +352,7 @@ impl Service {
                 round_started_at,
                 rx_remaining,
                 &mut rx_batch,
-                &mut accepted_packets,
-                &mut control_packets,
+                &mut batch,
             );
             rx_packets += tail_progress.packets;
             if tail_progress.has_lock_contention {
@@ -417,18 +419,13 @@ impl Service {
         round_started_at: MonotonicInstant,
         budget: usize,
         rx_batch: &mut Vec<RxPacket>,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
+        batch: &mut IngressBatch,
     ) -> DeviceRxProgress {
         let mut progress = DeviceRxProgress::default();
         let mut packets_since_time_check = 0;
 
-        if !self.try_process_rx_batch(
-            device_timestamp,
-            rx_batch,
-            accepted_packets,
-            control_packets,
-        ) || !self.try_flush_ingress_batches(accepted_packets, control_packets)
+        if !self.try_process_rx_batch(device_timestamp, rx_batch, batch)
+            || !self.try_flush_ingress_batches(batch)
         {
             progress.has_lock_contention = true;
             return progress;
@@ -478,12 +475,8 @@ impl Service {
             progress.packets += drain.work_done;
             packets_since_time_check = packets_since_time_check.saturating_add(drain.work_done);
 
-            if !self.try_process_rx_batch(
-                device_timestamp,
-                rx_batch,
-                accepted_packets,
-                control_packets,
-            ) || !self.try_flush_ingress_batches(accepted_packets, control_packets)
+            if !self.try_process_rx_batch(device_timestamp, rx_batch, batch)
+                || !self.try_flush_ingress_batches(batch)
             {
                 progress.has_lock_contention = true;
                 break;
@@ -536,8 +529,7 @@ impl Service {
         &self,
         device_timestamp: MonotonicInstant,
         rx_batch: &mut Vec<RxPacket>,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
+        batch: &mut IngressBatch,
     ) -> bool {
         if rx_batch.is_empty() {
             return true;
@@ -550,8 +542,7 @@ impl Service {
             device_timestamp,
             crate::netfilter::global(),
             rx_batch,
-            accepted_packets,
-            control_packets,
+            batch,
         );
         let next_deadline = ingress.ipv4_reassembly_deadline();
         self.update_ipv4_reassembly_timeout(next_deadline);
@@ -559,16 +550,12 @@ impl Service {
         true
     }
 
-    fn try_flush_ingress_batches(
-        &self,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
-    ) -> bool {
-        if accepted_packets.is_empty() && control_packets.is_empty() {
+    fn try_flush_ingress_batches(&self, batch: &mut IngressBatch) -> bool {
+        if batch.is_empty() {
             return true;
         }
 
-        let mut sockets = if accepted_packets.is_empty() {
+        let mut sockets = if batch.local.is_empty() {
             None
         } else {
             let Some(sockets) = SOCKET_SET.inner.try_lock() else {
@@ -583,10 +570,11 @@ impl Service {
             // Acquire both destinations before listener preparation mutates the
             // socket set. A failed nonblocking acquisition leaves the complete
             // batch available for an identical retry in a later poll round.
-            prepare_smoltcp_ingress(accepted_packets, sockets);
-            router.enqueue_ingress_packets(accepted_packets);
+            prepare_smoltcp_ingress(&batch.local, sockets);
+            router.enqueue_ingress_packets(&mut batch.local);
         }
-        for packet in control_packets.drain(..) {
+        router.enqueue_forward_packets(&mut batch.forward);
+        for packet in batch.control.drain(..) {
             if let Err(err) = router.queue_control_ipv4_packet(packet) {
                 warn!("Dropping network control packet: {}", err);
             }

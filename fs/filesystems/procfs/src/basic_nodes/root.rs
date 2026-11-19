@@ -156,11 +156,6 @@ impl SimpleFileOps for UtsNameFile {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "CG-028-focused-functions: linear registration table: each statement registers one \
-              independent procfs root entry"
-)]
 pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
     root.add(
         "cmdline",
@@ -253,231 +248,231 @@ pub(crate) fn add_root_entries(root: &mut DirMapping, fs: Arc<SimpleFs>) {
             Ok(info)
         }),
     );
-    root.add("sys", {
-        let mut sys = DirMapping::new();
+}
 
-        sys.add("kernel", {
-            let mut kernel = DirMapping::new();
-            kernel.add(
-                "pid_max",
-                SimpleFile::new_regular(fs.clone(), || Ok("32768\n")),
-            );
-            // systemd ProtectHostname bind-mounts these over the service's
-            // namespace; they must exist. Report and update the caller's UTS
-            // namespace state (same source as uname(2)) so reads stay
-            // consistent with sethostname/setdomainname.
-            kernel.add(
-                "hostname",
-                SimpleFile::new_regular_with_permission(
-                    fs.clone(),
-                    NodePermission::from_bits_truncate(0o644),
-                    UtsNameFile {
-                        field: UtsNameField::Hostname,
-                    },
-                ),
-            );
-            kernel.add(
-                "domainname",
-                SimpleFile::new_regular_with_permission(
-                    fs.clone(),
-                    NodePermission::from_bits_truncate(0o644),
-                    UtsNameFile {
-                        field: UtsNameField::DomainName,
-                    },
-                ),
-            );
-            // systemd reads these while building a service's exec context; a
-            // missing node makes the spawn fail with ENOENT.
-            kernel.add(
-                "cap_last_cap",
-                SimpleFile::new_regular(fs.clone(), || Ok(format!("{}\n", kcred::CAP_LAST_CAP))),
-            );
-            kernel.add(
-                "overflowuid",
-                SimpleFile::new_regular(fs.clone(), || Ok("65534\n")),
-            );
-            kernel.add(
-                "overflowgid",
-                SimpleFile::new_regular(fs.clone(), || Ok("65534\n")),
-            );
-            kernel.add(
-                "threads-max",
-                SimpleFile::new_regular(fs.clone(), || Ok("65536\n")),
-            );
-            kernel.add("random", {
-                let mut random = DirMapping::new();
-                // A per-boot identifier; systemd uses it for invocation IDs.
-                random.add(
-                    "boot_id",
-                    SimpleFile::new_regular(fs.clone(), || {
-                        Ok(format!("{}\n", crate::boot_id::boot_id()))
-                    }),
-                );
-                SimpleDir::new_maker(fs.clone(), Arc::new(random))
-            });
-            kernel.add("pty", {
-                let mut pty = DirMapping::new();
-                let permission = NodePermission::from_bits_truncate(0o444);
-                pty.add(
-                    "max",
-                    SimpleFile::new_regular_with_permission(fs.clone(), permission, || {
-                        Ok(format!("{}\n", ktty::tty::pty_limit()))
-                    }),
-                );
-                pty.add(
-                    "nr",
-                    SimpleFile::new_regular_with_permission(fs.clone(), permission, || {
-                        Ok(format!("{}\n", ktty::tty::pty_allocated_count()))
-                    }),
-                );
-                SimpleDir::new_maker(fs.clone(), Arc::new(pty))
-            });
-            // Runtime console-level control, with the contract this node has
-            // always had: `cat` reports the console default level as a number in
-            // X-Kernel's own order (0=off, 1=error, 2=warn, 3=info, 4=debug,
-            // 5=trace), and a privileged write (`echo 4 > ...`, `echo debug >
-            // ...`) changes it immediately without a rebuild.
-            //
-            // The per-target filter lives in `log_filter` below instead of here:
-            // this node keeps its historical single-value shape (and stays
-            // readable by existing scripts), and the module filter gets a node of
-            // its own rather than riding along in a private expression.
-            //
-            // NOTE: although this node reuses the Linux `/proc/sys/kernel/
-            // printk` path, the value domain is X-Kernel-private and NOT
-            // Linux `console_loglevel`-compatible: numbers here are
-            // `0..=5` with higher = more verbose, while Linux reports four
-            // fields (`console_loglevel default_message_loglevel min max`) and
-            // treats a higher number as *less* verbose.
-            kernel.add(
-                "printk",
-                SimpleFile::new_regular_with_permission(
-                    fs.clone(),
-                    NodePermission::OWNER_READ
-                        | NodePermission::OWNER_WRITE
-                        | NodePermission::GROUP_READ
-                        | NodePermission::OTHER_READ,
-                    CommandFile::new(|operation| match operation {
-                        SimpleFileOperation::Read => Ok(Some(format!(
-                            "{}\n",
-                            klogger::level_number(klogger::current_log_level())
-                        ))),
-                        SimpleFileOperation::Write { file, data } => {
-                            if !file.cred().has_root_euid() {
-                                return Err(VfsError::OperationNotPermitted);
-                            }
-                            let text =
-                                core::str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
-                            let level =
-                                klogger::parse_log_level(text).ok_or(VfsError::InvalidInput)?;
-                            // Level only: the module filter below is a separate
-                            // knob and must survive a level write.
-                            klogger::set_console_default(level);
-                            Ok(None)
-                        }
-                    }),
-                ),
-            );
-            // Per-target console filter: an optional default level plus
-            // `target=level` overrides, matched by module-path prefix. Reads
-            // return the canonical spec of what is in force; a privileged write
-            // installs a whole spec. A level above the build cap is accepted (it
-            // stays readable) but has no records to act on.
-            kernel.add(
-                "log_filter",
-                SimpleFile::new_regular_with_permission(
-                    fs.clone(),
-                    NodePermission::OWNER_READ
-                        | NodePermission::OWNER_WRITE
-                        | NodePermission::GROUP_READ
-                        | NodePermission::OTHER_READ,
-                    CommandFile::new(|operation| match operation {
-                        SimpleFileOperation::Read => {
-                            let mut buf = [0u8; klogger::MAX_FILTER_SPEC];
-                            let len =
-                                klogger::filter_spec(&mut buf).ok_or(VfsError::InvalidInput)?;
-                            let spec = core::str::from_utf8(&buf[..len])
-                                .map_err(|_| VfsError::InvalidInput)?;
-                            Ok(Some(format!("{spec}\n")))
-                        }
-                        SimpleFileOperation::Write { file, data } => {
-                            if !file.cred().has_root_euid() {
-                                return Err(VfsError::OperationNotPermitted);
-                            }
-                            let text =
-                                core::str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
-                            klogger::set_filter_spec(text).map_err(|_| VfsError::InvalidInput)?;
-                            Ok(None)
-                        }
-                    }),
-                ),
-            );
-            SimpleDir::new_maker(fs.clone(), Arc::new(kernel))
-        });
-
-        // Linux publishes the inotify resource limits here. The numbers are
-        // the live limits the kernel enforces (kfd_objects owns the ledger),
-        // so what a reader sees cannot drift from what a reservation checks.
-        // Linux's `proc_sys_permission` checks the opener's euid and
-        // `proc_sys_call_handler` rechecks the writer's current euid on every
-        // write, so the inode wrapper applies the euid gate at open and the
-        // closure passes `current_cred()` rather than the file's open-time
-        // credential. The value domain is a base-0 count in `0..=i32::MAX`,
-        // and lowering a limit does not revoke existing instances, watches, or
-        // queued events.
-        sys.add("fs", {
-            let mut fs_dir = DirMapping::new();
-            fs_dir.add("inotify", {
-                let mut inotify = DirMapping::new();
-                for (name, limit) in [
-                    ("max_queued_events", InotifyLimit::QueuedEvents),
-                    ("max_user_instances", InotifyLimit::UserInstances),
-                    ("max_user_watches", InotifyLimit::UserWatches),
-                ] {
-                    let file = SimpleFile::new_regular_with_permission(
-                        fs.clone(),
-                        NodePermission::OWNER_READ
-                            | NodePermission::OWNER_WRITE
-                            | NodePermission::GROUP_READ
-                            | NodePermission::OTHER_READ,
-                        CommandFile::new(move |operation| match operation {
-                            SimpleFileOperation::Read => Ok(Some(format!("{}\n", limit.value()))),
-                            SimpleFileOperation::Write { file: _, data } => {
-                                limit.write(data, &kprocess::current_cred())?;
-                                Ok(None)
-                            }
-                        }),
-                    );
-                    let node = Arc::new(InotifySysctlFile { file });
-                    let init: VfsInodeInit = node.file.inode_init();
-                    let inode = VfsInode::new_file_with_operations(
-                        node.clone(),
-                        node.clone(),
-                        node.file.clone(),
-                        NodeFlags::NON_CACHEABLE,
-                        init,
-                    );
-                    inotify.add(name, inode);
-                }
-                SimpleDir::new_maker(fs.clone(), Arc::new(inotify))
-            });
-            let mut quota = DirMapping::new();
-            quota.add(
-                "allocated_dquots",
+#[expect(
+    clippy::too_many_lines,
+    reason = "CG-028-focused-functions: TODO(cg): legacy sysctl registration; split kernel \
+              logging handlers from directory assembly"
+)]
+pub(crate) fn add_sys_entries(sys: &mut DirMapping, fs: Arc<SimpleFs>) {
+    sys.add("kernel", {
+        let mut kernel = DirMapping::new();
+        kernel.add(
+            "pid_max",
+            SimpleFile::new_regular(fs.clone(), || Ok("32768\n")),
+        );
+        // systemd ProtectHostname bind-mounts these over the service's
+        // namespace; they must exist. Report and update the caller's UTS
+        // namespace state (same source as uname(2)) so reads stay
+        // consistent with sethostname/setdomainname.
+        kernel.add(
+            "hostname",
+            SimpleFile::new_regular_with_permission(
+                fs.clone(),
+                NodePermission::from_bits_truncate(0o644),
+                UtsNameFile {
+                    field: UtsNameField::Hostname,
+                },
+            ),
+        );
+        kernel.add(
+            "domainname",
+            SimpleFile::new_regular_with_permission(
+                fs.clone(),
+                NodePermission::from_bits_truncate(0o644),
+                UtsNameFile {
+                    field: UtsNameField::DomainName,
+                },
+            ),
+        );
+        // systemd reads these while building a service's exec context; a
+        // missing node makes the spawn fail with ENOENT.
+        kernel.add(
+            "cap_last_cap",
+            SimpleFile::new_regular(fs.clone(), || Ok(format!("{}\n", kcred::CAP_LAST_CAP))),
+        );
+        kernel.add(
+            "overflowuid",
+            SimpleFile::new_regular(fs.clone(), || Ok("65534\n")),
+        );
+        kernel.add(
+            "overflowgid",
+            SimpleFile::new_regular(fs.clone(), || Ok("65534\n")),
+        );
+        kernel.add(
+            "threads-max",
+            SimpleFile::new_regular(fs.clone(), || Ok("65536\n")),
+        );
+        kernel.add("random", {
+            let mut random = DirMapping::new();
+            // A per-boot identifier; systemd uses it for invocation IDs.
+            random.add(
+                "boot_id",
                 SimpleFile::new_regular(fs.clone(), || {
-                    let allocated: usize = kvfs::super_block_registry()
-                        .live_super_blocks()
-                        .iter()
-                        .map(|sb| sb.quota_info().cached_records())
-                        .sum();
-                    Ok(format!("{allocated}\n"))
+                    Ok(format!("{}\n", crate::boot_id::boot_id()))
                 }),
             );
-            fs_dir.add_dir("quota", SimpleDir::new_maker(fs.clone(), Arc::new(quota)));
-            SimpleDir::new_maker(fs.clone(), Arc::new(fs_dir))
+            SimpleDir::new_maker(fs.clone(), Arc::new(random))
         });
+        kernel.add("pty", {
+            let mut pty = DirMapping::new();
+            let permission = NodePermission::from_bits_truncate(0o444);
+            pty.add(
+                "max",
+                SimpleFile::new_regular_with_permission(fs.clone(), permission, || {
+                    Ok(format!("{}\n", ktty::tty::pty_limit()))
+                }),
+            );
+            pty.add(
+                "nr",
+                SimpleFile::new_regular_with_permission(fs.clone(), permission, || {
+                    Ok(format!("{}\n", ktty::tty::pty_allocated_count()))
+                }),
+            );
+            SimpleDir::new_maker(fs.clone(), Arc::new(pty))
+        });
+        // Runtime console-level control, with the contract this node has
+        // always had: `cat` reports the console default level as a number in
+        // X-Kernel's own order (0=off, 1=error, 2=warn, 3=info, 4=debug,
+        // 5=trace), and a privileged write (`echo 4 > ...`, `echo debug >
+        // ...`) changes it immediately without a rebuild.
+        //
+        // The per-target filter lives in `log_filter` below instead of here:
+        // this node keeps its historical single-value shape (and stays
+        // readable by existing scripts), and the module filter gets a node of
+        // its own rather than riding along in a private expression.
+        //
+        // NOTE: although this node reuses the Linux `/proc/sys/kernel/
+        // printk` path, the value domain is X-Kernel-private and NOT
+        // Linux `console_loglevel`-compatible: numbers here are
+        // `0..=5` with higher = more verbose, while Linux reports four
+        // fields (`console_loglevel default_message_loglevel min max`) and
+        // treats a higher number as *less* verbose.
+        kernel.add(
+            "printk",
+            SimpleFile::new_regular_with_permission(
+                fs.clone(),
+                NodePermission::OWNER_READ
+                    | NodePermission::OWNER_WRITE
+                    | NodePermission::GROUP_READ
+                    | NodePermission::OTHER_READ,
+                CommandFile::new(|operation| match operation {
+                    SimpleFileOperation::Read => Ok(Some(format!(
+                        "{}\n",
+                        klogger::level_number(klogger::current_log_level())
+                    ))),
+                    SimpleFileOperation::Write { file, data } => {
+                        if !file.cred().has_root_euid() {
+                            return Err(VfsError::OperationNotPermitted);
+                        }
+                        let text =
+                            core::str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
+                        let level = klogger::parse_log_level(text).ok_or(VfsError::InvalidInput)?;
+                        // Level only: the module filter below is a separate
+                        // knob and must survive a level write.
+                        klogger::set_console_default(level);
+                        Ok(None)
+                    }
+                }),
+            ),
+        );
+        // Per-target console filter: an optional default level plus
+        // `target=level` overrides, matched by module-path prefix. Reads
+        // return the canonical spec of what is in force; a privileged write
+        // installs a whole spec. A level above the build cap is accepted (it
+        // stays readable) but has no records to act on.
+        kernel.add(
+            "log_filter",
+            SimpleFile::new_regular_with_permission(
+                fs.clone(),
+                NodePermission::OWNER_READ
+                    | NodePermission::OWNER_WRITE
+                    | NodePermission::GROUP_READ
+                    | NodePermission::OTHER_READ,
+                CommandFile::new(|operation| match operation {
+                    SimpleFileOperation::Read => {
+                        let mut buf = [0u8; klogger::MAX_FILTER_SPEC];
+                        let len = klogger::filter_spec(&mut buf).ok_or(VfsError::InvalidInput)?;
+                        let spec = core::str::from_utf8(&buf[..len])
+                            .map_err(|_| VfsError::InvalidInput)?;
+                        Ok(Some(format!("{spec}\n")))
+                    }
+                    SimpleFileOperation::Write { file, data } => {
+                        if !file.cred().has_root_euid() {
+                            return Err(VfsError::OperationNotPermitted);
+                        }
+                        let text =
+                            core::str::from_utf8(data).map_err(|_| VfsError::InvalidInput)?;
+                        klogger::set_filter_spec(text).map_err(|_| VfsError::InvalidInput)?;
+                        Ok(None)
+                    }
+                }),
+            ),
+        );
+        SimpleDir::new_maker(fs.clone(), Arc::new(kernel))
+    });
 
-        SimpleDir::new_maker(fs.clone(), Arc::new(sys))
+    // Linux publishes the inotify resource limits here. The numbers are
+    // the live limits the kernel enforces (kfd_objects owns the ledger),
+    // so what a reader sees cannot drift from what a reservation checks.
+    // Linux's `proc_sys_permission` checks the opener's euid and
+    // `proc_sys_call_handler` rechecks the writer's current euid on every
+    // write, so the inode wrapper applies the euid gate at open and the
+    // closure passes `current_cred()` rather than the file's open-time
+    // credential. The value domain is a base-0 count in `0..=i32::MAX`,
+    // and lowering a limit does not revoke existing instances, watches, or
+    // queued events.
+    sys.add("fs", {
+        let mut fs_dir = DirMapping::new();
+        fs_dir.add("inotify", {
+            let mut inotify = DirMapping::new();
+            for (name, limit) in [
+                ("max_queued_events", InotifyLimit::QueuedEvents),
+                ("max_user_instances", InotifyLimit::UserInstances),
+                ("max_user_watches", InotifyLimit::UserWatches),
+            ] {
+                let file = SimpleFile::new_regular_with_permission(
+                    fs.clone(),
+                    NodePermission::OWNER_READ
+                        | NodePermission::OWNER_WRITE
+                        | NodePermission::GROUP_READ
+                        | NodePermission::OTHER_READ,
+                    CommandFile::new(move |operation| match operation {
+                        SimpleFileOperation::Read => Ok(Some(format!("{}\n", limit.value()))),
+                        SimpleFileOperation::Write { file: _, data } => {
+                            limit.write(data, &kprocess::current_cred())?;
+                            Ok(None)
+                        }
+                    }),
+                );
+                let node = Arc::new(InotifySysctlFile { file });
+                let init: VfsInodeInit = node.file.inode_init();
+                let inode = VfsInode::new_file_with_operations(
+                    node.clone(),
+                    node.clone(),
+                    node.file.clone(),
+                    NodeFlags::NON_CACHEABLE,
+                    init,
+                );
+                inotify.add(name, inode);
+            }
+            SimpleDir::new_maker(fs.clone(), Arc::new(inotify))
+        });
+        let mut quota = DirMapping::new();
+        quota.add(
+            "allocated_dquots",
+            SimpleFile::new_regular(fs.clone(), || {
+                let allocated: usize = kvfs::super_block_registry()
+                    .live_super_blocks()
+                    .iter()
+                    .map(|sb| sb.quota_info().cached_records())
+                    .sum();
+                Ok(format!("{allocated}\n"))
+            }),
+        );
+        fs_dir.add_dir("quota", SimpleDir::new_maker(fs.clone(), Arc::new(quota)));
+        SimpleDir::new_maker(fs, Arc::new(fs_dir))
     });
 }
 

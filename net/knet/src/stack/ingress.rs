@@ -19,10 +19,31 @@ use crate::{
     netfilter::FilterConfig,
     network::{
         fragment::{Ipv4Reassembler, Ipv4ReassemblyResult},
-        ipv4::{self, Icmpv4Error, Ipv4Header},
+        ipv4::{self, Icmpv4Error, Ipv4Header, forward::Ipv4ForwardInput},
     },
     udp, udp_err,
 };
+
+/// Work retained together until the shared stack and router can accept it.
+pub(crate) struct IngressBatch {
+    pub(crate) local: Vec<PacketBuf>,
+    pub(crate) forward: Vec<Ipv4ForwardInput>,
+    pub(crate) control: Vec<Vec<u8>>,
+}
+
+impl IngressBatch {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            local: Vec::with_capacity(capacity),
+            forward: Vec::with_capacity(capacity),
+            control: Vec::new(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.local.is_empty() && self.forward.is_empty() && self.control.is_empty()
+    }
+}
 
 pub(crate) struct IngressProcessor {
     local_ipv4_addrs: Vec<Ipv4Cidr>,
@@ -72,7 +93,7 @@ impl IngressProcessor {
         expired.timer_events
     }
 
-    /// Consumes `packets` and appends work for the shared stack and control TX.
+    /// Consumes `packets` and appends local, forwarding, and control work.
     ///
     /// The output batches may contain work retained from an earlier poll round
     /// whose shared destination lock was contended.
@@ -81,19 +102,14 @@ impl IngressProcessor {
         timestamp: MonotonicInstant,
         filter: &FilterConfig,
         packets: &mut Vec<RxPacket>,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
+        batch: &mut IngressBatch,
     ) {
         for packet in packets.drain(..) {
             match packet {
-                RxPacket::Network(packet) => self.handle_rx_packet(
-                    timestamp,
-                    filter,
-                    packet,
-                    accepted_packets,
-                    control_packets,
-                ),
-                RxPacket::LocalUdp(packet) => self.resume_local_udp(packet, control_packets),
+                RxPacket::Network(packet) => {
+                    self.handle_rx_packet(timestamp, filter, packet, batch)
+                }
+                RxPacket::LocalUdp(packet) => self.resume_local_udp(packet, &mut batch.control),
             }
         }
     }
@@ -103,18 +119,15 @@ impl IngressProcessor {
         timestamp: MonotonicInstant,
         filter: &FilterConfig,
         packet: PacketBuf,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
+        batch: &mut IngressBatch,
     ) {
         let Some(ip_packet) = packet.network_packet() else {
             return;
         };
         match ipv4::ip_version(ip_packet) {
-            Some(4) => {
-                self.handle_ipv4_input(timestamp, filter, packet, accepted_packets, control_packets)
-            }
+            Some(4) => self.handle_ipv4_input(timestamp, filter, packet, batch),
             Some(6) => {
-                accepted_packets.push(packet);
+                batch.local.push(packet);
             }
             _ => debug!("Dropping packet with invalid IP version"),
         }
@@ -125,8 +138,7 @@ impl IngressProcessor {
         timestamp: MonotonicInstant,
         filter: &FilterConfig,
         mut packet: PacketBuf,
-        accepted_packets: &mut Vec<PacketBuf>,
-        control_packets: &mut Vec<Vec<u8>>,
+        batch: &mut IngressBatch,
     ) {
         if crate::ipv4::validate_input_packet(&mut packet).is_err() {
             return;
@@ -136,18 +148,17 @@ impl IngressProcessor {
                 .expect("validated IPv4 header");
 
         if !self.is_local_ipv4_destination(header.dst_addr()) {
+            if let Some(packet) = Ipv4ForwardInput::from_validated(packet) {
+                batch.forward.push(packet);
+            }
             return;
         }
 
         if header.is_fragmented() {
             match self.ipv4_reassembler.reassemble(packet, timestamp) {
-                Ipv4ReassemblyResult::Complete(packet) => self.handle_ipv4_input(
-                    timestamp,
-                    filter,
-                    packet,
-                    accepted_packets,
-                    control_packets,
-                ),
+                Ipv4ReassemblyResult::Complete(packet) => {
+                    self.handle_ipv4_input(timestamp, filter, packet, batch)
+                }
                 Ipv4ReassemblyResult::Pending | Ipv4ReassemblyResult::Dropped => {}
             }
             return;
@@ -163,7 +174,7 @@ impl IngressProcessor {
 
         if protocol == ipv4::PROTOCOL_UDP {
             if let Ok(packet) = udp::prepare_ipv4_packet(packet) {
-                deliver_local_udp(packet, is_broadcast_or_multicast, control_packets);
+                deliver_local_udp(packet, is_broadcast_or_multicast, &mut batch.control);
             }
             return;
         }
@@ -171,7 +182,7 @@ impl IngressProcessor {
         if emit_protocol_unreachable {
             if let Some(ip_packet) = packet.network_packet() {
                 queue_icmpv4_error(
-                    control_packets,
+                    &mut batch.control,
                     Icmpv4Error::ProtocolUnreachable,
                     packet.packet_type(),
                     ip_packet,
@@ -181,7 +192,7 @@ impl IngressProcessor {
         }
 
         udp_err::inspect_icmpv4_error(&packet);
-        accepted_packets.push(packet);
+        batch.local.push(packet);
     }
 
     fn resume_local_udp(&self, packet: udp::PreparedUdpPacket, control_packets: &mut Vec<Vec<u8>>) {
