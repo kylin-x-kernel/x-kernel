@@ -3721,7 +3721,6 @@ dependencies = [
  "log",
  "unittest",
  "vdev-core",
- "vdev-test-mmio",
  "vdev-virtio-blk",
 ]
 
@@ -6155,14 +6154,6 @@ version = "0.3.0-dev"
 dependencies = [
  "kalloc-types",
  "ksync",
-]
-
-[[package]]
-name = "vdev-test-mmio"
-version = "0.3.0-dev"
-dependencies = [
- "log",
- "vdev-core",
 ]
 
 [[package]]

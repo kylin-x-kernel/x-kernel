@@ -35,7 +35,6 @@ khal.workspace = true
 kirq.workspace = true
 ktime_types.workspace = true
 vdev-core.workspace = true
-vdev-test-mmio.workspace = true
 vdev-virtio-blk.workspace = true
 unittest.workspace = true
 
