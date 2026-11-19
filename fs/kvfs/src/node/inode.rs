@@ -20,7 +20,7 @@ use bitflags::bitflags;
 use hashbrown::HashMap;
 use kalloc_types::KBox;
 use kcred::Cred;
-use kerrno::LinuxError;
+use kerrno::{KResult, LinuxError};
 use klazy::{Lazy, Once};
 use ktask::WaitQueue;
 use ktime_types::SystemTime;
@@ -1292,6 +1292,7 @@ pub struct VfsInode {
     identity: InodeIdentity,
     attributes: InodeAttributes,
     write_count: AtomicUsize,
+    read_count: AtomicUsize,
     notification_mask: AtomicU32,
     data_lock: RwLock<()>,
     namespace_lock: RwLock<()>,
@@ -1811,6 +1812,7 @@ impl VfsInode {
             identity: InodeIdentity::new(init.number),
             attributes,
             write_count: AtomicUsize::new(0),
+            read_count: AtomicUsize::new(0),
             notification_mask: AtomicU32::new(0),
             data_lock: RwLock::new(()),
             namespace_lock: RwLock::new(()),
@@ -1835,6 +1837,32 @@ impl VfsInode {
     pub(crate) fn release_write_access(&self) {
         let previous = self.write_count.fetch_sub(1, Ordering::AcqRel);
         debug_assert_ne!(previous, 0);
+    }
+
+    pub(crate) fn acquire_read_access(&self) {
+        let previous = self.read_count.fetch_add(1, Ordering::AcqRel);
+        debug_assert_ne!(previous, usize::MAX);
+    }
+
+    pub(crate) fn release_read_access(&self) {
+        let previous = self.read_count.fetch_sub(1, Ordering::AcqRel);
+        debug_assert_ne!(previous, 0);
+    }
+
+    /// Revokes leases conflicting with an open or truncate; Linux
+    /// `break_lease`. A filesystem object without an allocated lock context
+    /// has no leases, matching the inline empty check in Linux.
+    ///
+    /// # Errors
+    ///
+    /// Forwards [`crate::locks::FileLockContext::break_leases`] errors:
+    /// `WouldBlock` when `nonblock` and a conflict was marked, or
+    /// `LinuxError::ERESTARTSYS` when an interruptible wait was signalled.
+    pub(crate) fn break_leases(&self, want_write: bool, nonblock: bool) -> KResult<()> {
+        match self.existing_file_locks() {
+            None => Ok(()),
+            Some(locks) => locks.break_leases(want_write, nonblock),
+        }
     }
 
     /// Installs the initial session for a newly created anonymous pipe inode.
@@ -1873,6 +1901,13 @@ impl VfsInode {
     /// Returns the number of open files holding write access to this inode.
     pub fn write_count(&self) -> usize {
         self.write_count.load(Ordering::Acquire)
+    }
+
+    /// Returns the number of read-only open files on this inode, Linux
+    /// `i_readcount`; lease setting compares both counts with the requestor's
+    /// own contribution.
+    pub(crate) fn read_count(&self) -> usize {
+        self.read_count.load(Ordering::Acquire)
     }
 
     /// Construct a directory inode without directory file operations.

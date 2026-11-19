@@ -83,3 +83,29 @@ pub trait CurrentThreadSignalIf {
 pub fn send_sig_current(signo: Signo) -> kerrno::KResult<()> {
     CurrentThreadSignalIf::send_sig_current(signo)
 }
+
+#[kiface::interface]
+/// Provider contract for delivering a signal to a process identified by PID.
+///
+/// `kprocess` implements this via `kiface::provide`; the trait lets `ksignal`
+/// dependents (for example `kvfs` lease breaking) request cross-process signal
+/// delivery without a direct `kprocess` dependency.
+pub trait ProcessSignalIf {
+    /// Queues `sig` on the published process `pid`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `pid` is not a published process or its runtime
+    /// signal manager is already gone.
+    fn send_to_process(pid: u32, sig: SignalInfo) -> kerrno::KResult<()>;
+}
+
+/// Sends a signal to a process through the registered [`ProcessSignalIf`]
+/// provider.
+///
+/// # Errors
+///
+/// Returns the provider's error; see [`ProcessSignalIf::send_to_process`].
+pub fn send_to_process(pid: u32, sig: SignalInfo) -> kerrno::KResult<()> {
+    ProcessSignalIf::send_to_process(pid, sig)
+}

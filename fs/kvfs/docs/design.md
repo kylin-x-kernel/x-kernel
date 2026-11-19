@@ -197,6 +197,14 @@ VFS forwards its error directly. A ready context is reused without
 allocation. Queries and unlocking an inode without a context remain allocation
 free. Lock-record allocations are unchanged by this migration.
 
+The same context also hosts file leases: `FileLockLists` keeps a third
+`lease` list, reached through `FileOperations::set_lease`/`get_lease` on
+VfsFile and broken by `VfsInode::break_leases` on open and path truncate.
+Lease requests consult the inode open counts (`read_count`/`write_count`)
+against the requesting description's own contributions, the Linux
+`lease_open_conflict` check, inside the same state mutex that serializes
+the POSIX and flock domains.
+
 The inode guest regression injects a local initialization failure and verifies
 absence, successful retry, and reuse without invoking another allocator.
 

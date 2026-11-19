@@ -229,7 +229,10 @@ this version.
 |---|---|---|---|
 
 The `unsafe` encapsulation of the file-lock shared node lives in the private `locks/node.rs`: range access relies on unique ownership,
-and the wait relationships and cancellation unlinking are protected by a global wait lock. The intrusive list uses the `intrusive-collections`
+and the wait relationships and cancellation unlinking are protected by a global wait lock. The lease payload `LeaseState` is stored in
+`LockNode.lease` as an `UnsafeCell<Option<LeaseState>>` with the same ownership discipline: mutations go only through `&mut OwnedLock`,
+and every read or write of the lease list additionally runs under the owning inode's lock-state mutex, which serializes all lease-list
+accessors — this is the prerequisite the lease SAFETY comments record and it is what makes the raw dereferences sound. The intrusive list uses the `intrusive-collections`
 typed adapter and the safe `clone_pointer()`, and does not adjust Arc reference counts by hand. The rest of the namespace
 model maintains memory safety through safe Rust locks, `Arc` ownership, and operation traits.
 

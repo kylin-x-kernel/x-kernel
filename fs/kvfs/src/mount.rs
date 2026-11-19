@@ -1078,6 +1078,10 @@ impl Mount {
         let path = Path::new(self.clone(), dentry);
         let mut file = VfsFileBuilder::from_path_state(path, flags, open_flags, f_op, cred);
         file.mark_opened()?;
+        // Linux file_init_path accounting for opens built outside do_dentry_open.
+        if flags.contains(FMode::READ) && !flags.contains(FMode::WRITE) {
+            file.inode()?.acquire_read_access();
+        }
         file.finish()
     }
 
@@ -2381,7 +2385,17 @@ impl Path {
     /// Changes a regular file length through the VFS truncate path.
     pub fn truncate(&self, len: u64, cred: &Cred) -> VfsResult<()> {
         self.permission(Permission::MAY_WRITE, cred)?;
-        self.truncate_opened(len)
+        // Linux do_truncate for a path-based truncate: take write access and
+        // break leases before changing the size. The open path publishes its
+        // write count before breaking leases under the same inode lock state
+        // mutex, so a lease either sees this truncate or breaks for it.
+        let inode = self.inode();
+        inode.acquire_write_access();
+        let result = inode
+            .break_leases(true, false)
+            .and_then(|()| self.truncate_opened(len));
+        inode.release_write_access();
+        result
     }
 
     pub(crate) fn truncate_opened(&self, len: u64) -> VfsResult<()> {

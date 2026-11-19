@@ -130,6 +130,14 @@ pub fn sys_dup3(old_fd: c_int, new_fd: c_int, flags: c_int) -> KResult<isize> {
 }
 
 /// Performs file descriptor control operations.
+///
+/// # Execution context
+///
+/// Requires a current process thread: it reads the caller's fd table and, for
+/// the lease commands, the caller's credentials and lock pid. It may sleep
+/// (lock and lease dispatch waits on inode lock-state mutexes and, for
+/// `F_SETLEASE`, the lease break path), so it must not be called from IRQ
+/// context or while holding a spinlock or IRQ-preemption guard.
 pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
     debug!("sys_fcntl <= fd: {fd} cmd: {cmd} arg: {arg}");
 
@@ -173,6 +181,40 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> KResult<isize> {
         F_GET_SEALS => {
             let file = kprocess::current_files().get_file(fd)?;
             Ok(shmem::seal_bits_for_location(file.path())? as _)
+        }
+        F_SETLEASE => {
+            let file = kprocess::current_files().get_file(fd)?;
+            // Linux check_fcntl_cmd rejects the lease commands for O_PATH
+            // descriptors before dispatch.
+            if file.is_path() {
+                return Err(KError::BadFileDescriptor);
+            }
+            // fcntl_setlease rejects directories for every argument, before
+            // the lease type is even decoded.
+            if file.is_dir() {
+                return Err(KError::InvalidInput);
+            }
+            let kind = match arg as u32 {
+                F_RDLCK => FileLockType::Read,
+                F_WRLCK => FileLockType::Write,
+                F_UNLCK => FileLockType::Unlock,
+                // lease_init rejects anything but the three lock types.
+                _ => return Err(KError::InvalidInput),
+            };
+            file.set_lease(&kprocess::current_cred(), fd, current_lock_pid(), kind)?;
+            Ok(0)
+        }
+        F_GETLEASE => {
+            let file = kprocess::current_files().get_file(fd)?;
+            if file.is_path() {
+                return Err(KError::BadFileDescriptor);
+            }
+            // fcntl_getlease performs no permission or type checks.
+            Ok(match file.get_lease()? {
+                FileLockType::Read => F_RDLCK,
+                FileLockType::Write => F_WRLCK,
+                FileLockType::Unlock => F_UNLCK,
+            } as _)
         }
         F_ADD_SEALS => {
             let file = kprocess::current_files().get_file(fd)?;

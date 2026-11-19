@@ -68,6 +68,13 @@ impl ksignal::CurrentThreadSignalIf {
     }
 }
 
+#[kiface::provide]
+impl ksignal::ProcessSignalIf {
+    fn send_to_process(pid: u32, sig: SignalInfo) -> KResult<()> {
+        send_to_process(pid, Some(sig))
+    }
+}
+
 /// Sends a signal to a process identified by PID.
 ///
 /// A PID that is still published but has already exited (a not-yet-reaped

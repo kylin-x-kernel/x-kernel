@@ -25,15 +25,67 @@ use intrusive_collections::{LinkedList, LinkedListLink, intrusive_adapter};
 use kerrno::{KError, KResult, LinuxError};
 use ksync::{Mutex, MutexGuard, static_lock};
 use ktask::future::block_on_interruptible;
+use ktime_types::MonotonicInstant;
 
-use super::{FileLock, FileLockOwner};
+use super::{FileLock, FileLockOwner, FileLockType};
+
+/// State beyond the range record carried by every lease-list node.
+///
+/// This is what Linux's `struct file_lease` adds to its lock core: the fasync
+/// notification descriptor (`fl_fasync.fa_fd`) and at most one pending break
+/// with its deadline (`FL_UNLOCK_PENDING`/`fl_break_time` or
+/// `FL_DOWNGRADE_PENDING`/`fl_downgrade_time`; `__break_lease` guarantees the
+/// two states never coexist).
+#[derive(Clone, Copy)]
+pub(super) struct LeaseState {
+    pub(super) fd: i32,
+    pub(super) pending: Option<LeasePending>,
+}
+
+impl LeaseState {
+    /// Linux `target_leasetype()`: the pending-aware type reported by
+    /// `F_GETLEASE` for a lease installed with this state.
+    pub(super) fn target_type(&self, kind: super::FileLockType) -> super::FileLockType {
+        match self.pending {
+            Some(LeasePending::Unlock { .. }) => super::FileLockType::Unlock,
+            Some(LeasePending::Downgrade { .. }) => super::FileLockType::Read,
+            None => kind,
+        }
+    }
+}
+
+/// The single pending-break state a lease may hold.
+#[derive(Clone, Copy)]
+pub(super) enum LeasePending {
+    /// A conflicting open waits for removal at `break_time`.
+    Unlock { break_time: MonotonicInstant },
+    /// A read open waits for downgrade to `FileLockType::Read` at this deadline.
+    Downgrade { downgrade_time: MonotonicInstant },
+}
+
+impl LeasePending {
+    pub(super) fn deadline(self) -> MonotonicInstant {
+        match self {
+            Self::Unlock { break_time } => break_time,
+            Self::Downgrade { downgrade_time } => downgrade_time,
+        }
+    }
+
+    /// Linux `past_time()` for the pending kind.
+    pub(super) fn expired(self, now: MonotonicInstant) -> bool {
+        self.deadline().checked_duration_since(now).is_none()
+    }
+}
 
 // Shared handles never authorize reading or mutating an installed range.
 struct LockNode {
     owner: FileLockOwner,
-    kind: super::FileLockType,
+    kind: FileLockType,
     pid: i32,
     bounds: UnsafeCell<(i64, i64)>,
+    /// Lease payload; `None` for posix and flock domain nodes. Lease-list
+    /// nodes always hold `Some` (see `OwnedLock::new_lease`).
+    lease: UnsafeCell<Option<LeaseState>>,
     links: LinkedListLink,
     blocked: UnsafeCell<FileLockBlocked>,
     /// Durable summary of `blocked.requests`, maintained by the same
@@ -51,6 +103,9 @@ struct FileLockBlocked {
 // SAFETY: installed bounds have one non-cloneable owner (LockList/OwnedLock).
 // List borrows prevent removal while being read; mutation requires &mut OwnedLock.
 // Waiter bounds never change. Shared handles cannot obtain range ownership.
+// The lease payload follows the same ownership discipline as bounds, and every
+// access also runs under the owning inode's state mutex, which serializes all
+// lease-list readers and writers.
 // All waiting links and registrations use the one private global mutex; inode
 // and waiting membership are disjoint and only the corresponding owner changes
 // links. Immutable owner/kind/pid remain readable during range mutation.
@@ -65,6 +120,7 @@ impl LockNode {
             kind: record.kind,
             pid: record.pid,
             bounds: UnsafeCell::new(record.bounds),
+            lease: UnsafeCell::new(None),
             links: LinkedListLink::new(),
             blocked: UnsafeCell::new(FileLockBlocked {
                 blocker: None,
@@ -169,10 +225,45 @@ impl OwnedLock {
         Self(Arc::new(LockNode::new(record)))
     }
 
+    /// Creates a lease-list node with its mandatory payload.
+    pub(super) fn new_lease(record: FileLock, lease: LeaseState) -> Self {
+        let this = Self::new(record);
+        // SAFETY: the node is brand new and unreachable by any other borrow.
+        unsafe { *this.0.lease.get() = Some(lease) };
+        this
+    }
+
     pub(super) fn record(&self) -> FileLock {
         // SAFETY: this unique owner is detached from every installed list;
         // wait-tree handles neither read nor modify installed ranges.
         unsafe { self.0.record() }
+    }
+
+    /// Returns the lease payload of a detached lease node.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called on a posix/flock node without a payload.
+    pub(super) fn lease_state(&self) -> LeaseState {
+        // SAFETY: this unique owner is detached; the caller's discipline
+        // guarantees a lease-list node, which always carries `Some`.
+        unsafe { (*self.0.lease.get()).expect("lease nodes carry their payload") }
+    }
+
+    /// Replaces the lease payload of a detached lease node.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called on a posix/flock node without a payload.
+    pub(super) fn set_lease_state(&mut self, lease: LeaseState) {
+        // SAFETY: &mut self excludes every other lease payload borrow;
+        // callers hold the owning inode's state mutex.
+        unsafe {
+            assert!(
+                (*self.0.lease.get()).replace(lease).is_some(),
+                "lease payload mutation requires a lease node"
+            );
+        }
     }
 
     pub(super) fn set_bounds(&mut self, start: i64, end: i64) {
@@ -229,6 +320,56 @@ impl LockList {
             matches(&unsafe { node.record() })
         })
         .map(Blocker)
+    }
+
+    /// Iterates lease nodes with their payload. Only valid for the lease list.
+    pub(super) fn lease_iter(&self) -> impl Iterator<Item = (FileLock, LeaseState)> + '_ {
+        self.0.iter().map(|node| {
+            // SAFETY: the list owns the range and payload. Its shared borrow
+            // excludes removal into OwnedLock, the only capability permitting
+            // mutation, and all access runs under the state mutex.
+            let lease = unsafe { (*node.lease.get()).expect("lease nodes carry their payload") };
+            // SAFETY: same owning-list borrow; FileLock is Copy and escapes by value.
+            (unsafe { node.record() }, lease)
+        })
+    }
+
+    /// Removes and returns the first node whose record matches. Waiters stay
+    /// attached to the returned node, so a payload-only round trip through
+    /// `take_matching`/`push_back`-style reinstall never wakes them.
+    pub(super) fn take_matching(
+        &mut self,
+        matches: impl Fn(&FileLock) -> bool,
+    ) -> Option<OwnedLock> {
+        let mut cursor = self.0.front_mut();
+        while let Some(node) = cursor.get() {
+            // SAFETY: standard owning-list shared borrow for the record copy.
+            if matches(&unsafe { node.record() }) {
+                return cursor.remove().map(OwnedLock);
+            }
+            cursor.move_next();
+        }
+        None
+    }
+
+    /// Returns the first lease conflicting with the breaker type, with a
+    /// shared handle for blocking and a payload snapshot for the wait deadline.
+    pub(super) fn first_blocking_lease(
+        &self,
+        breaker: FileLockType,
+    ) -> Option<(Blocker, LeaseState)> {
+        let mut cursor = self.0.front();
+        while let Some(node) = cursor.get() {
+            // leases_conflict() is type-only: either write side conflicts.
+            if node.kind == FileLockType::Write || breaker == FileLockType::Write {
+                // SAFETY: owning-list shared borrow as in `lease_iter`.
+                let lease =
+                    unsafe { (*node.lease.get()).expect("lease nodes carry their payload") };
+                return cursor.clone_pointer().map(|node| (Blocker(node), lease));
+            }
+            cursor.move_next();
+        }
+        None
     }
 
     pub(super) fn push_back(&mut self, lock: OwnedLock) {

@@ -564,3 +564,258 @@ fn flock_domain_and_conversion() {
     assert_eq!(state.flock.iter().count(), 1);
     assert_eq!(state.flock.iter().next().unwrap().owner, second);
 }
+
+fn lease_test_inode() -> Arc<VfsInode> {
+    struct NoopInodeOperations;
+    impl crate::InodeOperations for NoopInodeOperations {}
+    struct NoopFileOperations;
+    impl crate::FileOperations for NoopFileOperations {}
+    VfsInode::new_file_with_operations(
+        Arc::new(()),
+        Arc::new(NoopInodeOperations),
+        Arc::new(NoopFileOperations),
+        crate::NodeFlags::empty(),
+        crate::VfsInodeInit::new(
+            2,
+            0,
+            crate::Umode::new(
+                crate::NodeType::RegularFile,
+                crate::NodePermission::default(),
+            ),
+        ),
+    )
+}
+
+fn lease_request(owner: FileLockOwner, kind: FileLockType) -> FileLock {
+    // An impossible pid keeps the best-effort break SIGIO undelivered here.
+    FileLock::new(owner, i32::MAX, kind, 0, 0).unwrap()
+}
+
+#[def_test]
+fn lease_set_get_and_unlock_roundtrip() {
+    let context = FileLockContext::new();
+    let inode = lease_test_inode();
+    let owner = FileLockOwner::Ofd(1);
+    // F_UNLCK without a lease is EAGAIN (Linux generic_delete_lease).
+    assert_eq!(
+        context.set_lease(
+            &inode,
+            &lease_request(owner, FileLockType::Unlock),
+            3,
+            0,
+            0
+        ),
+        Err(KError::WouldBlock)
+    );
+    assert_eq!(context.get_lease(owner), FileLockType::Unlock);
+    for kind in [FileLockType::Read, FileLockType::Write] {
+        context
+            .set_lease(&inode, &lease_request(owner, kind), 3, 0, 0)
+            .unwrap();
+        assert_eq!(context.get_lease(owner), kind);
+    }
+    // Type change modifies in place; the record-lock domain stays separate.
+    context
+        .set_lease(
+            &inode,
+            &lease_request(owner, FileLockType::Read),
+            3,
+            0,
+            0,
+        )
+        .unwrap();
+    assert_eq!(context.get_lease(owner), FileLockType::Read);
+    assert!(
+        context
+            .test(&lease_request(FileLockOwner::Posix(9), FileLockType::Write))
+            .is_none()
+    );
+    context
+        .set_lease(
+            &inode,
+            &lease_request(owner, FileLockType::Unlock),
+            3,
+            0,
+            0,
+        )
+        .unwrap();
+    assert_eq!(context.get_lease(owner), FileLockType::Unlock);
+    assert!(context.state.lock().lease.lease_iter().next().is_none());
+}
+
+#[def_test]
+fn lease_exclusivity_and_open_conflicts() {
+    let context = FileLockContext::new();
+    let inode = lease_test_inode();
+    let writer = FileLockOwner::Ofd(1);
+    let reader = FileLockOwner::Ofd(2);
+    // Write-lease open conflict: only this file's own write count is allowed.
+    inode.acquire_write_access();
+    assert_eq!(
+        context.set_lease(&inode, &lease_request(writer, FileLockType::Write), 3, 0, 0),
+        Err(KError::WouldBlock)
+    );
+    context
+        .set_lease(&inode, &lease_request(writer, FileLockType::Write), 3, 1, 0)
+        .unwrap();
+    // A read lease refuses any write open, including the requestor's own.
+    assert_eq!(
+        context.set_lease(&inode, &lease_request(reader, FileLockType::Read), 4, 0, 1),
+        Err(KError::WouldBlock)
+    );
+    // The write lease excludes other write leases...
+    assert_eq!(
+        context.set_lease(&inode, &lease_request(reader, FileLockType::Write), 4, 1, 0),
+        Err(KError::WouldBlock)
+    );
+    inode.release_write_access();
+    // ...while a read open outside the requestor still blocks the exclusive
+    // count check for write leases.
+    inode.acquire_read_access();
+    assert_eq!(
+        context.set_lease(&inode, &lease_request(writer, FileLockType::Write), 3, 0, 0),
+        Err(KError::WouldBlock)
+    );
+    // Linux generic_add_lease tolerates a second read lease beside a write
+    // lease that is not pending removal.
+    context
+        .set_lease(&inode, &lease_request(reader, FileLockType::Read), 4, 0, 1)
+        .unwrap();
+    assert_eq!(context.get_lease(reader), FileLockType::Read);
+    assert_eq!(context.get_lease(writer), FileLockType::Write);
+}
+
+#[def_test]
+fn lease_break_marks_pending_and_times_out() {
+    let context = FileLockContext::new();
+    let inode = lease_test_inode();
+    let owner = FileLockOwner::Ofd(1);
+    context
+        .set_lease(&inode, &lease_request(owner, FileLockType::Write), 3, 0, 0)
+        .unwrap();
+    // A nonblocking read break marks the downgrade and reports EWOULDBLOCK;
+    // get_lease answers with the post-break target.
+    assert_eq!(
+        context.break_leases(false, true),
+        Err(KError::WouldBlock)
+    );
+    assert_eq!(context.get_lease(owner), FileLockType::Read);
+    // A pending downgrade still blocks other write leases.
+    let other = FileLockOwner::Ofd(2);
+    assert_eq!(
+        context.set_lease(&inode, &lease_request(other, FileLockType::Write), 4, 0, 0),
+        Err(KError::WouldBlock)
+    );
+    // The write breaker promotes the mark to unlock-pending...
+    assert_eq!(
+        context.break_leases(true, true),
+        Err(KError::WouldBlock)
+    );
+    let state = context.state.lock();
+    let (_, lease) = state.lease.lease_iter().next().unwrap();
+    assert!(matches!(
+        lease.pending,
+        Some(LeasePending::Unlock { .. })
+    ));
+    drop(state);
+    assert_eq!(context.get_lease(owner), FileLockType::Unlock);
+    // ...and once the grace period runs out the lease is gone entirely.
+    let mut state = context.state.lock();
+    let mut lease = state
+        .lease
+        .take_matching(|lock| lock.owner == owner)
+        .unwrap();
+    lease.set_lease_state(LeaseState {
+        fd: 3,
+        pending: Some(LeasePending::Unlock {
+            break_time: ktime_types::MonotonicInstant::ORIGIN,
+        }),
+    });
+    FileLockLists::install(&mut state.lease, lease, None);
+    drop(state);
+    assert_eq!(context.get_lease(owner), FileLockType::Unlock);
+    assert!(context.state.lock().lease.lease_iter().next().is_none());
+    // An expired downgrade instead shrinks the lease to a read lease.
+    context
+        .set_lease(&inode, &lease_request(owner, FileLockType::Write), 3, 0, 0)
+        .unwrap();
+    let mut state = context.state.lock();
+    let mut lease = state
+        .lease
+        .take_matching(|lock| lock.owner == owner)
+        .unwrap();
+    lease.set_lease_state(LeaseState {
+        fd: 3,
+        pending: Some(LeasePending::Downgrade {
+            downgrade_time: ktime_types::MonotonicInstant::ORIGIN,
+        }),
+    });
+    FileLockLists::install(&mut state.lease, lease, None);
+    drop(state);
+    assert_eq!(context.get_lease(owner), FileLockType::Read);
+    let state = context.state.lock();
+    let (lock, lease) = state.lease.lease_iter().next().unwrap();
+    assert_eq!(lock.kind, FileLockType::Read);
+    assert!(lease.pending.is_none());
+}
+
+#[def_test]
+fn lease_open_close_accounting_flows_through_production_paths() {
+    // The write-lease exclusivity check consumes the inode open counts; this
+    // drives the production producers (do_dentry_open, alloc_clone,
+    // alloc_clone_with_private_data, Mount::alloc_file_pseudo) and the
+    // VfsFile::Drop releases, not hand-installed counts.
+    use crate::{Dentry, FMode, OpenFlags, Path, VfsFileBuilder};
+    struct NoopFileOperations;
+    impl crate::FileOperations for NoopFileOperations {}
+    let context = FileLockContext::new();
+    let inode = lease_test_inode();
+    let super_block = crate::nullfs::new_superblock();
+    let mount = crate::Mount::new_root(&super_block);
+    let dentry = Dentry::new_file_from_inode(inode.clone(), None, "leased".into());
+    dentry.bind_super_block(&super_block);
+    let path = Path::new(mount.clone(), dentry);
+    let ops: Arc<dyn crate::FileOperations> = Arc::new(NoopFileOperations);
+
+    let reader = VfsFileBuilder::allocate(OpenFlags::empty(), kcred::initial_cred())
+        .unwrap()
+        .vfs_open(path.clone())
+        .unwrap();
+    // do_dentry_open published i_readcount before the lease break, and the
+    // exclusive write-lease check sees the live reader through it.
+    assert_eq!(inode.read_count(), 1);
+    let owner = FileLockOwner::Ofd(1);
+    assert_eq!(
+        context.set_lease(&inode, &lease_request(owner, FileLockType::Write), 3, 0, 0),
+        Err(KError::WouldBlock)
+    );
+    // file_init_path-style producers: clone, clone with private data, pseudo.
+    let clone = reader.alloc_clone(reader.mode(), reader.flags(), ops.clone()).unwrap();
+    assert_eq!(inode.read_count(), 2);
+    let clone_with_data = reader
+        .alloc_clone_with_private_data(reader.mode(), reader.flags(), ops.clone(), alloc::sync::Arc::new(0u8))
+        .unwrap();
+    assert_eq!(inode.read_count(), 3);
+    let pseudo = mount
+        .alloc_file_pseudo(inode.clone(), "pseudo", FMode::READ, OpenFlags::empty(), ops.clone(), kcred::initial_cred())
+        .unwrap();
+    assert_eq!(inode.read_count(), 4);
+    // VfsFile::Drop releases each description's contribution; until then the
+    // lease request keeps seeing the readers.
+    assert_eq!(
+        context.set_lease(&inode, &lease_request(owner, FileLockType::Write), 3, 0, 0),
+        Err(KError::WouldBlock)
+    );
+    drop(clone);
+    drop(clone_with_data);
+    drop(pseudo);
+    assert_eq!(inode.read_count(), 1);
+    drop(reader);
+    assert_eq!(inode.read_count(), 0);
+    // With every production increment paired by a release, the same request
+    // now succeeds (the consuming check, not just the counter, flipped).
+    context
+        .set_lease(&inode, &lease_request(owner, FileLockType::Write), 3, 0, 0)
+        .unwrap();
+    assert_eq!(context.get_lease(owner), FileLockType::Write);
+}

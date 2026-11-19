@@ -605,6 +605,20 @@ impl SignalInfo {
         result
     }
 
+    /// Constructs a poll-notification signal for lease breaks and FASYNC events.
+    ///
+    /// Mirrors Linux `kill_fasync`/`send_sigio` population: `si_code` is
+    /// `SI_SIGIO` and the `_sigpoll` union arm records the `POLL_*` band in
+    /// `si_band` plus the notified descriptor in `si_fd`.
+    pub fn new_sigio(band: i32, fd: i32) -> Self {
+        let mut result = Self::empty();
+        result.set_signo(Signo::SIGIO);
+        result.set_code(linux_raw_sys::general::SI_SIGIO as _);
+        result.sifields_mut()._sigpoll._band = band as _;
+        result.sifields_mut()._sigpoll._fd = fd;
+        result
+    }
+
     /// Returns the signal number.
     ///
     /// # Panics
