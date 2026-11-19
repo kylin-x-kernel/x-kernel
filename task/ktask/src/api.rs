@@ -316,18 +316,6 @@ cpu_slot_cell! {
 /// before `check_preempt_pending` runs). Owned timer deadlines are unaffected.
 const MIN_SCHED_TIMER_NS: u64 = 10_000;
 
-/// Duration of one Linux-style accounting tick, rounded as `TICK_NSEC`.
-const PERIODIC_TICK_NS: u64 = {
-    let ticks_per_second = kbuild_config::TICKS_PER_SECOND as u64;
-    assert!(ticks_per_second > 0 && ticks_per_second <= ktime_types::NANOS_PER_SEC);
-    (ktime_types::NANOS_PER_SEC + ticks_per_second / 2) / ticks_per_second
-};
-
-/// Returns the first phase-aligned tick strictly after `now_ns`.
-fn next_periodic_tick_ns(now_ns: u64) -> Option<u64> {
-    now_ns.checked_add(PERIODIC_TICK_NS - now_ns % PERIODIC_TICK_NS)
-}
-
 /// Starts or stops the local periodic tick for the selected runner.
 ///
 /// Caller pins the CPU with IRQs disabled. Switching between busy tasks keeps
@@ -335,7 +323,7 @@ fn next_periodic_tick_ns(now_ns: u64) -> Option<u64> {
 pub(crate) fn refresh_periodic_tick(is_busy: bool, now_ns: u64) {
     let deadline_ns = NEXT_PERIODIC_TICK_NS.load_current();
     if is_busy && deadline_ns == 0 {
-        NEXT_PERIODIC_TICK_NS.store_current(next_periodic_tick_ns(now_ns).unwrap_or(0));
+        NEXT_PERIODIC_TICK_NS.store_current(ktime::next_tick_ns(now_ns).unwrap_or(0));
     } else if !is_busy && deadline_ns != 0 {
         NEXT_PERIODIC_TICK_NS.store_current(0);
     }
@@ -350,7 +338,7 @@ fn consume_periodic_tick(now_ns: u64) -> bool {
     if deadline_ns == 0 || now_ns < deadline_ns {
         return false;
     }
-    NEXT_PERIODIC_TICK_NS.store_current(next_periodic_tick_ns(now_ns).unwrap_or(0));
+    NEXT_PERIODIC_TICK_NS.store_current(ktime::next_tick_ns(now_ns).unwrap_or(0));
     true
 }
 

@@ -13,10 +13,11 @@ use kirq::{
         test_support::{ScopedSoftirqAction, begin_softirq_test},
     },
 };
+use ktime::TICK_NS;
 use unittest::{assert, assert_eq, def_test};
 
 use super::{
-    MIN_SCHED_TIMER_NS, NEXT_PERIODIC_TICK_NS, NEXT_SCHED_DEADLINE_NS, PERIODIC_TICK_NS,
+    MIN_SCHED_TIMER_NS, NEXT_PERIODIC_TICK_NS, NEXT_SCHED_DEADLINE_NS,
     can_sleep_current_context_for_tests, consume_periodic_tick, current, refresh_periodic_tick,
     rearm_local_timer, sched_stats_text, schedule_deadline_request, select_local_timer_deadline,
     wait_for_poll_event_until, with_wake_sync,
@@ -85,19 +86,19 @@ fn periodic_tick_survives_switches_and_stops_during_idle() {
         let _guard = kspin::NoPreemptIrqSave::new();
         let saved = NEXT_PERIODIC_TICK_NS.load_current();
         NEXT_PERIODIC_TICK_NS.store_current(0);
-        refresh_periodic_tick(true, PERIODIC_TICK_NS / 2);
+        refresh_periodic_tick(true, TICK_NS / 2);
         let first = NEXT_PERIODIC_TICK_NS.load_current();
         refresh_periodic_tick(true, first - 1);
         let after_switch = NEXT_PERIODIC_TICK_NS.load_current();
         let early = consume_periodic_tick(first - 1);
         let due = consume_periodic_tick(first);
         let after_due = NEXT_PERIODIC_TICK_NS.load_current();
-        let late = consume_periodic_tick(PERIODIC_TICK_NS * 4 + 1);
+        let late = consume_periodic_tick(TICK_NS * 4 + 1);
         let after_late = NEXT_PERIODIC_TICK_NS.load_current();
-        let repeated = consume_periodic_tick(PERIODIC_TICK_NS * 4 + 1);
-        refresh_periodic_tick(false, PERIODIC_TICK_NS * 5);
+        let repeated = consume_periodic_tick(TICK_NS * 4 + 1);
+        refresh_periodic_tick(false, TICK_NS * 5);
         let stopped = NEXT_PERIODIC_TICK_NS.load_current();
-        refresh_periodic_tick(true, PERIODIC_TICK_NS * 5 + 1);
+        refresh_periodic_tick(true, TICK_NS * 5 + 1);
         let restarted = NEXT_PERIODIC_TICK_NS.load_current();
         NEXT_PERIODIC_TICK_NS.store_current(saved);
         (
@@ -113,16 +114,16 @@ fn periodic_tick_survives_switches_and_stops_during_idle() {
             restarted,
         )
     };
-    assert_eq!(observed.0, PERIODIC_TICK_NS);
+    assert_eq!(observed.0, TICK_NS);
     assert_eq!(observed.1, observed.0);
     assert!(!observed.2);
     assert!(observed.3);
-    assert_eq!(observed.4, PERIODIC_TICK_NS * 2);
+    assert_eq!(observed.4, TICK_NS * 2);
     assert!(observed.5);
-    assert_eq!(observed.6, PERIODIC_TICK_NS * 5);
+    assert_eq!(observed.6, TICK_NS * 5);
     assert!(!observed.7);
     assert_eq!(observed.8, 0);
-    assert_eq!(observed.9, PERIODIC_TICK_NS * 6);
+    assert_eq!(observed.9, TICK_NS * 6);
 }
 
 #[def_test(serial)]
@@ -193,7 +194,7 @@ fn real_timer_irqs_preserve_the_periodic_deadline() {
                     let deadline_ns = NEXT_PERIODIC_TICK_NS.load_current();
                     let before_periodic = worker_periodic_ticks.load(Ordering::Acquire);
                     let remaining_ns = deadline_ns.saturating_sub(now_ns);
-                    if remaining_ns < PERIODIC_TICK_NS / 3 {
+                    if remaining_ns < TICK_NS / 3 {
                         (before_periodic, deadline_ns, false)
                     } else {
                         delivered.store(false, Ordering::Relaxed);

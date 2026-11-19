@@ -3517,6 +3517,7 @@ dependencies = [
 name = "ktime"
 version = "0.3.0-dev"
 dependencies = [
+ "kbuild_config",
  "khal",
  "kiface-time-api",
  "klazy",

@@ -1443,8 +1443,9 @@ publication. The callback runs under the inode data lock, before folio locking
 and user-data copying; zero-length or rejected writes do not update timestamps.
 It checks live immutable policy before generic size limits, including for empty
 requests, so already-open quota files remain protected during quota activation.
-Shared writable faults retain KVFS `file_update_time()`. Both entries use VFS
-`current_time()` and its superblock range and precision clipping, including when
+Shared writable faults retain KVFS `file_update_time()`. Both entries use KVFS
+`current_time()`, which samples the tick-granular coarse realtime clock and
+applies superblock range and precision clipping, including when
 `KFEAT_FS_TIMES=n`. This feature does not
 disable VFS write-time or explicit timestamp updates; the adapter's optional
 timestamp helper must not substitute epoch values for these updates.
@@ -1457,8 +1458,11 @@ Other timestamp updates use KVFS `generic_update_time`, also used by the default
 callback, to publish only fields confirmed by `setattr`. Explicit setattr/utimensat
 retains its journaled mutation path.
 
-`prepare_buffered_write` reads the mapping format, applies its file-size limit,
-and updates timestamps under one inode-state write lock. `Ext4Mount` retains the
+`prepare_buffered_write` clips the request from atomically published inode
+flags and caller-supplied limits without the inode-state lock, and publishes
+automatic timestamps through a state-lock read of the resident pair that
+enters the write section only when the sampled coarse timestamp differs.
+`Ext4Mount` retains the
 immutable timestamp/bitmap-size capabilities, huge-file feature and journal
 identity established before mount publication. Buffered admission reads the live
 journal abort projection through this retained identity and checks VFS writability;

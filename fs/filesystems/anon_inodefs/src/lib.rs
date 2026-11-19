@@ -196,7 +196,7 @@ fn new_anon_inode() -> Arc<VfsInode> {
 }
 
 fn new_anon_inode_typed(node_type: NodeType) -> Arc<VfsInode> {
-    let timestamp = ktime::realtime();
+    let timestamp = ktime::realtime_coarse();
     let init = VfsInodeInit::new(
         get_next_ino(),
         0,

@@ -11,6 +11,7 @@ description = "System timekeeping layer for X-Kernel: realtime correlation over 
 
 [dependencies]
 kiface-time-api.workspace = true
+kbuild_config.workspace = true
 khal.workspace = true
 ktime_types.workspace = true
 kspin.workspace = true

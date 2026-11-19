@@ -1553,15 +1553,17 @@ fn test_timestamp_authorization_distinguishes_current_and_explicit_values() {
         .unwrap();
     let other = Cred::new(2000, 200);
 
-    root.set_times(
-        Some(SetattrTime::Current(SystemTime::from_unix_seconds(10))),
-        Some(SetattrTime::Current(SystemTime::from_unix_seconds(11))),
-        &other,
-    )
-    .unwrap();
+    let before = root.inode().current_time();
+    root.set_times(Some(SetattrTime::Current), Some(SetattrTime::Current), &other)
+        .unwrap();
+    let after = root.inode().current_time();
     let metadata = root.metadata();
-    assert_eq!(metadata.atime, SystemTime::from_unix_seconds(10));
-    assert_eq!(metadata.mtime, SystemTime::from_unix_seconds(11));
+    // A touch resolves every field from the single clock sample taken inside
+    // the update, so the three timestamps agree and fall within the window.
+    assert!(metadata.atime >= before);
+    assert!(metadata.atime <= after);
+    assert_eq!(metadata.atime, metadata.mtime);
+    assert_eq!(metadata.mtime, metadata.ctime);
     assert_eq!(
         root.set_times(
             Some(SetattrTime::Explicit(SystemTime::from_unix_seconds(20))),
@@ -1571,11 +1573,7 @@ fn test_timestamp_authorization_distinguishes_current_and_explicit_values() {
         Err(VfsError::OperationNotPermitted)
     );
     assert_eq!(
-        root.set_times(
-            Some(SetattrTime::Current(SystemTime::from_unix_seconds(30))),
-            None,
-            &other,
-        ),
+        root.set_times(Some(SetattrTime::Current), None, &other),
         Err(VfsError::OperationNotPermitted)
     );
 }
@@ -1694,6 +1692,29 @@ fn test_update_cmtime_advances_mtime_and_ctime() {
     assert!(times.modified_at >= before);
     assert_eq!(times.modified_at, times.changed_at);
     assert_eq!(times.accessed_at, SystemTime::from_unix_seconds(1));
+}
+
+#[def_test]
+fn test_setattr_current_then_auto_publish_keeps_times_monotonic() {
+    let fs = mock_filesystem(StatFsFlags::empty());
+    let root = Mount::new_root(&fs).root_path();
+    let cred = kcred::initial_cred();
+    seed_times(&root, SystemTime::from_unix_seconds(1));
+
+    let before = root.inode().current_time();
+    root.set_times(Some(SetattrTime::Current), Some(SetattrTime::Current), &cred)
+        .expect("set_times accepts current values");
+    let after_setattr = root.inode().times();
+    assert!(after_setattr.modified_at >= before);
+    assert_eq!(
+        after_setattr.modified_at, after_setattr.changed_at,
+        "one sample must resolve mtime and ctime"
+    );
+
+    assert_eq!(root.update_cmtime(), Ok(()));
+    let after_update = root.inode().times();
+    assert!(after_update.modified_at >= after_setattr.modified_at);
+    assert!(after_update.changed_at >= after_setattr.changed_at);
 }
 
 #[def_test]

@@ -2606,9 +2606,14 @@ impl VfsInode {
         self.set_changed_at(self.current_time())
     }
 
-    /// Returns the current wall-clock time truncated to this inode's filesystem capability.
+    /// Returns the current wall-clock time, sampled once per kernel tick and
+    /// truncated to this inode's filesystem capability.
+    ///
+    /// Repeated calls inside one tick return the same value, so callers can
+    /// recognize an unchanged timestamp. The value is monotonic while the
+    /// clock identity is unchanged; a backward clock update can step it down.
     pub fn current_time(&self) -> SystemTime {
-        self.truncate_timestamp(ktime::realtime())
+        self.truncate_timestamp(ktime::realtime_coarse())
     }
 
     /// Truncates a timestamp to this inode's filesystem capability.

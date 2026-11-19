@@ -558,7 +558,8 @@ full `i64` range as a conservative default; after the filesystem fill operation 
 it queries this capability once, and it is then persisted by the sole `SuperBlock`. A filesystem may explicitly override it based on the on-disk format or protocol state, just as Linux
 `fill_super()` sets `s_time_*`; KVFS does not create a parallel
 format object and does not duplicate this state in the bridge.
-`VfsInode::current_time()` rounds and clamps the current time;
+`VfsInode::current_time()` samples the tick-granular coarse realtime clock,
+then rounds and clamps it;
 `truncate_timestamp()` applies the same conversion to explicit values. Explicit
 setattr, automatic I/O updates, and namespace helpers apply superblock policy
 before comparison and filesystem callbacks. Backends then apply format-specific
@@ -570,6 +571,19 @@ original request. Raw setters only store values without repeating policy lookup.
 This follows Linux's separation between `current_time()`/`timestamp_truncate()`
 and `inode_set_*_to_ts()`, while allowing FAT-style distinct atime and mtime/ctime
 invariants.
+All KVFS timestamps, automatic and "set to now" alike, come from that one
+tick-granular clock, so publications serialized by the inode data lock never
+report an earlier value while the wall clock is not stepped backward. Backend
+metadata paths that journal timestamps directly (quota flag updates, unlink)
+and concurrent shared writable faults are outside that serialization and may
+publish second-granularity or cross-tick values. `set_times` takes the inode data
+lock, matching the buffered-write and `fallocate` order, and samples one clock
+value that resolves every `Current` request and the derived ctime, so an
+explicit touch publishes identical mtime and ctime and cannot interleave with
+a concurrent buffered write. Linux further upgrades a write stamp to
+fine-grained time once an inode's ctime has been queried (multigrain
+timestamps); KVFS has no per-inode queried state, so writes inside one tick
+publish the same mtime and ctime.
 
 `FileSystemType` corresponds to Linux `struct file_system_type` and describes the name of a filesystem implementation,
 whether it needs a backing device, `init_fs_context`, and type flags. `init_fs_context` installs the statically shared `FsContextOperations` for each
@@ -863,7 +877,7 @@ Inode metadata modifications are likewise authorized uniformly by `Path` and the
   with write permission on the inode; explicit values and mixed
   `UTIME_NOW`/`UTIME_OMIT` permit only the owner or effective `CAP_FOWNER`.
 
-`SetattrTime` carries only the authorization information of "current value/explicit value" within a single call, and the persisted `MetadataUpdate`
+`SetattrTime` records only the authorization semantics of each requested timestamp: `Current` is a unit variant that `resolve(now)` maps to the update's single clock sample, while `Explicit(SystemTime)` carries a caller-supplied value. The persisted `MetadataUpdate`
 contains only the resolved atime/mtime/ctime values; the call context is not saved in the inode or namei state.
 Automatic I/O updates use `InodeUpdateTime`, corresponding to Linux
 `FS_UPD_ATIME` / `FS_UPD_CMTIME`, and invoke filesystem `update_time`. Authorized

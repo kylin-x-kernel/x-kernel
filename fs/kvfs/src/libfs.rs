@@ -70,7 +70,7 @@ pub fn new_pseudo_super_block(
 }
 
 fn pseudo_fs_root_dentry() -> Dentry {
-    let timestamp = ktime::realtime();
+    let timestamp = ktime::realtime_coarse();
     let init = VfsInodeInit::new(
         PSEUDO_FS_ROOT_INO,
         0,

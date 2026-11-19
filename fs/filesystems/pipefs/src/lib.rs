@@ -91,7 +91,7 @@ pub fn create_pipe_files(
 }
 
 fn new_pipe_inode(cred: &Cred, file_operations: Arc<dyn FileOperations>) -> Arc<VfsInode> {
-    let timestamp = ktime::realtime();
+    let timestamp = ktime::realtime_coarse();
     let init = VfsInodeInit::new(
         get_next_ino(),
         0,

@@ -208,3 +208,32 @@ fn sleep_injection_rejects_counter_regression() {
     );
     assert_eq!(timekeeper, before);
 }
+
+#[def_test]
+fn realtime_coarse_equals_correlation_at_the_floored_tick() {
+    // Derived coarse must equal realtime_at(floor_to_tick(monotonic)). The
+    // window is accepted only when the tick floor and the correlation are
+    // stable across the call, so the equality assertion is exact.
+    let mut verified = false;
+    for _ in 0..8 {
+        let before_ns = monotonic_time()
+            .span_since_origin()
+            .as_nanos_u64_saturating();
+        let floored_ns = before_ns - before_ns % TICK_NS;
+        let floored =
+            MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(floored_ns));
+        let expected_before = TIMEKEEPER.read().correlation.realtime_at(floored);
+        let coarse = realtime_coarse();
+        let after_ns = monotonic_time()
+            .span_since_origin()
+            .as_nanos_u64_saturating();
+        let expected_after = TIMEKEEPER.read().correlation.realtime_at(floored);
+        if after_ns - after_ns % TICK_NS != floored_ns || expected_after != expected_before {
+            continue;
+        }
+        assert_eq!(coarse, expected_before);
+        verified = true;
+        break;
+    }
+    assert!(verified, "tick floor or correlation never stayed stable");
+}

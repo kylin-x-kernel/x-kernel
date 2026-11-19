@@ -104,8 +104,7 @@ pub fn sys_utime(path: UserConstPtr<c_char>, times: UserConstPtr<utimbuf>) -> KR
             SetattrTime::Explicit(SystemTime::from_unix_seconds(times.modtime)),
         )
     } else {
-        let time = ktime::realtime();
-        (SetattrTime::Current(time), SetattrTime::Current(time))
+        (SetattrTime::Current, SetattrTime::Current)
     };
     update_times(AT_FDCWD, path, Some(atime), Some(mtime), 0)?;
     Ok(0)
@@ -120,8 +119,7 @@ pub fn sys_utimes(path: UserConstPtr<c_char>, times: UserConstPtr<[timeval; 2]>)
             SetattrTime::Explicit(mtime.try_into_system_time()?),
         )
     } else {
-        let time = ktime::realtime();
-        (SetattrTime::Current(time), SetattrTime::Current(time))
+        (SetattrTime::Current, SetattrTime::Current)
     };
     update_times(AT_FDCWD, path, Some(atime), Some(mtime), 0)?;
     Ok(0)
@@ -140,7 +138,7 @@ pub fn sys_utimensat(
     fn utime_to_update(time: &timespec) -> Option<KResult<SetattrTime>> {
         match time.tv_nsec {
             val if val == UTIME_OMIT as c_long => None,
-            val if val == UTIME_NOW as c_long => Some(Ok(SetattrTime::Current(ktime::realtime()))),
+            val if val == UTIME_NOW as c_long => Some(Ok(SetattrTime::Current)),
             _ => Some((*time).try_into_system_time().map(SetattrTime::Explicit)),
         }
     }
@@ -152,11 +150,7 @@ pub fn sys_utimensat(
             utime_to_update(&mtime).transpose()?,
         )
     } else {
-        let time = ktime::realtime();
-        (
-            Some(SetattrTime::Current(time)),
-            Some(SetattrTime::Current(time)),
-        )
+        (Some(SetattrTime::Current), Some(SetattrTime::Current))
     };
     if atime.is_none() && mtime.is_none() {
         return Ok(0);
@@ -165,3 +159,5 @@ pub fn sys_utimensat(
     update_times(dirfd, path, atime, mtime, flags)?;
     Ok(0)
 }
+
+unittest::path_mod_test!(times_tests, "../ut-tests/times.rs");

@@ -1726,6 +1726,14 @@ impl Path {
     }
 
     /// Changes this inode's timestamps after applying Linux utimens authorization.
+    ///
+    /// One wall-clock sample resolves every `Current` request and the derived
+    /// ctime, so a "set to now" update publishes identical mtime and ctime.
+    /// The inode data lock is held across the update, matching the order used
+    /// by `fallocate` and buffered writes, so a concurrent buffered write
+    /// cannot interleave its timestamp publication with this update.
+    ///
+    /// Locking: acquires mount write admission, then the inode data lock.
     pub fn set_times(
         &self,
         atime: Option<SetattrTime>,
@@ -1737,11 +1745,13 @@ impl Path {
         }
 
         let _write_guard = self.lock_writable_mount()?;
+        let inode = self.inode();
+        let _data_guard = inode.lock_data();
         let metadata = self.metadata();
         let is_owner = cred.fsuid() == metadata.uid;
         let is_touch = matches!(
             (atime, mtime),
-            (Some(SetattrTime::Current(_)), Some(SetattrTime::Current(_)))
+            (Some(SetattrTime::Current), Some(SetattrTime::Current))
         );
         if !is_touch {
             if !is_owner && !cred.has_cap_fowner() {
@@ -1751,9 +1761,11 @@ impl Path {
             self.permission(Permission::MAY_WRITE, cred)?;
         }
 
+        let now = inode.current_time();
         self.dentry.update_metadata(MetadataUpdate {
-            atime: atime.map(SetattrTime::value),
-            mtime: mtime.map(SetattrTime::value),
+            atime: atime.map(|time| time.resolve(now)),
+            mtime: mtime.map(|time| time.resolve(now)),
+            ctime: Some(now),
             ..Default::default()
         })
     }

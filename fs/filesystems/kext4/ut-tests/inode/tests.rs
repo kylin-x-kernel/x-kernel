@@ -394,6 +394,49 @@ fn extra_isize_expansion_failure_state_is_resident_and_resettable() {
 }
 
 #[def_test]
+fn buffered_write_repetition_keeps_resident_timestamps_idempotent() {
+    let inode = test_inode_with_flags(0, disk_inode::S_IFREG | 0o644, regular_inode_metadata());
+    let written_at = timestamp(123, 456);
+    assert_eq!(
+        inode.prepare_buffered_write(10, 4, 8192, 4096, written_at),
+        Some(4)
+    );
+    assert_eq!((inode.mtime(), inode.ctime()), (written_at, written_at));
+    assert!(inode.has_dirty_timestamps());
+
+    // Repeating the same coarse timestamp is a no-op on the resident pair.
+    // The skipped write section has no observable state, so this test pins
+    // the idempotence the skip must preserve.
+    assert_eq!(
+        inode.prepare_buffered_write(10, 4, 8192, 4096, written_at),
+        Some(4)
+    );
+    assert_eq!((inode.mtime(), inode.ctime()), (written_at, written_at));
+    assert!(inode.has_dirty_timestamps());
+}
+
+#[def_test]
+fn needs_write_timestamp_compares_both_resident_fields() {
+    let inode = test_inode_with_flags(0, disk_inode::S_IFREG | 0o644, regular_inode_metadata());
+    let published = timestamp(123, 456);
+    assert!(inode.with_state(|state| state.needs_write_timestamp(published)));
+
+    assert_eq!(
+        inode.prepare_buffered_write(10, 4, 8192, 4096, published),
+        Some(4)
+    );
+    assert!(!inode.with_state(|state| state.needs_write_timestamp(published)));
+
+    inode.set_mtime(timestamp(1, 2));
+    assert!(inode.with_state(|state| state.needs_write_timestamp(published)));
+
+    // The ctime arm of the comparison is independent of the mtime arm.
+    inode.set_mtime(published);
+    inode.set_ctime(timestamp(3, 4));
+    assert!(inode.with_state(|state| state.needs_write_timestamp(published)));
+}
+
+#[def_test]
 fn delayed_allocation_extents_merge_split_and_count_blocks() {
     let inode = test_inode(regular_inode_metadata());
     assert_eq!(

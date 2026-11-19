@@ -223,3 +223,24 @@ independent timekeepers; they do not inject into the active kernel's clocks.
 Coverage includes quantization over repeated fractional sleeps, bounds, clock
 edits, capture failures, phase commit failure and boundary gating. They do not
 prove RTC continuity across real host sleep, device recovery or CPU quiescence.
+
+## Coarse Tick-Granular Wall Clock
+
+`realtime_coarse` derives the wall clock at tick granularity: it takes the
+timekeeper read lock, floors the monotonic sample to the tick boundary with
+`TICK_NS`, and evaluates the existing `ClockCorrelation::realtime_at` at that
+instant. There is no cached state, no identity tracking, and no second lock.
+This mirrors the role of Linux timekeeping's `xtime_coarse` image
+(`ktime_get_coarse_real_ts64`); Linux refreshes that image from the tick path,
+while x-kernel computes it per read, which is observationally equivalent
+because the derivation depends only on the tick floor and the committed
+correlation.
+
+Contract (true by construction): while the correlation is unchanged, repeated
+reads within one tick return the same value, the result trails `realtime` by
+less than one tick, and successive reads are monotonic; a wall-clock update —
+including a backward step — is visible on the next read and rescales the value
+even inside the current tick. The value keeps full
+sub-second precision of the correlation at the tick instant; filesystems
+apply `timestamp_truncate` separately. Consumers needing exact elapsed wall
+time (quota timers, RTC, tracing) keep using `realtime`.

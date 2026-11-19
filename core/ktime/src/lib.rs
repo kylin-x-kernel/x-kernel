@@ -185,8 +185,39 @@ impl Timekeeper {
 }
 
 static TIMEKEEPER: SpinRwNoIrq<Timekeeper> = SpinRwNoIrq::new(Timekeeper::INITIAL);
+/// Serial identity of the last committed clock update. Writers bump it with
+/// Relaxed stores while holding the TIMEKEEPER write lock; every consumer
+/// (`prepare_clock_update`, `clock_reading`, `begin_suspend_accounting`)
+/// samples it only while holding the TIMEKEEPER lock, so ordering comes from
+/// that lock rather than from release pairing here.
 static CHANGE_ID: AtomicU64 = AtomicU64::new(0);
 static REALTIME_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Duration of one kernel tick in nanoseconds, rounded like Linux `TICK_NSEC`.
+///
+/// The rate is `TICKS_PER_SECOND`, the x-kernel analogue of Linux `CONFIG_HZ`.
+/// Timekeeping owns the interval so CPU-time accounting and the coarse wall
+/// clock share one definition.
+///
+/// Panics: at compile time when the configured rate is zero or exceeds one
+/// second in nanoseconds.
+pub const TICK_NS: u64 = {
+    let ticks_per_second = kbuild_config::TICKS_PER_SECOND as u64;
+    assert!(ticks_per_second > 0 && ticks_per_second <= NANOS_PER_SEC);
+    (NANOS_PER_SEC + ticks_per_second / 2) / ticks_per_second
+};
+
+/// Returns the first tick boundary strictly after `now_ns`, phase-aligned to
+/// the kernel tick like Linux `TICK_NSEC` boundaries in timekeeping.
+///
+/// - `now_ns`: monotonic nanoseconds.
+///
+/// Returns: the aligned boundary instant; `None` on overflow.
+///
+/// Errors: none.
+pub fn next_tick_ns(now_ns: u64) -> Option<u64> {
+    now_ns.checked_add(TICK_NS - now_ns % TICK_NS)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ClockSnapshot {
@@ -287,9 +318,36 @@ pub fn realtime_and_monotonic() -> (SystemTime, MonotonicInstant) {
 ///
 /// Before a persistent clock initializes realtime, the result falls back to
 /// the Unix epoch plus elapsed monotonic time and injected sleep intervals.
+/// Filesystem timestamp sampling uses [`realtime_coarse`] instead of this
+/// function so consecutive writes inside one tick compare equal.
 #[inline]
 pub fn realtime() -> SystemTime {
     snapshot().realtime
+}
+
+/// Returns the wall clock at tick granularity, derived from the timekeeper
+/// correlation.
+///
+/// While the correlation is unchanged, repeated reads inside one tick return
+/// the same value, which lets callers recognize an unchanged timestamp, as
+/// Linux `current_time` does on its `ktime_get_coarse_real_ts64` path. The
+/// result trails [`realtime`] by less
+/// than one tick, keeps full sub-second precision, and reflects a wall-clock
+/// update — including a backward step — on the next read.
+///
+/// Returns: the coarse wall-clock timestamp.
+///
+/// Errors: none.
+///
+/// Locking: takes the timekeeper read lock, like [`realtime`]. Does not sleep
+/// and is valid in interrupt context.
+pub fn realtime_coarse() -> SystemTime {
+    let timekeeper = TIMEKEEPER.read();
+    let monotonic = monotonic_time();
+    let now_ns = monotonic.span_since_origin().as_nanos_u64_saturating();
+    let floored =
+        MonotonicInstant::from_span_since_origin(TimeSpan::from_nanos(now_ns - now_ns % TICK_NS));
+    timekeeper.correlation.realtime_at(floored)
 }
 
 /// Returns the current boot-time instant, including injected sleep intervals.

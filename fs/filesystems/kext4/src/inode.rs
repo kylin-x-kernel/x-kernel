@@ -844,6 +844,17 @@ pub(crate) enum OrphanLocation {
 }
 
 impl Ext4InodeState {
+    /// Returns whether publishing `timestamp` would change a resident write timestamp.
+    ///
+    /// - `timestamp`: coarse wall-clock sample the current operation would publish.
+    ///
+    /// Returns: `true` when `mtime` or `ctime` differs from `timestamp`; `false`
+    /// means [`publish_write_timestamps`](Self::publish_write_timestamps) would
+    /// leave both values and dirty flags untouched.
+    fn needs_write_timestamp(&self, timestamp: Ext4Timestamp) -> bool {
+        self.metadata.mtime != timestamp || self.metadata.ctime != timestamp
+    }
+
     fn publish_write_timestamps(&mut self, timestamp: Ext4Timestamp) {
         self.has_dirty_mtime |= self.metadata.mtime != timestamp;
         self.has_dirty_ctime |= self.metadata.ctime != timestamp;
@@ -1613,12 +1624,28 @@ impl Ext4Inode {
         })
     }
 
-    /// Clips a regular buffered write and publishes its automatic timestamps
-    /// under the same state lock that selects its mapping-format size limit.
+    /// Clips a regular buffered write and publishes its automatic timestamps.
     ///
     /// The caller holds KVFS data protection and has checked mount/journal
     /// writability. `None` means the nonempty write starts at or beyond the
     /// limit; rejected and empty requests leave timestamps unchanged.
+    ///
+    /// The clip reads only atomically published flags and caller-supplied
+    /// limits, so it runs without the state lock. Linux likewise separates the
+    /// two duties and skips timestamp work when nothing changed
+    /// (`need_cmtime_update`): the resident pair is compared in the read
+    /// section and the write section runs only when the sampled timestamp
+    /// differs. Repeated writes inside one coarse clock interval therefore
+    /// never enter the write section.
+    ///
+    /// The comparison is stable across the two sections for the writers that
+    /// can change a resident write timestamp: buffered writes
+    /// (`write_iter_with_prepare`), `set_times`, `fallocate`, truncate and
+    /// xattr hold the inode data lock exclusively, and writable faults hold it
+    /// shared. Metadata paths outside that lock (chmod/chown ctime auto-fill,
+    /// quota flag updates, unlink) can publish a different value; when they
+    /// interleave, skipping keeps the value they published instead of
+    /// overwriting it with this write's older sample.
     pub(crate) fn prepare_buffered_write(
         &self,
         offset: u64,
@@ -1627,19 +1654,19 @@ impl Ext4Inode {
         bitmap_max_size: u64,
         timestamp: Ext4Timestamp,
     ) -> Option<usize> {
-        self.update_state(|state| {
-            debug_assert_eq!(self.kind, InodeKind::RegularFile);
-            if count == 0 {
-                return Some(0);
-            }
-            let max_size = inode_max_file_size(self.flags(), extent_max_size, || bitmap_max_size);
-            if offset >= max_size {
-                return None;
-            }
-            let remaining = usize::try_from(max_size - offset).unwrap_or(usize::MAX);
-            state.publish_write_timestamps(timestamp);
-            Some(count.min(remaining))
-        })
+        debug_assert_eq!(self.kind, InodeKind::RegularFile);
+        if count == 0 {
+            return Some(0);
+        }
+        let max_size = inode_max_file_size(self.flags(), extent_max_size, || bitmap_max_size);
+        if offset >= max_size {
+            return None;
+        }
+        let remaining = usize::try_from(max_size - offset).unwrap_or(usize::MAX);
+        if self.with_state(|state| state.needs_write_timestamp(timestamp)) {
+            self.update_state(|state| state.publish_write_timestamps(timestamp));
+        }
+        Some(count.min(remaining))
     }
 
     /// Updates generic allocated-block accounting in the resident inode.

@@ -260,6 +260,9 @@ fn ext4_timestamp_to_system_time(timestamp: Ext4Timestamp) -> SystemTime {
         .expect("Ext4Timestamp normalizes sub-second nanoseconds")
 }
 
+/// Returns the timestamp a metadata update publishes.
+///
+/// - `inode`: VFS inode providing the tick-granular current filesystem time.
 #[cfg(feature = "times")]
 fn current_ext4_timestamp(inode: &VfsInode) -> Ext4Timestamp {
     system_time_to_ext4(inode.current_time())
@@ -1909,8 +1912,8 @@ impl FileOperations for Ext4Inode {
             iocb.generic_file_write_iter_with_prepare(iter, |iocb, count| {
                 let file = iocb.file();
                 // Linux `ext4_generic_write_checks`: immutable and size limits
-                // precede the journal check; the count clamp and timestamps stay
-                // in `prepare_buffered_write`'s inode-state critical section.
+                // precede the journal check; the count clamp and automatic
+                // timestamps are applied by `prepare_buffered_write`.
                 if !self.ext4_generic_write_checks(
                     file.inode(),
                     iocb.ki_pos(),
