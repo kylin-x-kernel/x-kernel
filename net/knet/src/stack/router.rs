@@ -25,7 +25,10 @@ use crate::{
     network::{
         event::{NetworkEvent, RouteProvenance},
         interface_address::{Ipv4AddrEntry, Ipv4AddrSnapshot},
-        ipv4::{self, Ipv4Header},
+        ipv4::{
+            self, Ipv4Header,
+            forward::{Ipv4ForwardFailure, Ipv4ForwardInput, PreparedIpv4Forward},
+        },
         router::{
             ROUTE_SCOPE_HOST, ROUTE_SCOPE_LINK, ROUTE_SCOPE_UNIVERSE, ROUTE_TYPE_BROADCAST,
             ROUTE_TYPE_LOCAL, ROUTE_TYPE_MULTICAST, ROUTE_TYPE_UNICAST, RouteTable, Rule,
@@ -69,6 +72,19 @@ pub(crate) struct Ipv4OutputRoute {
     pub(crate) gateway: Option<Ipv4Address>,
 }
 
+/// The selected path stays with a forward while its fragments await dispatch.
+#[derive(Debug)]
+struct Ipv4ForwardRoute {
+    device: NetDeviceId,
+    next_hop: Ipv4Address,
+    neighbor_source: Ipv4Address,
+}
+
+struct PendingIpv4Forward {
+    route: Ipv4ForwardRoute,
+    packets: alloc::vec::IntoIter<PacketBuf>,
+}
+
 fn ipv4_address(addr: IpAddress) -> Option<Ipv4Address> {
     match addr {
         IpAddress::Ipv4(addr) => Some(addr),
@@ -78,6 +94,10 @@ fn ipv4_address(addr: IpAddress) -> Option<Ipv4Address> {
 
 pub(crate) struct Router {
     rx_queue: VecDeque<PacketBuf>,
+    forward_queue: VecDeque<Ipv4ForwardInput>,
+    pending_forward: Option<PendingIpv4Forward>,
+    ipv4_forwarding: i32,
+    next_tx_is_forward: bool,
     control_tx_queue: VecDeque<PacketBuf>,
     data_tx_queue: DataTxQueue,
     next_rx_device: usize,
@@ -103,6 +123,10 @@ impl Router {
     pub(crate) fn new() -> Self {
         Self {
             rx_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
+            forward_queue: VecDeque::with_capacity(SOCKET_BUFFER_SIZE),
+            pending_forward: None,
+            ipv4_forwarding: 0,
+            next_tx_is_forward: true,
             control_tx_queue: VecDeque::with_capacity(CONTROL_TX_QUEUE_SIZE),
             data_tx_queue: DataTxQueue::with_capacity(DATA_TX_QUEUE_SIZE),
             next_rx_device: 0,
@@ -466,6 +490,49 @@ impl Router {
             })
     }
 
+    /// Prepares host-unicast forwarding without applying local-source restrictions.
+    ///
+    /// Requires task context under the Router lock. Errors retain the original
+    /// packet for an ICMP reply with a separately selected local source.
+    fn prepare_ipv4_forward(
+        &self,
+        input: Ipv4ForwardInput,
+    ) -> Result<(PreparedIpv4Forward, Ipv4ForwardRoute), Ipv4ForwardFailure> {
+        let destination = input.destination();
+        let Some(route) = self.table.lookup(&IpAddress::Ipv4(destination)) else {
+            return Err(input.no_route());
+        };
+        let device = self
+            .devices
+            .get_by_id(route.dev)
+            .expect("route device must be registered");
+        if route.route_type != ROUTE_TYPE_UNICAST || device.link_kind() == LinkKind::Loopback {
+            return Err(input.discard());
+        }
+        if !device.is_link_up() {
+            return Err(input.no_route());
+        }
+        let next_hop = match route.via {
+            Some(IpAddress::Ipv4(gateway)) => gateway,
+            None => destination,
+            Some(_) => return Err(input.no_route()),
+        };
+        let Some(neighbor_source) = self.devices.ipv4(route.dev).and_then(|addresses| {
+            addresses.select_source(&IpAddress::Ipv4(next_hop), ROUTE_SCOPE_LINK)
+        }) else {
+            return Err(input.discard());
+        };
+        let packet = input.prepare(device.mtu().min(u16::MAX as usize) as u16)?;
+        Ok((
+            packet,
+            Ipv4ForwardRoute {
+                device: route.dev,
+                next_hop,
+                neighbor_source,
+            },
+        ))
+    }
+
     pub(crate) fn can_enqueue_tx_packet(&self) -> bool {
         !self.data_tx_queue.is_full()
     }
@@ -566,6 +633,7 @@ impl Router {
         let routes_before = self.table.snapshot();
 
         let removed_sources = self.devices.remove_slot(pos);
+        self.reconcile_forward_output();
         self.table.remove_device(dev);
         for source in removed_sources {
             if !self.has_ipv4_address(source) {
@@ -938,8 +1006,26 @@ impl Router {
         for source in &old_sources {
             self.remove_ipv4_source_state_if_unowned(*source);
         }
+        self.reconcile_forward_output();
         self.table.sync_ipv4_address_routes(&self.devices);
         old_sources
+    }
+
+    /// Retired devices and neighbor sources cannot keep pending output alive.
+    fn reconcile_forward_output(&mut self) {
+        if self.pending_forward.as_ref().is_some_and(|pending| {
+            !self
+                .devices
+                .ipv4(pending.route.device)
+                .is_some_and(|addresses| {
+                    addresses
+                        .as_slice()
+                        .iter()
+                        .any(|entry| entry.addr.address() == pending.route.neighbor_source)
+                })
+        }) {
+            self.pending_forward = None;
+        }
     }
 
     fn remove_ipv4_source_state_if_unowned(&mut self, address: Ipv4Address) {
@@ -1132,7 +1218,41 @@ impl Router {
     }
 
     pub(crate) fn ingress_capacity(&self) -> usize {
-        SOCKET_BUFFER_SIZE.saturating_sub(self.rx_queue.len())
+        SOCKET_BUFFER_SIZE.saturating_sub(self.rx_queue.len().max(self.forward_queue.len()))
+    }
+
+    #[cfg_attr(
+        not(unittest),
+        expect(
+            dead_code,
+            reason = "CG-024-lint-exceptions: dead_code: ingress and forwarding controls follow \
+                      in IKIXDM"
+        )
+    )]
+    pub(crate) fn set_ipv4_forwarding(&mut self, value: i32) {
+        self.ipv4_forwarding = value;
+        if value == 0 {
+            self.forward_queue.clear();
+            self.pending_forward = None;
+        }
+    }
+
+    /// Batch sizes are limited by `ingress_capacity` before draining devices.
+    #[cfg_attr(
+        not(unittest),
+        expect(
+            dead_code,
+            reason = "CG-024-lint-exceptions: dead_code: ingress and forwarding controls follow \
+                      in IKIXDM"
+        )
+    )]
+    pub(crate) fn enqueue_forward_packets(&mut self, packets: &mut Vec<Ipv4ForwardInput>) {
+        if self.ipv4_forwarding != 0 {
+            debug_assert!(packets.len() <= SOCKET_BUFFER_SIZE - self.forward_queue.len());
+            self.forward_queue.extend(packets.drain(..));
+        } else {
+            packets.clear();
+        }
     }
 
     pub(crate) fn has_pending_ingress(&self) -> bool {
@@ -1169,9 +1289,19 @@ impl Router {
         let mut work_done = 0;
         let mut poll_next = false;
         while work_done < budget {
+            if (self.next_tx_is_forward
+                || self.control_tx_queue.is_empty() && self.data_tx_queue.is_empty())
+                && (self.pending_forward.is_some() || !self.forward_queue.is_empty())
+            {
+                self.next_tx_is_forward = false;
+                work_done += 1;
+                poll_next |= self.dispatch_ipv4_forward(timestamp);
+                continue;
+            }
             let Some(mut packet) = self.pop_tx_packet() else {
                 break;
             };
+            self.next_tx_is_forward = true;
             work_done += 1;
             packet.set_owner(PacketOwner::DeviceTx);
             let Some(ip_packet) = packet.network_packet() else {
@@ -1227,6 +1357,65 @@ impl Router {
         }
         self.collect_neighbor_events();
         (work_done, poll_next || self.has_queued_tx_packets())
+    }
+
+    fn dispatch_ipv4_forward(&mut self, timestamp: MonotonicInstant) -> bool {
+        if self.pending_forward.is_none() {
+            let input = self
+                .forward_queue
+                .pop_front()
+                .expect("pending forwarding work");
+            let (packet, route) = match self.prepare_ipv4_forward(input) {
+                Ok(prepared) => prepared,
+                Err(failure) => {
+                    self.reply_forward_error(failure);
+                    return false;
+                }
+            };
+            let Ok(packets) = packet.into_packets() else {
+                return false;
+            };
+            self.pending_forward = Some(PendingIpv4Forward {
+                route,
+                packets: packets.into_iter(),
+            });
+        }
+
+        let pending = self
+            .pending_forward
+            .as_mut()
+            .expect("prepared forwarding output");
+        let device = self
+            .devices
+            .get_mut_by_id(pending.route.device)
+            .expect("device removal discards pending forwarding output");
+        let mut packet = pending.packets.next().expect("pending forwarding fragment");
+        packet.set_ifindex(pending.route.device.ifindex());
+        let poll_next = device.send_ip_packet(
+            pending.route.device.ifindex(),
+            IpAddress::Ipv4(pending.route.next_hop),
+            IpAddress::Ipv4(pending.route.neighbor_source),
+            packet,
+            timestamp,
+        );
+        if pending.packets.len() == 0 {
+            self.pending_forward = None;
+        }
+        poll_next
+    }
+
+    fn reply_forward_error(&mut self, failure: ipv4::forward::Ipv4ForwardFailure) {
+        let Some(destination) = failure.reply_destination() else {
+            return;
+        };
+        let Ok(IpAddress::Ipv4(source)) =
+            self.output_route_source(&IpAddress::Ipv4(destination), 0)
+        else {
+            return;
+        };
+        if let Some(reply) = failure.icmp_reply(source) {
+            let _ = self.queue_control_ipv4_packet(reply);
+        }
     }
 
     /// Dispatches one IPv4 packet onto the selected device.
@@ -1366,7 +1555,10 @@ impl Router {
     }
 
     fn has_queued_tx_packets(&self) -> bool {
-        !self.control_tx_queue.is_empty() || !self.data_tx_queue.is_empty()
+        !self.control_tx_queue.is_empty()
+            || !self.data_tx_queue.is_empty()
+            || !self.forward_queue.is_empty()
+            || self.pending_forward.is_some()
     }
 
     pub(crate) fn has_immediate_rx_work(&self) -> bool {
@@ -1435,3 +1627,7 @@ fn tx_packet_buf(packet: Vec<u8>) -> PacketBuf {
 }
 
 unittest::path_mod_test!(tests, "../../ut-tests/stack/router/tests.rs");
+unittest::path_mod_test!(
+    forwarding_tests,
+    "../../ut-tests/stack/router/forwarding.rs"
+);

@@ -240,7 +240,8 @@ pub(crate) trait NetDevice: Send + Sync {
     /// The Router calls this in task context. Implementations may allocate and
     /// callers must not invoke it from hardirq, softirq, or BH-disabled context.
     ///
-    /// `source_addr` is the source parsed by the Router before dispatch.
+    /// `source_addr` supplies the local sender for neighbor resolution. It does
+    /// not replace the source address in a forwarded packet's header.
     /// Returns `true` when the send made RX ready, typically after a
     /// successful loopback enqueue. Returns `false` when it did not:
     /// Ethernet TX, or a drop such as link down, over-MTU, or a full

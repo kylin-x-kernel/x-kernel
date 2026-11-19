@@ -391,6 +391,11 @@ failures retain the original header for a separately routed ICMP reply.
 Routing and scheduling remain caller responsibilities; live ingress is not
 connected to forwarding in this stage.
 
+Router owns forwarding route selection and output queues. The selected device,
+next hop and neighbor source stay with pending fragments, with one fragment per
+TX work item. Disabling forwarding or retiring the device/source drops pending
+output. Ingress and the userspace control are connected separately.
+
 ### IPv4 Filter Table Model
 
 `netfilter/filter` stores IPv4 filtering policies as immutable ordered rules

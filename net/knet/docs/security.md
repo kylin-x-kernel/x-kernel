@@ -142,6 +142,10 @@ and malformed fragment geometry after IPv4 checksum and length validation.
 TTL/DF failures retain the original packet and use the existing ICMP suppression
 rules. Forwarding preparation does not transmit packets or select reply sources.
 
+Router retains a bounded forwarding queue and a single fragmented datagram.
+Device/source removal clears pending output under its lock. Each dispatched
+fragment consumes TX budget; TTL preparation is not repeated on resumption.
+
 INPUT runs on complete, validated local IPv4 datagrams before transport delivery
 or protocol/port-unreachable replies. Fragment queues do not evaluate partial datagrams.
 Unknown input interfaces and invalid match contexts drop the packet. Interface

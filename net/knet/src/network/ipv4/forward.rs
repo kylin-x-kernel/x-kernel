@@ -24,6 +24,18 @@ pub(crate) struct Ipv4ForwardFailure {
 }
 
 impl Ipv4ForwardFailure {
+    /// Returns the reply destination only when the failure permits an ICMP error.
+    pub(crate) fn reply_destination(&self) -> Option<Ipv4Address> {
+        self.icmp_error?;
+        Some(
+            Ipv4Header::parse_header_only(
+                self.packet.network_packet().expect("validated IPv4 packet"),
+            )
+            .expect("validated IPv4 header")
+            .src_addr(),
+        )
+    }
+
     /// Builds a permitted ICMP error with a route-selected local source address.
     pub(crate) fn icmp_reply(&self, source: Ipv4Address) -> Option<Vec<u8>> {
         process::build_icmpv4_error_packet_from(
@@ -66,6 +78,19 @@ impl Ipv4ForwardInput {
             return None;
         }
         Some(Self(packet))
+    }
+
+    pub(crate) fn destination(&self) -> Ipv4Address {
+        Ipv4Header::parse_header_only(self.0.network_packet().expect("validated IPv4 packet"))
+            .expect("validated IPv4 header")
+            .dst_addr()
+    }
+
+    pub(crate) fn discard(self) -> Ipv4ForwardFailure {
+        Ipv4ForwardFailure {
+            packet: self.0,
+            icmp_error: None,
+        }
     }
 
     pub(crate) fn no_route(self) -> Ipv4ForwardFailure {

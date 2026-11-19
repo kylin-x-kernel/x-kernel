@@ -974,3 +974,56 @@ fn configured_gateway_must_be_on_device_subnet() {
             .all(|route| !route.is_configured())
     );
 }
+
+#[def_test]
+fn forwarding_route_preserves_a_remote_source_and_selects_the_gateway() {
+    let mut router = Router::new();
+    let dev = router
+        .add_device(
+            KBox::new(FailingRxDevice {
+                link: LoopbackDevice::new(),
+                packet: None,
+                up: true,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+    router
+        .add_ipv4_addr(
+            dev,
+            Ipv4AddrEntry {
+                addr: valid_ipv4_cidr(Ipv4Address::new(192, 0, 2, 1), 24),
+                scope: ROUTE_SCOPE_UNIVERSE,
+                broadcast: None,
+                no_prefix_route: false,
+                label: None,
+            },
+        )
+        .unwrap();
+    let destination = Ipv4Address::new(203, 0, 113, 9);
+    let gateway = Ipv4Address::new(192, 0, 2, 254);
+    router
+        .add_route_rule(Rule::new(
+            valid_ipv4_cidr(Ipv4Address::new(203, 0, 113, 0), 24).into(),
+            Some(gateway.into()),
+            dev,
+            Ipv4Address::new(192, 0, 2, 1).into(),
+        ))
+        .unwrap();
+    let source = Ipv4Address::new(198, 51, 100, 7);
+    let bytes =
+        ipv4::build_ipv4_packet(source, destination, ipv4::PROTOCOL_UDP, 64, &[0; 8]).unwrap();
+    let original = PacketBuf::from_ip_packet_vec(7, bytes, PacketOwner::DeviceRx);
+    let forward_input = |mut packet| {
+        ipv4::validate_input_packet(&mut packet).unwrap();
+        Ipv4ForwardInput::from_validated(packet).unwrap()
+    };
+    let (prepared, route) = router
+        .prepare_ipv4_forward(forward_input(original.clone()))
+        .unwrap();
+    assert_eq!(route.device, dev);
+    assert_eq!(route.next_hop, gateway);
+    let header = Ipv4Header::parse_input(prepared.packet().network_packet().unwrap()).unwrap();
+    assert_eq!(header.src_addr(), source);
+    assert_eq!(header.bytes()[8], 63);
+}
