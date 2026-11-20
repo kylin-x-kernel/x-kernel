@@ -8,14 +8,17 @@ use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
 use core::{ffi::CStr, iter};
 
 use filemap::{PrivateFileViewSpec, new_file_private_vma};
-use kcred::Cred;
+use kcred::{Cred, ExecIds, ExecSecurity, FileCapabilities, SECURITY_CAPABILITY_XATTR};
 use kernel_elf_parser::{
     AuxEntry, AuxType, ElfError, ElfHeaders, ElfHeadersBuilder, app_stack_region_with_auxv,
 };
-use kerrno::{KError, KResult};
+use kerrno::{KError, KResult, LinuxError};
 use khal::paging::{MappingFlags, PageSize};
 use ksync::{Mutex, static_lock};
-use kvfs::{Filename, LookupFlags, LookupIntent, Path, Permission, VfsFile, dentry_open};
+use kvfs::{
+    Filename, LookupFlags, LookupIntent, MountFlags, NodePermission, NodeType, Path, Permission,
+    VfsError, VfsFile, XattrName, dentry_open,
+};
 use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr};
 use memspace::{MmSpace, VmRuntimeRef};
 use ouroboros::self_referencing;
@@ -113,12 +116,35 @@ impl ExecSource {
     }
 }
 
+/// Exec-time facts the loader cannot observe without a current user thread.
+///
+/// `ksyscall` samples them on the calling thread; the loader's own unit tests
+/// and kernel-side callers use [`ExecContext::default`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExecContext {
+    /// Whether `no_new_privs` leaves the set-ID identity change available.
+    pub ids_allowed: bool,
+    /// Whether another process shares the caller's filesystem context.
+    pub fs_shared: bool,
+}
+
+impl Default for ExecContext {
+    fn default() -> Self {
+        Self {
+            ids_allowed: true,
+            fs_shared: false,
+        }
+    }
+}
+
 /// Owned exec request before executable resolution.
 pub struct ExecRequest {
     source: ExecSource,
     args: Vec<String>,
     envs: Vec<String>,
     cred: Arc<Cred>,
+    /// Whether `no_new_privs` leaves the set-ID sample available.
+    ids_allowed: bool,
 }
 
 impl ExecRequest {
@@ -134,6 +160,7 @@ impl ExecRequest {
             args,
             envs,
             cred,
+            ids_allowed: true,
         }
     }
 
@@ -159,6 +186,7 @@ impl ExecRequest {
             args,
             envs,
             cred,
+            ids_allowed: true,
         }
     }
 
@@ -177,6 +205,7 @@ impl ExecRequest {
             args,
             envs,
             cred,
+            ids_allowed: true,
         }
     }
 
@@ -196,7 +225,14 @@ impl ExecRequest {
             args,
             envs,
             cred,
+            ids_allowed: true,
         }
+    }
+
+    /// Records whether `no_new_privs` permits the set-ID sample.
+    pub fn with_ids_allowed(mut self, allowed: bool) -> Self {
+        self.ids_allowed = allowed;
+        self
     }
 
     /// Returns the requested executable source.
@@ -242,6 +278,7 @@ impl ExecRequest {
             args: self.args,
             envs: self.envs,
             cred: self.cred,
+            ids_allowed: self.ids_allowed,
         })
     }
 }
@@ -254,6 +291,7 @@ pub struct BinPrm {
     args: Vec<String>,
     envs: Vec<String>,
     cred: Arc<Cred>,
+    ids_allowed: bool,
 }
 
 impl BinPrm {
@@ -269,6 +307,12 @@ impl BinPrm {
 
     fn cred(&self) -> &Arc<Cred> {
         &self.cred
+    }
+
+    /// Returns whether the caller's `no_new_privs` state allowed the set-ID
+    /// sample.
+    pub(crate) fn ids_allowed(&self) -> bool {
+        self.ids_allowed
     }
 
     /// Returns the display path used for argv/script reconstruction.
@@ -303,6 +347,18 @@ pub struct PreparedExecImage {
     auxv: Vec<u8>,
     entry: VirtAddr,
     user_sp: VirtAddr,
+    /// Security metadata sampled from the final image before the admission
+    /// guard is taken; sampling reads the attribute store and must not run
+    /// while the process is marked in-exec.
+    security: ExecSecurity,
+    /// Pre-exec credential snapshot the transition preview runs on.
+    cred: Arc<Cred>,
+    args: Vec<String>,
+    envs: Vec<String>,
+    /// Display path recorded as `AT_EXECFN`.
+    execfn: String,
+    /// Context the current vectors were built for, if any.
+    built_context: Option<ExecContext>,
     #[cfg(unittest)]
     partial_probe: Option<PartialInstallProbe>,
 }
@@ -354,6 +410,41 @@ impl PreparedExecImage {
     /// backing file alive independently of the ELF cache.
     pub fn executable_file(&self) -> Arc<VfsFile> {
         self.executable.cache_entry.borrow_file().clone()
+    }
+
+    /// Rebuilds the initial stack and vectors under the exec admission guard.
+    ///
+    /// The security metadata was sampled before the guard (the attribute store
+    /// may sleep). Only the filesystem-sharing sample is taken from `context`,
+    /// and it is the one the credential commit applies, so `AT_SECURE`,
+    /// `AT_EUID`/`AT_EGID` and the installed credentials come from one
+    /// transition preview. The caller commits the returned [`ExecSecurity`].
+    pub fn finalize_stack(&mut self, context: ExecContext) -> KResult<ExecSecurity> {
+        if self.built_context == Some(context) {
+            return Ok(self.security);
+        }
+        let security = self.security;
+        let mut preview = self.cred.prepare();
+        let secure_exec =
+            preview.apply_exec_with_security(!context.ids_allowed, context.fs_shared, security)?;
+        let published_ids = ExecIds {
+            euid: preview.euid(),
+            egid: preview.egid(),
+        };
+        let auxv = initial_aux_vector(
+            &self.executable.image,
+            &self.layout,
+            &self.cred,
+            Some(published_ids),
+            secure_exec,
+        )?;
+        let (user_sp, stack_data, auxv_bytes) =
+            prepare_initial_stack(&self.args, &self.envs, &auxv, &self.execfn)?;
+        self.user_sp = user_sp;
+        self.stack_data = stack_data;
+        self.auxv = auxv_bytes;
+        self.built_context = Some(context);
+        Ok(security)
     }
 
     /// Returns the auxiliary vector in `/proc/<pid>/auxv` wire form.
@@ -451,6 +542,8 @@ fn map_elf_error(err: ElfError) -> KError {
 #[self_referencing]
 struct ElfCacheEntry {
     file: Arc<VfsFile>,
+    /// Content generation observed when these headers were parsed.
+    generation: u64,
     data: Vec<u8>,
     #[borrows(data)]
     #[covariant]
@@ -459,11 +552,12 @@ struct ElfCacheEntry {
 
 impl ElfCacheEntry {
     fn load_file(file: Arc<VfsFile>) -> KResult<Result<Self, Vec<u8>>> {
+        let generation = file.path().inode().content_generation();
         let initial_size = usize::try_from(file.size().min(ELF_HEADER_READ_SIZE as u64))
             .map_err(|_| KError::InvalidExecutable)?;
         let mut data = vec![0; initial_size];
         read_exact_at(&file, &mut data, 0)?;
-        match ElfCacheEntry::try_new_or_recover::<KError>(file.clone(), data, |data| {
+        match ElfCacheEntry::try_new_or_recover::<KError>(file.clone(), generation, data, |data| {
             let builder = ElfHeadersBuilder::new(data).map_err(map_elf_error)?;
             let range = builder.ph_range().map_err(map_elf_error)?;
             if range.end > file.size() {
@@ -513,7 +607,7 @@ fn read_exact_at(file: &VfsFile, output: &mut [u8], offset: u64) -> KResult {
 }
 
 struct ElfLoader(LruCache<Arc<ElfCacheEntry>, 32>);
-type CacheProbeResult = Result<(), Vec<u8>>;
+type CacheEntryResult = Result<Arc<ElfCacheEntry>, Vec<u8>>;
 type PreparedImageResult = Result<PreparedExecImage, (BinPrm, Vec<u8>)>;
 
 impl ElfLoader {
@@ -521,33 +615,40 @@ impl ElfLoader {
         Self(LruCache::new())
     }
 
-    fn access_cached(&mut self, loc: &Path) -> bool {
-        if !self
-            .0
-            .access(|entry| entry.borrow_file().path().ptr_eq(loc))
-        {
-            return false;
-        }
-        true
-    }
-
-    fn cached_entry(&self, loc: &Path) -> Option<Arc<ElfCacheEntry>> {
-        self.0
-            .items()
-            .find(|entry| entry.borrow_file().path().ptr_eq(loc))
-            .cloned()
-    }
-
-    fn ensure_cached(&mut self, file: Arc<VfsFile>) -> KResult<CacheProbeResult> {
-        if !self.access_cached(file.path()) {
-            match ElfCacheEntry::load_file(file)? {
+    /// Returns the parsed entry for `file` at its current content generation.
+    ///
+    /// A writer can advance the generation between the probe, the header read
+    /// and the lookup. Reload on a mismatch and only fail after repeated
+    /// changes, so exec runs either a coherent generation or fails closed
+    /// instead of mixing old headers with new bytes.
+    fn load_entry(&mut self, file: Arc<VfsFile>) -> KResult<CacheEntryResult> {
+        for _ in 0..4 {
+            let generation = file.path().inode().content_generation();
+            let path = file.path();
+            let mut hit = None;
+            if self.0.access(|entry| {
+                let matches = entry.borrow_file().path().ptr_eq(path)
+                    && *entry.borrow_generation() == generation;
+                if matches {
+                    hit = Some(entry.clone());
+                }
+                matches
+            }) && let Some(entry) = hit
+            {
+                return Ok(Ok(entry));
+            }
+            match ElfCacheEntry::load_file(file.clone())? {
                 Ok(entry) => {
-                    self.0.put(Arc::new(entry));
+                    let entry = Arc::new(entry);
+                    if *entry.borrow_generation() == file.path().inode().content_generation() {
+                        self.0.put(entry.clone());
+                        return Ok(Ok(entry));
+                    }
                 }
                 Err(data) => return Ok(Err(data)),
             }
         }
-        Ok(Ok(()))
+        Err(KError::InvalidExecutable)
     }
 
     fn interp_path(entry: &ElfCacheEntry) -> KResult<Option<String>> {
@@ -591,14 +692,10 @@ impl ElfLoader {
         original_execfn: Option<&str>,
     ) -> KResult<PreparedImageResult> {
         let mut loader = ELF_LOADER.lock();
-        match loader.ensure_cached(binprm.executable().clone())? {
-            Ok(_) => {}
+        let executable_entry = match loader.load_entry(binprm.executable().clone())? {
+            Ok(entry) => entry,
             Err(data) => return Ok(Err((binprm, data))),
-        }
-
-        let executable_entry = loader
-            .cached_entry(binprm.location())
-            .ok_or(KError::InvalidExecutable)?;
+        };
         let interpreter_path = Self::interp_path(&executable_entry)?;
         let interpreter_entry = if let Some(ldso) = interpreter_path {
             debug!("Loading dynamic linker: {ldso}");
@@ -613,12 +710,8 @@ impl ElfLoader {
             )?;
             location.permission(Permission::MAY_EXEC, binprm.cred())?;
             let file = open_exec_file(&location, binprm.cred().clone())?;
-            match loader.ensure_cached(file.clone())? {
-                Ok(_) => Some(
-                    loader
-                        .cached_entry(file.path())
-                        .ok_or(KError::InvalidExecutable)?,
-                ),
+            match loader.load_entry(file)? {
+                Ok(entry) => Some(entry),
                 Err(_) => return Err(KError::InvalidExecutable),
             }
         } else {
@@ -633,24 +726,35 @@ impl ElfLoader {
             interpreter.as_ref().map(|interpreter| &interpreter.image),
         )?;
         let entry = exec_entry(&executable, interpreter.as_ref(), &layout)?;
-        let auxv = initial_aux_vector(&executable.image, &layout, binprm.cred())?;
-        let (user_sp, stack_data, auxv_bytes) = prepare_initial_stack(
-            binprm.args(),
-            binprm.envs(),
-            &auxv,
-            original_execfn.unwrap_or(binprm.display_path()),
-        )?;
-        Ok(Ok(PreparedExecImage {
+        // Sample the executable's security metadata here, before the exec
+        // admission guard is taken: reading `security.capability` can sleep on
+        // the attribute store, which must not happen while the process is
+        // marked in-exec.
+        let ids_allowed = binprm.ids_allowed();
+        let security = sample_exec_security(binprm.location(), binprm.cred(), ids_allowed)?;
+        let mut prepared = PreparedExecImage {
             executable,
             interpreter,
             layout,
-            stack_data,
-            auxv: auxv_bytes,
+            stack_data: Vec::new(),
+            auxv: Vec::new(),
             entry,
-            user_sp,
+            user_sp: VirtAddr::from_usize(0),
+            security,
+            cred: binprm.cred().clone(),
+            args: binprm.args().to_vec(),
+            envs: binprm.envs().to_vec(),
+            execfn: original_execfn.unwrap_or(binprm.display_path()).to_owned(),
+            built_context: None,
             #[cfg(unittest)]
             partial_probe: None,
-        }))
+        };
+        // Every caller reads a complete image from `prepare_user_app_request`,
+        // including the kernel-side init loader that does not go through
+        // `execve(2)`. The exec path re-finalizes under the admission guard;
+        // `finalize_stack()` skips the rebuild when the context matches.
+        prepared.finalize_stack(ExecContext::default())?;
+        Ok(Ok(prepared))
     }
 }
 
@@ -694,6 +798,8 @@ fn initial_aux_vector(
     image: &ValidatedElfImage,
     layout: &ExecLayoutPlan,
     cred: &Cred,
+    exec_ids: Option<ExecIds>,
+    secure_exec: bool,
 ) -> KResult<Vec<AuxEntry>> {
     let executable_bias = layout.executable_bias();
     let mut auxv = vec![
@@ -720,17 +826,96 @@ fn initial_aux_vector(
     if let Some(interpreter_bias) = layout.interpreter_bias() {
         auxv.push(AuxEntry::new(AuxType::BASE, interpreter_bias));
     }
-    auxv.extend(identity_aux_entries(cred));
+    auxv.extend(identity_aux_entries(cred, exec_ids, secure_exec));
     Ok(auxv)
 }
 
-fn identity_aux_entries(cred: &Cred) -> [AuxEntry; 5] {
-    let is_secure = cred.ruid() != cred.euid() || cred.rgid() != cred.egid();
+/// Samples the final image's set-ID bits, file capabilities and mount flags.
+///
+/// A `nosuid` mount suppresses both elevations. `no_new_privs` (`ids_allowed`
+/// false) only declines the set-ID identity change, as Linux `bprm_fill_uid()`
+/// does; `cap_bprm_creds_from_file()` still reads the file capability set and
+/// relies on the downgrade clamp to prevent growth, which is also what clears
+/// ambient for a capability-bearing image.
+///
+/// The attribute is read through the inode layer without the caller-facing
+/// namespace policy: an exec that holds no capability must still see what the
+/// file grants. A malformed attribute fails the exec with `EINVAL`, matching
+/// `get_vfs_caps_from_disk()`, while an absent attribute, one owned by a
+/// foreign user namespace, or a filesystem without extended attributes simply
+/// carries no capabilities.
+///
+/// The caller samples the *resolved* image, so a script contributes its
+/// interpreter's bits and never its own (Linux ignores set-ID bits on scripts).
+fn sample_exec_security(location: &Path, cred: &Cred, ids_allowed: bool) -> KResult<ExecSecurity> {
+    if location.mount().flags().contains(MountFlags::NOSUID) {
+        return Ok(ExecSecurity::NONE);
+    }
+    // Sample mode, owner and the capability attribute under the same per-inode
+    // serialization a concurrent revoke/`setxattr` takes, so the executed
+    // image's security metadata cannot mix two generations.
+    let inode = location.inode();
+    let _privilege_guard = inode.lock_privileges();
+    let metadata = location.metadata();
+    if metadata.mode.node_type() != NodeType::RegularFile {
+        return Ok(ExecSecurity::NONE);
+    }
+    let permission = metadata.mode.permission();
+    let set_uid = ids_allowed && permission.contains(NodePermission::SET_UID);
+    // Set-GID only elevates an executable whose group-execute bit is set;
+    // without it the bit is Linux's mandatory-locking mark.
+    let set_gid = ids_allowed
+        && permission.contains(NodePermission::SET_GID)
+        && permission.contains(NodePermission::GROUP_EXEC);
+    let ids = (set_uid || set_gid).then_some(ExecIds {
+        euid: if set_uid { metadata.uid } else { cred.euid() },
+        egid: if set_gid { metadata.gid } else { cred.egid() },
+    });
+    if !location.inode().has_extended_attributes() {
+        return Ok(ExecSecurity {
+            ids,
+            file_caps: None,
+        });
+    }
+    let file_caps = match XattrName::new(SECURITY_CAPABILITY_XATTR.as_bytes().to_vec()) {
+        Ok(name) => match location.get_xattr_unchecked(&name) {
+            // A version 3 attribute owned by a foreign user namespace does
+            // not apply to this kernel's only namespace; Linux treats it as
+            // absent. A malformed attribute is still `EINVAL`.
+            Ok(value) => match FileCapabilities::parse(&value) {
+                Ok(caps) => Some(caps),
+                Err(KError::OperationNotPermitted) => None,
+                Err(error) => return Err(error),
+            },
+            Err(error)
+                if error == VfsError::from(LinuxError::ENODATA)
+                    || error == VfsError::OperationNotSupported =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        },
+        Err(_) => None,
+    };
+    Ok(ExecSecurity { ids, file_caps })
+}
+
+fn identity_aux_entries(
+    cred: &Cred,
+    exec_ids: Option<ExecIds>,
+    secure_exec: bool,
+) -> [AuxEntry; 5] {
+    // A set-ID exec replaces the effective IDs, so the vector must publish the
+    // post-exec identity. `secure_exec` also covers elevation an UID mismatch
+    // cannot express, such as a file capability set with the effective flag.
+    let euid = exec_ids.map_or_else(|| cred.euid(), |ids| ids.euid);
+    let egid = exec_ids.map_or_else(|| cred.egid(), |ids| ids.egid);
+    let is_secure = secure_exec || cred.ruid() != euid || cred.rgid() != egid;
     [
         AuxEntry::new(AuxType::UID, cred.ruid() as usize),
-        AuxEntry::new(AuxType::EUID, cred.euid() as usize),
+        AuxEntry::new(AuxType::EUID, euid as usize),
         AuxEntry::new(AuxType::GID, cred.rgid() as usize),
-        AuxEntry::new(AuxType::EGID, cred.egid() as usize),
+        AuxEntry::new(AuxType::EGID, egid as usize),
         AuxEntry::new(AuxType::SECURE, usize::from(is_secure)),
     ]
 }
@@ -827,7 +1012,8 @@ pub fn prepare_user_app_request(request: ExecRequest) -> KResult<PreparedExecIma
                     new_args,
                     binprm.envs().to_vec(),
                     binprm.cred().clone(),
-                );
+                )
+                .with_ids_allowed(binprm.ids_allowed());
                 script_depth += 1;
             }
         }

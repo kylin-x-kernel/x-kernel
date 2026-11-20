@@ -382,9 +382,12 @@ namespace with a root-number fallback for root-keyed sources such as
 in `process/kns/docs/design.md`).
 `PR_SET_NO_NEW_PRIVS`
 records the flag on the calling thread and `PR_GET_NO_NEW_PRIVS` reports it
-back; seccomp install consults it. Exec models only the no-file-capability
-credential transition: ordinary non-root exec clears effective/permitted, while
-privileged root reconstructs permitted from the bounding/inheritable sets. With
+back; seccomp install consults it. Exec samples the executable's set-ID bits and
+`security.capability` attribute unless `no_new_privs` or a `nosuid` mount
+suppresses them, installs the resulting identity, and bounds file permitted
+capabilities by the capability bounding set; ordinary non-root exec clears
+effective/permitted, while privileged root reconstructs permitted from the
+bounding/inheritable sets. With
 `no_new_privs` or a filesystem context shared with another process, a growing
 reconstruction or a group identity change enters the downgrade: a growing set is
 intersected with the pre-exec permitted set and effective/group IDs are reset to
@@ -530,15 +533,33 @@ arguments, then delegates to the credential model: `IS_SET` reports membership,
 `RAISE` requires the capability in both permitted and inheritable and
 `SECURE_NO_CAP_AMBIENT_RAISE` clear, and `LOWER`/`CLEAR_ALL` remove membership.
 A successful `capset` masks ambient with the new permitted and inheritable sets.
-File capabilities and setuid/setgid executable transitions are not implemented,
-so `capget` never invents executable-derived privilege. Exec still applies
-Linux's no-file-capability rule: permitted starts empty, privileged root
-reconstructs it from the bounding and inheritable sets when `SECURE_NOROOT` is
-clear and the real or effective UID is 0; ambient is merged into permitted after
-the growth clamp and supplies effective when privileged root does not. An
-effective GID outside the old filesystem/supplementary groups clears ambient.
+The loader samples the resolved image before the transition: the set-ID bits
+that the mode grants (set-GID only with group-execute), the decoded
+`security.capability` attribute, and the mount's `nosuid` flag. `nosuid`
+suppresses both elevations; `no_new_privs` declines only the set-ID identity
+change, matching `bprm_fill_uid()`, while `cap_bprm_creds_from_file()` still
+reads the file capability set and leans on the downgrade clamp. A malformed
+attribute fails the exec with `EINVAL`; an absent one, or a filesystem without
+extended attributes, carries none. `ExecSecurity` feeds
+`apply_exec_with_security`. After `Process::begin_exec()` admits the transition,
+`ksyscall` samples the guard's cross-process sharing state together with the
+thread's `no_new_privs` and has the loader rebuild the vectors
+(`PreparedExecImage::finalize_stack`), which previews the transition on a clone:
+`AT_UID`/`AT_EUID`/`AT_GID`/`AT_EGID` publish the identity after any downgrade
+and `AT_SECURE` is set only when privilege was actually gained. The transition
+is then applied to the real credential before the address space is replaced, so
+an effective file capability set the bounding set cannot deliver still fails the
+exec with `EPERM`; that prepared credential is committed after the image
+installs, so the published identity and the installed credentials come from one
+sample and one computation. Without file
+capabilities the transition keeps Linux's no-file-capability rule: permitted
+starts empty, privileged root reconstructs it from the bounding and inheritable
+sets when `SECURE_NOROOT` is clear and the real or effective UID is 0; ambient is
+merged into permitted after the growth clamp and supplies effective when
+privileged root does not. An identity change, an effective GID outside the old
+filesystem/supplementary groups, or a file capability set clears ambient.
 When `no_new_privs` is set or another process shares the caller's filesystem
-context and reconstruction would grow permitted or the group identity changed,
+context and reconstruction would grow permitted or the identity changed,
 a growing permitted set is intersected with the pre-exec set; effective/group
 IDs reset to real IDs when `no_new_privs` is set or the pre-exec credential
 lacks effective `CAP_SETUID`.

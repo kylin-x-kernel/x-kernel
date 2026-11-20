@@ -48,6 +48,6 @@ pub use filemap::PrivateFileViewSpec;
 pub use loader::PartialInstallProbe;
 
 pub use self::loader::{
-    BinPrm, ExecRequest, ExecSource, PreparedExecImage, clear_elf_cache, load_prepared_user_app,
-    prepare_user_app_request,
+    BinPrm, ExecContext, ExecRequest, ExecSource, PreparedExecImage, clear_elf_cache,
+    load_prepared_user_app, prepare_user_app_request,
 };

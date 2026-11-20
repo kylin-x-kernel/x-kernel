@@ -18,7 +18,7 @@ use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult, LinuxError};
 use kexec::{
-    ExecRequest, PreparedExecImage, PrivateFileViewSpec, load_prepared_user_app,
+    ExecContext, ExecRequest, PreparedExecImage, PrivateFileViewSpec, load_prepared_user_app,
     prepare_user_app_request,
 };
 use khal::uspace::UserContext;
@@ -156,7 +156,8 @@ pub(crate) fn sys_execveat(
         // this is what makes `fexecve` on an anonymous `memfd`, or on a file
         // renamed after opening, execute the opened image.
         let entry_name = file.path().name();
-        let request = ExecRequest::from_file(file, display.clone(), args, envs, cred);
+        let request = ExecRequest::from_file(file, display.clone(), args, envs, cred)
+            .with_ids_allowed(!kprocess::current_user_thread().no_new_privileges());
         return exec_request(
             uctx,
             request,
@@ -265,7 +266,10 @@ fn exec_resolved(
         .map(|path| path.to_string())
         .unwrap_or_else(|_| display_path.clone());
     let entry_name = loc.name();
-    let request = ExecRequest::from_resolved_with_display(loc, display_path, args, envs, cred);
+    // The loader samples the resolved image itself, after script resolution:
+    // a script contributes its interpreter's bits, never its own.
+    let request = ExecRequest::from_resolved_with_display(loc, display_path, args, envs, cred)
+        .with_ids_allowed(!kprocess::current_user_thread().no_new_privileges());
     exec_request(
         uctx,
         request,
@@ -276,17 +280,28 @@ fn exec_resolved(
     )
 }
 
-/// Applies the post-exec credential transition while the fs admission is live.
+/// Samples the exec-time facts under the admission guard and rebuilds the
+/// initial stack and vectors from them.
 ///
-/// The admission guard must remain alive across the transition so no
-/// `CLONE_FS` child can attach between the unsafe-share sample and commit.
-fn commit_exec_credentials(thread: &kprocess::CurrentThread, exec_fs: &kprocess::ExecFsGuard) {
+/// The returned credential carries the same sample the vectors were built
+/// from, so `AT_SECURE`/`AT_EUID`/`AT_EGID` cannot disagree with the
+/// credentials committed after the image installs.
+fn finalize_exec_stack(
+    prepared: &mut PreparedExecImage,
+    thread: &kprocess::CurrentThread,
+    exec_fs: &kprocess::ExecFsGuard,
+) -> KResult<kcred::Cred> {
+    let context = ExecContext {
+        ids_allowed: !thread.no_new_privileges(),
+        fs_shared: exec_fs.is_shared_with_other_process(),
+    };
+    let security = prepared.finalize_stack(context)?;
+    // Apply the transition to the real credential before the address space is
+    // replaced: an effective file capability set that cannot be delivered must
+    // fail the exec with `EPERM` while an errno is still returnable.
     let mut exec_cred = thread.prepare_creds();
-    exec_cred.apply_exec(
-        thread.no_new_privileges(),
-        exec_fs.is_shared_with_other_process(),
-    );
-    thread.commit_creds(exec_cred);
+    exec_cred.apply_exec_with_security(!context.ids_allowed, context.fs_shared, security)?;
+    Ok(exec_cred)
 }
 
 /// Loads the prepared image into the process address space, registering its
@@ -318,6 +333,23 @@ fn load_exec_image(
     })
 }
 
+/// Loads and validates the new image before the thread group is torn down.
+///
+/// The initial stack and auxiliary vector are rebuilt later, under the exec
+/// admission guard, so they agree with the committed credentials.
+fn prepare_exec_image(
+    request: ExecRequest,
+    #[cfg(unittest)] probe: Option<&mut lifecycle_tests::ExecProbe>,
+) -> KResult<PreparedExecImage> {
+    let prepared = prepare_user_app_request(request)?;
+    #[cfg(unittest)]
+    let prepared = match probe {
+        Some(probe) => probe.prepare_image_probe(prepared)?,
+        None => prepared,
+    };
+    Ok(prepared)
+}
+
 /// Executes a prepared request by swapping the caller's address space and
 /// register context for the new program.
 ///
@@ -340,12 +372,11 @@ fn exec_request(
     let process = thread.process().clone();
 
     let args = request.args().to_vec();
-    let prepared = prepare_user_app_request(request)?;
-    #[cfg(unittest)]
-    let prepared = match probe.as_deref() {
-        Some(probe) => probe.prepare_image_probe(prepared)?,
-        None => prepared,
-    };
+    let mut prepared = prepare_exec_image(
+        request,
+        #[cfg(unittest)]
+        probe.as_deref_mut(),
+    )?;
     // Everything that can still fail with a plain errno must run before the
     // first irreversible step. `de_thread()` is that step: once the siblings
     // are gone the old program cannot be resumed, so allocate the new address
@@ -380,6 +411,8 @@ fn exec_request(
     // child from attaching after the unsafe-share sample. The guard also
     // clears `in_exec` on every error path below.
     let exec_fs = process.begin_exec()?;
+    // One guard-time sample drives both the auxiliary vector and the commit.
+    let exec_cred = finalize_exec_stack(&mut prepared, &thread, &exec_fs)?;
     // Pin the backing executable for `/proc/<pid>/exe` before `prepared` is
     // consumed by installation.
     let exe_file = prepared.executable_file();
@@ -468,7 +501,7 @@ fn exec_request(
             return Ok(0);
         }
     };
-    commit_exec_credentials(&thread, &exec_fs);
+    thread.commit_creds(exec_cred);
     #[cfg(feature = "tee")]
     thread.reset_tee_session_after_exec();
 

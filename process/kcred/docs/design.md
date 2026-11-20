@@ -36,6 +36,7 @@ This document covers the entire crate, including its namespace module and tests.
 | `src/lib.rs` | Root re-exports and `INITIAL_CRED` / `initial_cred` |
 | `src/credentials/mod.rs` | Private credential module and type re-exports |
 | `src/credentials/caps.rs` | `CapSet`, `CapSets`, capability constants, Linux transition validation |
+| `src/credentials/file_caps.rs` | `security.capability` wire codec (`FileCapabilities`, revision and flag constants) and write validation |
 | `src/credentials/model.rs` | `Cred` storage, queries, capability and ID transitions |
 | `src/credentials/user.rs`, `src/credentials/group.rs` | `Uid` and `Gid`, both `u32` aliases, `INVALID_UID`/`INVALID_GID` sentinels, and `is_valid_uid`/`is_valid_gid` predicates |
 | `src/credentials/securebits.rs` | Crate-private `SecureBits` bitflags |
@@ -46,9 +47,11 @@ This document covers the entire crate, including its namespace module and tests.
 `credentials` and `namespace` are private modules. The root exports `Cred`,
 `Uid`, `Gid`, `INVALID_UID`, `INVALID_GID`, `is_valid_uid`, `is_valid_gid`,
 `CapSet`, `CapSets`, the `CAP_*` constants including `CAP_LAST_CAP` and
-`CAP_FS_MASK`, `NamespaceId`, `UserNamespace`, `initial_cred`, and
-`initial_user_namespace`; there are no publicly named submodules or exported
-macros. Securebits themselves remain crate-private and are exposed to user space
+`CAP_FS_MASK`, `FileCapabilities`, `SECURITY_CAPABILITY_XATTR`, the
+`VFS_CAP_REVISION_*` and `VFS_CAP_FLAGS_EFFECTIVE` constants, `ExecIds`,
+`ExecSecurity`, `PtraceAccessMode`, `NamespaceId`, `UserNamespace`,
+`initial_cred`, and `initial_user_namespace`; there are no publicly named
+submodules or exported macros. Securebits themselves remain crate-private and are exposed to user space
 only through the `prctl(2)` adapter.
 
 The crate is `no_std` and always uses `alloc` for `Arc` and `Vec`.
@@ -225,29 +228,54 @@ or a privileged-path decision.
   the set without a capability check. `ksyscall` validates `prctl(2)` argument
   width and unused arguments before calling these methods.
 - `keep_caps_enable`/`keep_caps_disable` test `KEEP_CAPS_LOCKED` before changing
-  `KEEP_CAPS`. `apply_exec(no_new_privs, fs_shared_with_other_process)` resets
-  saved/filesystem IDs to the final effective IDs and applies Linux's
-  no-file-capability exec transition: permitted starts empty, privileged root
-  reconstructs it from the bounding and inheritable sets when `SECURE_NOROOT`
-  is clear and the real or effective UID is 0, and effective is that permitted
-  set only when the effective UID was 0 before any downgrade. Ambient is then
-  merged into permitted after the growth clamp; when privileged root does not
-  grant effective, ambient itself becomes effective. The transition clears
-  ambient when the prospective effective GID is outside the old
-  filesystem/supplementary group set, mirroring Linux's group half of
-  `id_changed`; that condition is reachable because `setfsgid` can diverge from
-  `egid` even though exec changes no ID. Linux's downgrade path runs when
-  permitted would grow or the group identity changed, under either
-  `no_new_privs` or cross-process `CLONE_FS` sharing. It intersects a growing
-  set with the pre-exec permitted set, and resets effective/group IDs to the
-  real IDs when `no_new_privs` is set or the pre-exec credential lacks effective
-  `CAP_SETUID`. A pre-existing effective/real-UID mismatch alone is not a
-  trigger, because exec does not change euid. It clears `KEEP_CAPS` even when
-  locked, preserves every other securebit and the inheritable/bounding sets,
-  and clears ambient when the group check fires. Adding set-ID executables or
-  file capabilities must model their ID changes and ambient clearing as well.
-  It does not inspect executable metadata. Lock insertion is currently
-  test-only.
+  `KEEP_CAPS`. `apply_exec(no_new_privs, fs_shared_with_other_process)` is the
+  no-metadata spelling of `apply_exec_with_security(..., ExecSecurity::NONE)`.
+  `ExecSecurity` carries what `execve(2)` sampled from the image: `ids`, the
+  set-ID identities its mode bits request, and `file_caps`, the decoded
+  `security.capability` sets. The transition installs `ids` first, then resets
+  saved/filesystem IDs to the final effective IDs and computes the sets.
+  Linux `handle_privileged_root()` classifies by the post-fill IDs: a non-real
+  caller elevated to effective UID 0 by a set-UID file whose capability
+  attribute exists (`__is_suid`) keeps the file formula — the file's permitted
+  set bounded by the bounding set, unioned with the intersection of the old and
+  file inheritable sets — and the file's effective flag. A real-root caller, or
+  an effective-root caller whose file has no capability attribute, instead
+  keeps the root reconstruction (bounding set plus the whole old inheritable
+  set) and gains the effective set with effective UID 0; with a file attribute
+  present it also keeps the file's effective flag when a set-UID bit moves the
+  effective UID off zero. Without reconstruction or file capabilities, the
+  permitted set starts empty.
+  An effective file set the file formula cannot deliver fails the transition
+  with `OperationNotPermitted`, mirroring `bprm_caps_from_vfs_caps()`; the check
+  never consults the root reconstruction.
+  Ambient is merged into permitted after the growth clamp and supplies
+  effective when the other rules do not. It is cleared when Linux's set-ID
+  condition holds — the post-fill effective UID or GID differs from the
+  pre-exec real UID or GID — or when the file carries capabilities. Group
+  membership does not exempt a set-GID target, and a pre-existing euid/egid
+  mismatch already satisfies the condition.
+  `apply_exec_with_security()` returns the `bprm->secureexec` flag or
+  `OperationNotPermitted` when an effective file set cannot be delivered, so
+  its callers must treat the result as fallible.
+  Linux's downgrade path runs when permitted would grow or the set-ID condition
+  holds, under either `no_new_privs` or cross-process `CLONE_FS` sharing. It always intersects the prospective permitted set with the pre-exec
+  permitted set, and resets effective/group IDs to the real IDs when
+  `no_new_privs` is set or the pre-exec credential lacks effective `CAP_SETUID`
+  — the reset does not depend on the permitted set growing, so a set-UID or
+  set-GID file under a shared filesystem context is normalized even when it
+  grants no capability. `no_new_privs` makes the loader decline only the
+  set-ID identity change, as Linux `bprm_fill_uid()` does; the file capability
+  set is still sampled and applied, and the clamp above keeps it from growing
+  the permitted set (which is also what clears ambient for a
+  capability-bearing image). The transition clears
+  `KEEP_CAPS` even when locked and preserves every other securebit plus the
+  inheritable/bounding sets. Its return value is `bprm->secureexec`, sampled
+  like Linux: the set-ID condition holds, or a non-real-root caller's exec
+  either receives an effective set or ends with a permitted set wider than the
+  new ambient set. A set-ID bit naming the caller's own identity is not an
+  elevated exec on its own, and a real-root caller never gets the flag from
+  the capability rules.
+  Lock insertion is currently test-only.
 
 ## Execution context and concurrency
 
@@ -281,20 +309,18 @@ need them. This trades allocation at replacement time for cheap cloned snapshots
 A relaxed ID counter is sufficient for numeric allocation because namespace
 publication is handled separately by ownership and `Once`.
 
-Capability sets, including ambient, exist, but there are no LSM hooks, file
-capabilities, capability-aware exec elevation, user-ID mappings, idmapped mount
-rules, or setuid/setgid executable handling in this crate. Exec therefore
-models Linux's no-file-capability transition: an ordinary non-root exec clears
-the effective and permitted sets, privileged root reconstructs permitted from
-the bounding and inheritable sets and gains effective only with effective UID 0,
-and ambient is merged into permitted and becomes effective when privileged root
-does not grant the full set. `UserNamespace` is not stored in `Cred`, so
-capability authority is global rather than namespace-scoped.
-`PR_SET_NO_NEW_PRIVS` gates seccomp install and subjects privileged-root
-reconstruction growth and group identity changes to the downgrade path; it
-cannot suppress a nonexistent setuid/file-capability elevation. Set-ID and file-cap
-support must extend the transition, including ambient clearing for every
-identity-changing exec.
+Capability sets, including ambient, exist. The `security.capability` wire format
+and its validation live in `file_caps`; `execve(2)` reads that attribute, the
+executable's set-ID bits and the mount's `nosuid` flag before the transition and
+passes the result as `ExecSecurity`. There are still no LSM hooks, user-ID
+mappings or idmapped mount rules in this crate, so a version 3 file capability
+owned by a foreign namespace is rejected, and set-ID elevation is
+namespace-blind because `UserNamespace` is not stored in `Cred`: capability
+authority remains global rather than namespace-scoped. `PR_SET_NO_NEW_PRIVS`
+gates seccomp install and subjects exec identity changes and capability
+reconstruction to the downgrade path; the loader still samples file
+capabilities under it, because Linux applies them and relies on the clamp. `PR_SET_DUMPABLE` is still a stub, so a
+privileged exec does not lower dumpability.
 Supplementary-group bounds and syscall sentinel decoding belong to `ksyscall`.
 Allocations are infallible API calls and are not mapped to a recoverable
 `NoMemory` result. ID exhaustion is unchecked.

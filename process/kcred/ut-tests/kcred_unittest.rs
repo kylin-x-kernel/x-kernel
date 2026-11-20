@@ -2,15 +2,16 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use kerrno::KError;
 use unittest::def_test;
 
 use crate::{
-    CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_LAST_CAP, CAP_SETPCAP, CAP_SETUID, CAP_SYS_ADMIN,
-    CAP_SYS_NICE, CAP_SYS_PTRACE, CapSet, CapSets, Cred, INVALID_GID, INVALID_UID,
-    PtraceAccessMode, initial_cred,
+    CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_KILL, CAP_LAST_CAP, CAP_NET_RAW, CAP_SETPCAP, CAP_SETUID,
+    CAP_SYS_ADMIN, CAP_SYS_NICE, CAP_SYS_PTRACE, CapSet, CapSets, Cred, ExecIds, ExecSecurity,
+    FileCapabilities, INVALID_GID, INVALID_UID, PtraceAccessMode, VFS_CAP_REVISION_1,
+    VFS_CAP_REVISION_2, VFS_CAP_REVISION_3, initial_cred,
 };
 
 fn cap(capability: u32) -> CapSet {
@@ -151,7 +152,7 @@ fn test_credentials_exec_resets_saved_ids() {
     credentials.set_resgid_unchecked(None, Some(200), Some(300));
     credentials.keep_caps_enable().unwrap();
 
-    credentials.apply_exec(false, false);
+    credentials.apply_exec(false, false).unwrap();
 
     assert_eq!(credentials.ruid(), 1000);
     assert_eq!(credentials.euid(), 2000);
@@ -293,7 +294,7 @@ fn exec_preserves_ambient_capabilities_and_merges_them_into_permitted() {
     credentials.raise_cap_ambient(CAP_CHOWN).unwrap();
     credentials.set_resuid_unchecked(Some(1000), Some(1000), Some(1000));
 
-    credentials.apply_exec(false, false);
+    credentials.apply_exec(false, false).unwrap();
 
     assert_eq!(credentials.cap_ambient(), cap(CAP_CHOWN));
     assert_eq!(
@@ -924,7 +925,7 @@ fn exec_clears_nonroot_capabilities_but_keeps_inheritable() {
     credentials.set_resuid_unchecked(Some(1000), Some(1000), Some(1000));
     credentials.keep_caps_enable().unwrap();
 
-    credentials.apply_exec(false, false);
+    credentials.apply_exec(false, false).unwrap();
 
     assert_eq!(
         credentials.capabilities(),
@@ -948,7 +949,7 @@ fn exec_reconstructs_root_capabilities_from_bounding_and_inheritable() {
         ))
         .unwrap();
 
-    credentials.apply_exec(false, false);
+    credentials.apply_exec(false, false).unwrap();
 
     let expected_permitted = CapSet::FULL
         .without(CAP_SYS_ADMIN)
@@ -972,7 +973,7 @@ fn exec_with_real_root_and_nonroot_effective_uid_keeps_permitted_only() {
     let mut credentials = Cred::root();
     credentials.set_resuid_unchecked(Some(0), Some(1000), Some(1000));
 
-    credentials.apply_exec(false, false);
+    credentials.apply_exec(false, false).unwrap();
 
     assert_eq!(
         credentials.capabilities(),
@@ -985,7 +986,7 @@ fn exec_with_secure_noroot_drops_even_root_capabilities() {
     let mut credentials = Cred::root();
     credentials.set_securebits(0x1).unwrap();
 
-    credentials.apply_exec(false, false);
+    credentials.apply_exec(false, false).unwrap();
 
     assert_eq!(credentials.capabilities(), CapSets::EMPTY);
     assert_eq!(credentials.cap_bounding(), CapSet::FULL);
@@ -996,7 +997,7 @@ fn exec_with_shared_filesystem_does_not_gain_root_capabilities() {
     let mut credentials = Cred::new(1000, 100);
     credentials.set_resuid_unchecked(None, Some(0), Some(0));
 
-    credentials.apply_exec(false, true);
+    credentials.apply_exec(false, true).unwrap();
 
     assert_eq!(credentials.ruid(), 1000);
     assert_eq!(credentials.euid(), 1000);
@@ -1017,7 +1018,7 @@ fn exec_with_shared_filesystem_keeps_effective_id_with_setuid_capability() {
         ))
         .unwrap();
 
-    credentials.apply_exec(false, true);
+    credentials.apply_exec(false, true).unwrap();
 
     assert_eq!(credentials.euid(), 0);
     assert_eq!(credentials.suid(), 0);
@@ -1033,7 +1034,7 @@ fn exec_with_no_new_privs_does_not_regain_dropped_root_capabilities() {
     let mut credentials = Cred::root();
     credentials.set_capabilities(CapSets::EMPTY).unwrap();
 
-    credentials.apply_exec(true, false);
+    credentials.apply_exec(true, false).unwrap();
 
     assert_eq!(credentials.capabilities(), CapSets::EMPTY);
     assert_eq!(credentials.euid(), 0);
@@ -1047,7 +1048,7 @@ fn exec_with_no_new_privs_resets_root_effective_id_and_keeps_old_permitted() {
         .set_capabilities(CapSets::new(CapSet::EMPTY, cap(CAP_CHOWN), CapSet::EMPTY))
         .unwrap();
 
-    credentials.apply_exec(true, false);
+    credentials.apply_exec(true, false).unwrap();
 
     assert_eq!(credentials.euid(), 0);
     assert_eq!(credentials.suid(), 0);
@@ -1059,39 +1060,39 @@ fn exec_with_no_new_privs_resets_root_effective_id_and_keeps_old_permitted() {
 }
 
 #[def_test]
-fn exec_with_no_new_privs_preserves_mismatched_ids_without_capability_gain() {
+fn exec_with_no_new_privs_resets_mismatched_ids() {
     let mut credentials = Cred::new(1000, 100);
     credentials.set_resuid_unchecked(None, Some(2000), Some(3000));
     credentials.set_resgid_unchecked(None, Some(200), Some(300));
 
-    credentials.apply_exec(true, false);
+    credentials.apply_exec(true, false).unwrap();
 
-    // egid 200 equals fsgid 200, so Linux's id_changed group test is false.
-    // With no set-ID executable metadata and no permitted growth, the
-    // pre-existing euid/real-UID mismatch must therefore be left alone.
+    // Linux `__is_setuid()` compares the post-fill effective UID with the
+    // real UID, so the pre-existing user mismatch is already a set-ID
+    // condition and `no_new_privs` normalizes both identities.
     assert_eq!(credentials.ruid(), 1000);
-    assert_eq!(credentials.euid(), 2000);
-    assert_eq!(credentials.suid(), 2000);
-    assert_eq!(credentials.fsuid(), 2000);
+    assert_eq!(credentials.euid(), 1000);
+    assert_eq!(credentials.suid(), 1000);
+    assert_eq!(credentials.fsuid(), 1000);
     assert_eq!(credentials.rgid(), 100);
-    assert_eq!(credentials.egid(), 200);
-    assert_eq!(credentials.sgid(), 200);
-    assert_eq!(credentials.fsgid(), 200);
+    assert_eq!(credentials.egid(), 100);
+    assert_eq!(credentials.sgid(), 100);
+    assert_eq!(credentials.fsgid(), 100);
     assert_eq!(credentials.capabilities(), CapSets::EMPTY);
 }
 
 #[def_test]
-fn exec_with_no_new_privs_resets_ids_when_egid_is_outside_the_group_set() {
+fn exec_with_no_new_privs_resets_a_mismatched_root_identity() {
     let mut credentials = Cred::root();
     credentials.set_resuid_unchecked(Some(0), Some(1000), Some(1000));
     credentials.set_resgid_unchecked(Some(0), Some(0), Some(0));
     assert_eq!(credentials.set_fsgid(1000), 0);
 
-    credentials.apply_exec(true, false);
+    credentials.apply_exec(true, false).unwrap();
 
-    // egid 0 is neither fsgid 1000 nor a supplementary group, so Linux's
-    // id_changed is true even though this exec changes no IDs itself. The
-    // no_new_privs downgrade must reset the effective IDs to the real IDs.
+    // The effective UID differs from the real UID, which is the set-ID
+    // condition even without executable metadata, so `no_new_privs` resets the
+    // effective identity to the real IDs.
     assert_eq!(credentials.ruid(), 0);
     assert_eq!(credentials.euid(), 0);
     assert_eq!(credentials.suid(), 0);
@@ -1100,8 +1101,8 @@ fn exec_with_no_new_privs_resets_ids_when_egid_is_outside_the_group_set() {
     assert_eq!(credentials.egid(), 0);
     assert_eq!(credentials.sgid(), 0);
     assert_eq!(credentials.fsgid(), 0);
-    // The prospective euid was non-zero when effective-set selection ran, so
-    // resetting it to the real root UID does not retroactively grant pE'.
+    // Effective-set selection ran before the reset, so real root does not
+    // retroactively gain pE'.
     assert_eq!(
         credentials.capabilities(),
         CapSets::new(CapSet::EMPTY, CapSet::FULL, CapSet::EMPTY)
@@ -1109,7 +1110,7 @@ fn exec_with_no_new_privs_resets_ids_when_egid_is_outside_the_group_set() {
 }
 
 #[def_test]
-fn exec_clears_ambient_when_egid_is_outside_the_group_set() {
+fn exec_preserves_ambient_when_only_the_filesystem_gid_differs() {
     let mut credentials = Cred::root();
     credentials.set_resuid_unchecked(Some(1000), Some(1000), Some(1000));
     credentials.set_resgid_unchecked(Some(100), Some(100), Some(100));
@@ -1119,17 +1120,17 @@ fn exec_clears_ambient_when_egid_is_outside_the_group_set() {
         .unwrap();
     credentials.raise_cap_ambient(CAP_CHOWN).unwrap();
 
-    credentials.apply_exec(false, false);
+    credentials.apply_exec(false, false).unwrap();
 
-    // Linux treats this identity change as an ambient-clearing exec even
-    // without no_new_privs. The unclamped path otherwise preserves the IDs.
-    assert_eq!(credentials.cap_ambient(), CapSet::EMPTY);
+    // The effective GID equals the real GID; a filesystem-GID divergence is
+    // not a Linux set-ID input, so ambient survives.
+    assert_eq!(credentials.cap_ambient(), cap(CAP_CHOWN));
     assert_eq!(credentials.euid(), 1000);
     assert_eq!(credentials.egid(), 100);
     assert_eq!(credentials.fsgid(), 100);
     assert_eq!(
         credentials.capabilities(),
-        CapSets::new(CapSet::EMPTY, CapSet::EMPTY, cap(CAP_CHOWN))
+        CapSets::new(cap(CAP_CHOWN), cap(CAP_CHOWN), cap(CAP_CHOWN))
     );
 }
 
@@ -1145,10 +1146,10 @@ fn exec_preserves_ambient_when_egid_is_a_supplementary_group() {
         .unwrap();
     credentials.raise_cap_ambient(CAP_CHOWN).unwrap();
 
-    credentials.apply_exec(false, false);
+    credentials.apply_exec(false, false).unwrap();
 
-    // egid 100 is a supplementary group even though fsgid is 200, so Linux's
-    // id_changed is false and the ambient capability survives.
+    // The effective GID equals the real GID, so the set-ID condition is false
+    // and the ambient capability survives.
     assert_eq!(credentials.cap_ambient(), cap(CAP_CHOWN));
     assert_eq!(
         credentials.capabilities(),
@@ -1163,16 +1164,17 @@ fn exec_with_no_new_privs_does_not_promote_root_real_id_to_effective_id() {
     let mut credentials = Cred::root();
     credentials.set_resuid_unchecked(Some(0), Some(1000), Some(1000));
 
-    credentials.apply_exec(true, false);
+    credentials.apply_exec(true, false).unwrap();
 
-    // The prospective permitted set is already FULL, so exec gains no
-    // capabilities and must not rewrite euid/egid from the real IDs.
-    assert_eq!(credentials.euid(), 1000);
-    assert_eq!(credentials.suid(), 1000);
-    assert_eq!(credentials.fsuid(), 1000);
+    // The effective UID differs from the real UID, so `no_new_privs` resets it
+    // to real root even though no permitted capability was gained.
+    assert_eq!(credentials.euid(), 0);
+    assert_eq!(credentials.suid(), 0);
+    assert_eq!(credentials.fsuid(), 0);
     assert_eq!(credentials.egid(), 0);
     assert_eq!(credentials.sgid(), 0);
     assert_eq!(credentials.fsgid(), 0);
+    assert_eq!(credentials.capabilities().effective(), CapSet::EMPTY);
 }
 
 #[def_test]
@@ -1201,4 +1203,669 @@ fn access_credentials_apply_the_linux_effective_set_override() {
     credentials.set_securebits(0x4).unwrap();
     let unfixed_access = credentials.for_access();
     assert_eq!(unfixed_access.capabilities(), credentials.capabilities());
+}
+
+fn file_caps(permitted: CapSet, inheritable: CapSet, effective: bool) -> FileCapabilities {
+    FileCapabilities::new(permitted, inheritable, effective)
+}
+
+#[def_test]
+fn file_capability_attribute_round_trips() {
+    let caps = file_caps(cap(CAP_CHOWN), cap(CAP_SETUID), true);
+    let bytes = caps.to_xattr();
+    assert_eq!(bytes.len(), 20);
+
+    let parsed = FileCapabilities::parse(&bytes).unwrap();
+    assert_eq!(parsed, caps);
+    assert!(parsed.effective());
+    assert_eq!(parsed.permitted(), cap(CAP_CHOWN));
+    assert_eq!(parsed.inheritable(), cap(CAP_SETUID));
+}
+
+#[def_test]
+fn file_capability_attribute_accepts_legacy_revision_one() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&VFS_CAP_REVISION_1.to_le_bytes());
+    bytes.extend_from_slice(&(1u32 << CAP_SYS_ADMIN).to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+
+    let parsed = FileCapabilities::parse(&bytes).unwrap();
+    assert_eq!(parsed.permitted(), cap(CAP_SYS_ADMIN));
+    assert_eq!(parsed.inheritable(), CapSet::EMPTY);
+    assert!(!parsed.effective());
+    // The one-word format is a migration input, never a new write.
+    assert_eq!(
+        FileCapabilities::validate_for_write(&bytes),
+        Err(KError::InvalidInput)
+    );
+}
+
+#[def_test]
+fn file_capability_attribute_rejects_foreign_user_namespace() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&VFS_CAP_REVISION_3.to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 16]);
+    bytes.extend_from_slice(&7u32.to_le_bytes());
+    assert_eq!(
+        FileCapabilities::parse(&bytes),
+        Err(KError::OperationNotPermitted)
+    );
+
+    // A write may still store the same blob: Linux `cap_convert_nscap()`
+    // only checks the structure, and exec-time ownership decides whether the
+    // attribute applies.
+    assert!(FileCapabilities::validate_for_write(&bytes).is_ok());
+
+    // The same attribute owned by this kernel's only namespace root is valid.
+    bytes.truncate(20);
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    assert!(FileCapabilities::parse(&bytes).is_ok());
+}
+
+#[def_test]
+fn file_capability_attribute_rejects_malformed_input() {
+    assert_eq!(FileCapabilities::parse(&[]), Err(KError::InvalidInput));
+
+    let mut bytes = file_caps(CapSet::EMPTY, CapSet::EMPTY, false).to_xattr();
+    assert_eq!(
+        FileCapabilities::parse(&bytes[..bytes.len() - 4]),
+        Err(KError::InvalidInput)
+    );
+
+    // Only the effective flag is defined below the revision byte.
+    bytes[0] |= 0x2;
+    assert_eq!(FileCapabilities::parse(&bytes), Err(KError::InvalidInput));
+}
+
+#[def_test]
+fn file_capability_attribute_clips_undefined_bits() {
+    let mut bytes = file_caps(CapSet::EMPTY, CapSet::EMPTY, false).to_xattr();
+    bytes[4..20].copy_from_slice(&[0xff; 16]);
+
+    let parsed = FileCapabilities::parse(&bytes).unwrap();
+    assert_eq!(parsed.permitted(), CapSet::FULL);
+    assert_eq!(parsed.inheritable(), CapSet::FULL);
+}
+
+#[def_test]
+fn file_capability_attribute_follows_the_linux_word_layout() {
+    // `struct vfs_cap_data` orders the words as magic, fP low, fI low,
+    // fP high, fI high.
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&VFS_CAP_REVISION_2.to_le_bytes());
+    bytes.extend_from_slice(&0x0000_0001u32.to_le_bytes());
+    bytes.extend_from_slice(&0x0000_0020u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+
+    let parsed = FileCapabilities::parse(&bytes).unwrap();
+    assert_eq!(parsed.permitted(), cap(CAP_CHOWN));
+    assert_eq!(parsed.inheritable(), cap(CAP_KILL));
+    assert_eq!(parsed.to_xattr(), bytes);
+}
+
+#[def_test]
+fn setid_root_exec_grants_the_bounding_set() {
+    let mut credentials = Cred::new(1000, 100);
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: Some(ExecIds { euid: 0, egid: 100 }),
+                file_caps: None,
+            },
+        )
+        .unwrap();
+
+    assert!(secure);
+    assert_eq!(credentials.ruid(), 1000);
+    assert_eq!(credentials.euid(), 0);
+    assert_eq!(credentials.suid(), 0);
+    assert_eq!(credentials.fsuid(), 0);
+    assert_eq!(credentials.capabilities().permitted(), CapSet::FULL);
+    assert_eq!(credentials.capabilities().effective(), CapSet::FULL);
+    assert_eq!(credentials.cap_ambient(), CapSet::EMPTY);
+}
+
+#[def_test]
+fn setid_nonroot_exec_drops_capabilities() {
+    let mut credentials = Cred::root();
+    credentials.set_resuid_unchecked(Some(1000), Some(1000), Some(1000));
+    assert!(credentials.has_sys_admin());
+
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: Some(ExecIds {
+                    euid: 2000,
+                    egid: 100,
+                }),
+                file_caps: None,
+            },
+        )
+        .unwrap();
+
+    assert!(secure);
+    assert_eq!(credentials.euid(), 2000);
+    assert_eq!(credentials.capabilities(), CapSets::EMPTY);
+}
+
+#[def_test]
+fn file_capabilities_replace_the_permitted_set() {
+    let mut credentials = Cred::new(1000, 100);
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: Some(file_caps(cap(CAP_CHOWN), CapSet::EMPTY, true)),
+            },
+        )
+        .unwrap();
+
+    assert!(secure);
+    assert_eq!(credentials.capabilities().permitted(), cap(CAP_CHOWN));
+    assert_eq!(credentials.capabilities().effective(), cap(CAP_CHOWN));
+    assert_eq!(credentials.cap_ambient(), CapSet::EMPTY);
+}
+
+#[def_test]
+fn file_capabilities_without_the_effective_flag_leave_nothing_effective() {
+    let mut credentials = Cred::new(1000, 100);
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: Some(file_caps(cap(CAP_CHOWN), CapSet::EMPTY, false)),
+            },
+        )
+        .unwrap();
+
+    // The image may still elevate (a secure exec), but without the file's
+    // effective flag the permitted set does not become effective.
+    assert!(secure);
+    assert_eq!(credentials.capabilities().permitted(), cap(CAP_CHOWN));
+    assert_eq!(credentials.capabilities().effective(), CapSet::EMPTY);
+}
+
+#[def_test]
+fn file_inheritable_intersects_with_the_old_inheritable_set() {
+    // A non-root caller, so the privileged-root reconstruction does not join
+    // the bounding set and mask the inheritable intersection under test.
+    let mut credentials = Cred::root();
+    credentials
+        .set_capabilities(CapSets::new(CapSet::EMPTY, CapSet::EMPTY, cap(CAP_CHOWN)))
+        .unwrap();
+    credentials.set_resuid_unchecked(Some(1000), Some(1000), Some(1000));
+    assert_eq!(credentials.capabilities().permitted(), CapSet::EMPTY);
+    assert_eq!(credentials.capabilities().inheritable(), cap(CAP_CHOWN));
+
+    credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: Some(file_caps(
+                    cap(CAP_SYS_NICE),
+                    cap(CAP_CHOWN).union(cap(CAP_SETUID)),
+                    true,
+                )),
+            },
+        )
+        .unwrap();
+
+    // Only the capability present in both inheritable sets joins the file's
+    // permitted set; the file alone cannot give the caller CAP_SETUID.
+    let permitted = credentials.capabilities().permitted();
+    assert!(permitted.contains(CAP_SYS_NICE));
+    assert!(permitted.contains(CAP_CHOWN));
+    assert!(!permitted.contains(CAP_SETUID));
+}
+
+#[def_test]
+fn file_capabilities_respect_no_new_privs() {
+    let mut credentials = Cred::new(1000, 100);
+    let _ = credentials
+        .apply_exec_with_security(
+            true,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: Some(file_caps(cap(CAP_CHOWN), CapSet::EMPTY, true)),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(credentials.capabilities(), CapSets::EMPTY);
+}
+
+#[def_test]
+fn setid_naming_the_current_identity_is_not_a_secure_exec() {
+    // A set-UID bit whose owner is the caller's own effective ID changes no
+    // identity, so the exec gains nothing and `AT_SECURE` stays clear.
+    let mut credentials = Cred::new(1000, 100);
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: Some(ExecIds {
+                    euid: 1000,
+                    egid: 100,
+                }),
+                file_caps: None,
+            },
+        )
+        .unwrap();
+
+    assert!(!secure);
+    assert_eq!(credentials.euid(), 1000);
+    assert_eq!(credentials.capabilities(), CapSets::EMPTY);
+}
+
+#[def_test]
+fn file_capabilities_keep_privileged_root_capabilities() {
+    // A real/effective root caller keeps the Linux root reconstruction — the
+    // bounding set plus the whole old inheritable set — instead of the file's
+    // declared sets alone.
+    let mut credentials = Cred::root();
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: Some(file_caps(cap(CAP_CHOWN), CapSet::EMPTY, true)),
+            },
+        )
+        .unwrap();
+
+    assert!(!secure);
+    assert_eq!(credentials.capabilities().permitted(), CapSet::FULL);
+    assert_eq!(credentials.capabilities().effective(), CapSet::FULL);
+}
+
+#[def_test]
+fn no_new_privs_still_reads_the_file_capability_set() {
+    // `no_new_privs` declines the identity change only. The file capability
+    // set is still applied and then clamped to the pre-exec permitted set,
+    // which is what clears ambient for a capability-bearing image.
+    let mut credentials = Cred::root();
+    credentials
+        .set_capabilities(CapSets::new(CapSet::EMPTY, cap(CAP_CHOWN), cap(CAP_CHOWN)))
+        .unwrap();
+    credentials.raise_cap_ambient(CAP_CHOWN).unwrap();
+    assert_eq!(credentials.cap_ambient(), cap(CAP_CHOWN));
+
+    let secure = credentials
+        .apply_exec_with_security(
+            true,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: Some(file_caps(cap(CAP_CHOWN), CapSet::EMPTY, true)),
+            },
+        )
+        .unwrap();
+
+    assert!(!secure);
+    assert_eq!(credentials.capabilities().permitted(), cap(CAP_CHOWN));
+    assert_eq!(credentials.cap_ambient(), CapSet::EMPTY);
+}
+
+#[def_test]
+fn setuid_root_with_file_capabilities_receives_only_the_file_sets() {
+    // A non-root caller elevated by a set-UID root file gets exactly what the
+    // file declares; the bounding set must not be added on top.
+    let mut credentials = Cred::new(1000, 100);
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: Some(ExecIds { euid: 0, egid: 100 }),
+                file_caps: Some(file_caps(cap(CAP_CHOWN), CapSet::EMPTY, true)),
+            },
+        )
+        .unwrap();
+
+    assert!(secure);
+    assert_eq!(credentials.capabilities().permitted(), cap(CAP_CHOWN));
+    assert_eq!(credentials.capabilities().effective(), cap(CAP_CHOWN));
+}
+
+#[def_test]
+fn file_effective_capabilities_make_a_covering_permitted_set_secure() {
+    // The permitted set does not grow and the IDs do not change, but an
+    // effective file capability set for a non-root caller is still a privileged
+    // exec, so `AT_SECURE` must be published.
+    let mut credentials = Cred::root();
+    credentials
+        .set_capabilities(CapSets::new(CapSet::EMPTY, cap(CAP_CHOWN), CapSet::EMPTY))
+        .unwrap();
+    credentials.keep_caps_enable().unwrap();
+    credentials.set_resuid_unchecked(Some(1000), Some(1000), Some(1000));
+    assert_eq!(credentials.capabilities().permitted(), cap(CAP_CHOWN));
+    assert_eq!(credentials.capabilities().effective(), CapSet::EMPTY);
+
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: Some(file_caps(cap(CAP_CHOWN), CapSet::EMPTY, true)),
+            },
+        )
+        .unwrap();
+
+    assert!(secure);
+    assert_eq!(credentials.capabilities().permitted(), cap(CAP_CHOWN));
+}
+
+#[def_test]
+fn undeliverable_effective_file_capabilities_fail_the_exec() {
+    // An effective file set the bounding set cannot deliver is `EPERM`, as
+    // Linux `bprm_caps_from_vfs_caps()` does; without the effective bit the
+    // same file simply grants nothing.
+    let narrowed = || {
+        let mut credentials = Cred::root();
+        credentials
+            .drop_bounding_cap(CAP_SYS_ADMIN as usize)
+            .unwrap();
+        credentials.set_resuid_unchecked(Some(1000), Some(1000), Some(1000));
+        credentials
+    };
+
+    assert_eq!(
+        narrowed().apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: Some(file_caps(cap(CAP_SYS_ADMIN), CapSet::EMPTY, true)),
+            },
+        ),
+        Err(KError::OperationNotPermitted)
+    );
+
+    let mut credentials = narrowed();
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: Some(file_caps(cap(CAP_SYS_ADMIN), CapSet::EMPTY, false)),
+            },
+        )
+        .unwrap();
+    assert!(!secure);
+    assert_eq!(credentials.capabilities().permitted(), CapSet::EMPTY);
+}
+
+#[def_test]
+fn real_root_with_file_capabilities_keeps_bounding_and_inheritable() {
+    // Linux `handle_privileged_root()`: a real/effective root caller keeps the
+    // bounding set plus the whole old inheritable set, not just the file's
+    // declared sets. Narrow the bounding set so the union is observable.
+    let mut credentials = Cred::root();
+    credentials
+        .drop_bounding_cap(CAP_SYS_ADMIN as usize)
+        .unwrap();
+    credentials
+        .set_capabilities(CapSets::new(CapSet::EMPTY, CapSet::EMPTY, cap(CAP_KILL)))
+        .unwrap();
+
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: Some(file_caps(cap(CAP_CHOWN), CapSet::EMPTY, false)),
+            },
+        )
+        .unwrap();
+
+    // Linux `bprm->secureexec` leaves a real-root caller's exec clear even
+    // when the reconstruction widens its permitted set: `__is_real` holds.
+    assert!(!secure);
+    let permitted = credentials.capabilities().permitted();
+    assert!(permitted.contains(CAP_KILL));
+    assert!(permitted.contains(CAP_CHOWN));
+    assert!(!permitted.contains(CAP_SYS_ADMIN));
+    assert_eq!(credentials.capabilities().effective(), permitted);
+}
+
+#[def_test]
+fn effective_root_with_file_capabilities_uses_the_file_formula() {
+    // A non-real-root caller that already has effective UID 0 is Linux's
+    // `__is_suid` case: with a file capability attribute the root
+    // reconstruction is skipped and only the file's own sets apply.
+    let mut credentials = Cred::root();
+    credentials.set_resuid_unchecked(Some(1000), Some(0), Some(0));
+    assert_eq!(credentials.ruid(), 1000);
+    assert_eq!(credentials.euid(), 0);
+
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: Some(file_caps(cap(CAP_CHOWN), CapSet::EMPTY, true)),
+            },
+        )
+        .unwrap();
+
+    assert!(secure);
+    assert_eq!(credentials.capabilities().permitted(), cap(CAP_CHOWN));
+    assert_eq!(credentials.capabilities().effective(), cap(CAP_CHOWN));
+}
+
+#[def_test]
+fn privileged_root_keeps_the_file_effective_flag_after_setuid_away() {
+    // Real root executing a set-UID file that moves effective UID off zero:
+    // `handle_privileged_root()` still applies the reconstruction but only
+    // forces the effective bit when effective UID is zero, so the file's own
+    // effective flag must survive.
+    let mut credentials = Cred::root();
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: Some(ExecIds {
+                    euid: 1000,
+                    egid: 0,
+                }),
+                file_caps: Some(file_caps(cap(CAP_CHOWN), CapSet::EMPTY, true)),
+            },
+        )
+        .unwrap();
+
+    assert!(secure);
+    assert_eq!(credentials.euid(), 1000);
+    assert_eq!(credentials.capabilities().permitted(), CapSet::FULL);
+    assert_eq!(credentials.capabilities().effective(), CapSet::FULL);
+}
+
+#[def_test]
+fn undeliverable_effective_file_capabilities_test_the_file_formula() {
+    // The old inheritable set can hand CAP_NET_RAW to the root reconstruction
+    // even when the bounding set dropped it. The effective file set is still
+    // undeliverable through the file formula, so Linux rejects the exec
+    // instead of letting the reconstruction mask the gap.
+    let mut credentials = Cred::root();
+    credentials
+        .set_capabilities(CapSets::new(
+            cap(CAP_SETPCAP),
+            CapSet::FULL,
+            cap(CAP_NET_RAW),
+        ))
+        .unwrap();
+    credentials.drop_bounding_cap(CAP_NET_RAW as usize).unwrap();
+
+    assert_eq!(
+        credentials.apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: Some(file_caps(cap(CAP_NET_RAW), CapSet::EMPTY, true)),
+            },
+        ),
+        Err(KError::OperationNotPermitted)
+    );
+}
+
+#[def_test]
+fn setgid_exec_outside_the_group_set_is_secure_and_resets_ids_when_shared() {
+    // A set-GID target outside the caller's filesystem and supplementary
+    // groups is an identity change, so `AT_SECURE` is set and a shared
+    // filesystem context resets the IDs even without permitted growth.
+    let mut credentials = Cred::root();
+    credentials
+        .set_capabilities(CapSets::new(cap(CAP_CHOWN), cap(CAP_CHOWN), cap(CAP_CHOWN)))
+        .unwrap();
+    credentials.raise_cap_ambient(CAP_CHOWN).unwrap();
+    credentials.set_resuid_unchecked(Some(1000), Some(1000), Some(1000));
+    credentials.set_resgid_unchecked(Some(100), Some(100), Some(100));
+
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            true,
+            ExecSecurity {
+                ids: Some(ExecIds {
+                    euid: 1000,
+                    egid: 200,
+                }),
+                file_caps: None,
+            },
+        )
+        .unwrap();
+
+    assert!(secure);
+    assert_eq!(credentials.ruid(), 1000);
+    assert_eq!(credentials.euid(), 1000);
+    assert_eq!(credentials.rgid(), 100);
+    assert_eq!(credentials.egid(), 100);
+    assert_eq!(credentials.cap_ambient(), CapSet::EMPTY);
+}
+
+#[def_test]
+fn setgid_exec_into_a_supplementary_group_is_an_identity_change() {
+    // Linux `__is_setgid()` exempts no group membership, so the moved GID is
+    // an identity change and the unsafe-share downgrade resets it.
+    let mut credentials = Cred::new(1000, 100);
+    credentials.set_supplementary_groups(alloc::vec![200]);
+
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            true,
+            ExecSecurity {
+                ids: Some(ExecIds {
+                    euid: 1000,
+                    egid: 200,
+                }),
+                file_caps: None,
+            },
+        )
+        .unwrap();
+
+    assert!(secure);
+    assert_eq!(credentials.egid(), 100);
+}
+
+#[def_test]
+fn setgid_exec_into_the_filesystem_group_is_an_identity_change() {
+    let mut credentials = Cred::new(1000, 100);
+    assert_eq!(credentials.set_fsgid(200), 100);
+
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            true,
+            ExecSecurity {
+                ids: Some(ExecIds {
+                    euid: 1000,
+                    egid: 200,
+                }),
+                file_caps: None,
+            },
+        )
+        .unwrap();
+
+    assert!(secure);
+    assert_eq!(credentials.egid(), 100);
+}
+
+#[def_test]
+fn existing_identity_mismatches_are_set_id_conditions() {
+    let mut user = Cred::new(1000, 100);
+    user.set_resuid_unchecked(None, Some(2000), Some(2000));
+    let user_secure = user
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: None,
+            },
+        )
+        .unwrap();
+    assert!(user_secure);
+
+    let mut group = Cred::new(1000, 100);
+    group.set_resgid_unchecked(None, Some(200), Some(200));
+    let group_secure = group
+        .apply_exec_with_security(
+            false,
+            false,
+            ExecSecurity {
+                ids: None,
+                file_caps: None,
+            },
+        )
+        .unwrap();
+    assert!(group_secure);
+}
+
+#[def_test]
+fn shared_setuid_exec_resets_ids_without_permitted_growth() {
+    // The permitted set already covers the root reconstruction, so an exec
+    // that gains nothing must still normalize a set-UID elevation under a
+    // shared filesystem context when effective `CAP_SETUID` is absent.
+    let mut credentials = Cred::root();
+    credentials
+        .set_capabilities(CapSets::new(CapSet::EMPTY, CapSet::FULL, CapSet::EMPTY))
+        .unwrap();
+    credentials.set_resuid_unchecked(Some(1000), Some(1000), Some(1000));
+    credentials.set_resgid_unchecked(Some(100), Some(100), Some(100));
+
+    let secure = credentials
+        .apply_exec_with_security(
+            false,
+            true,
+            ExecSecurity {
+                ids: Some(ExecIds { euid: 0, egid: 100 }),
+                file_caps: None,
+            },
+        )
+        .unwrap();
+
+    assert!(secure);
+    assert_eq!(credentials.euid(), 1000);
+    assert_eq!(credentials.egid(), 100);
+    assert_eq!(credentials.capabilities().permitted(), CapSet::FULL);
 }

@@ -1928,3 +1928,103 @@ fn test_clone_mount_tree_reproduces_a_stacked_mountpoint() {
     );
 }
 
+
+#[def_test]
+fn content_writes_strip_set_id_bits_unless_fsetid_is_held() {
+    let privileged_bits = NodePermission::SET_UID
+        | NodePermission::SET_GID
+        | NodePermission::OWNER_READ
+        | NodePermission::GROUP_EXEC;
+    let caller = kcred::Cred::new(1000, 1000);
+    let stripped = Path::strip_write_privileges(privileged_bits, 1000, &caller);
+    assert!(!stripped.contains(NodePermission::SET_UID));
+    assert!(!stripped.contains(NodePermission::SET_GID));
+    assert!(stripped.contains(NodePermission::OWNER_READ));
+    assert!(stripped.contains(NodePermission::GROUP_EXEC));
+
+    // A set-GID bit without group-execute is the mandatory-locking mark, and a
+    // writer inside the file's group keeps it (`should_remove_suid()` plus
+    // `setattr_should_drop_sgid()`).
+    let lock_mark = NodePermission::SET_GID | NodePermission::OWNER_READ;
+    assert!(Path::strip_write_privileges(lock_mark, 1000, &caller).contains(NodePermission::SET_GID));
+    // A writer outside the file's group drops set-GID even without group-exec.
+    assert!(!Path::strip_write_privileges(lock_mark, 2000, &caller).contains(NodePermission::SET_GID));
+
+    // Effective CAP_FSETID preserves both privileged bits.
+    let privileged = kcred::Cred::root();
+    assert!(privileged.has_cap(kcred::CAP_FSETID));
+    assert_eq!(
+        Path::strip_write_privileges(privileged_bits, 2000, &privileged).bits(),
+        privileged_bits.bits()
+    );
+}
+
+#[def_test]
+fn immutable_targets_reject_revocation_before_touching_capabilities() {
+    // A cap-only immutable file has no set-ID metadata to update, so the
+    // immutable check must happen before the capability store is touched.
+    let init = crate::VfsInodeInit::new(
+        1,
+        0,
+        crate::Umode::new(
+            NodeType::RegularFile,
+            NodePermission::from_bits_truncate(0o755),
+        ),
+    )
+    .with_owner_links_and_rdev(0, 0, 1, Default::default());
+    let inode = VfsInode::new_file_with_flags(
+        Arc::new(MockDirOps::new(StatFsFlags::empty(), 1)),
+        crate::NodeFlags::IMMUTABLE,
+        init,
+    );
+    let root = Dentry::new_file_from_inode(inode, None, String::new());
+    let path = Mount::new_root(&mock_superblock(root, StatFsFlags::empty())).root_path();
+    let inode = path.inode();
+    let _mount_guard = path.lock_writable_mount().unwrap();
+    let _privilege_guard = inode.lock_privileges();
+
+    assert_eq!(
+        path.file_remove_privs_locked(&Cred::root()),
+        Err(VfsError::OperationNotPermitted)
+    );
+    assert_eq!(
+        inode.file_capability_state(),
+        crate::FileCapabilityState::Unknown
+    );
+}
+
+#[def_test]
+fn set_gid_without_group_execute_still_drops_for_a_writer_outside_the_group() {
+    // Set-GID without group-execute is normally the mandatory-locking mark,
+    // but `setattr_should_drop_sgid()` still drops it for a writer outside the
+    // file's group. The S_NOSEC fast path must not skip that update.
+    let mode = NodePermission::SET_GID | NodePermission::OWNER_READ | NodePermission::OWNER_WRITE;
+    let fs = mock_regular_file_filesystem(mode);
+    let path = Mount::new_root(&fs).root_path();
+    let outsider = Cred::new(2000, 200);
+    {
+        let _guard = path.lock_writable_mount().unwrap();
+        path.file_remove_privs(&outsider).unwrap();
+    }
+    assert!(
+        !path
+            .metadata()
+            .mode
+            .permission()
+            .contains(NodePermission::SET_GID)
+    );
+
+    // A writer inside the file's group keeps the lock mark.
+    path.chmod(mode, &Cred::new(1000, 100)).unwrap();
+    let member = Cred::new(3000, 100);
+    {
+        let _guard = path.lock_writable_mount().unwrap();
+        path.file_remove_privs(&member).unwrap();
+    }
+    assert!(
+        path.metadata()
+            .mode
+            .permission()
+            .contains(NodePermission::SET_GID)
+    );
+}

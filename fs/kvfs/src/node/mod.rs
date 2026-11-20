@@ -20,10 +20,10 @@ pub use device::{
 };
 pub use dir::{DirContext, DirEntrySink};
 pub use inode::{
-    FiemapCapability, FileAttr, GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations,
-    InodeDirOperations, InodeFiemapOperations, InodeLookupFlags, InodeOperations,
-    InodeSymlinkOperations, InodeUpdateTime, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
-    WeakVfsInode, empty_inode_operations, generic_update_time, get_next_ino, inode_init_owner,
-    metadata_only_inode_operations,
+    FiemapCapability, FileAttr, FileCapabilityState, GetattrQueryFlags, GetattrRequestMask,
+    InodeAttributeOperations, InodeDirOperations, InodeFiemapOperations, InodeLookupFlags,
+    InodeOperations, InodeSymlinkOperations, InodeUpdateTime, NodeFlags, RenameFlags, VfsInode,
+    VfsInodeInit, WeakVfsInode, empty_inode_operations, generic_update_time, get_next_ino,
+    inode_init_owner, metadata_only_inode_operations,
 };
 pub(crate) use inode::{get_or_try_init_inode, lookup_inode, wait_for_inode_evictions};

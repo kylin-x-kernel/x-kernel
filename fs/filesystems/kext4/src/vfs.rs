@@ -557,7 +557,8 @@ impl Ext4SuperOperations {
             metadata.atime,
             metadata.mtime,
             metadata.ctime,
-        );
+        )
+        .with_extended_attributes(private.has_extended_attributes());
         let cached_link = if node_type == NodeType::Symlink {
             match ext4.read().fast_symlink_target(&private) {
                 Ok(Some(target)) => core::str::from_utf8(&target).ok().map(String::from),

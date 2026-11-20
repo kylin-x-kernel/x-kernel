@@ -47,17 +47,31 @@ fn partial_install_probe_releases_unused_capture_without_invocation() {
 }
 
 fn image_request(data: Vec<u8>, args: Vec<String>) -> ExecRequest {
+    image_request_with(data, args, 0o555, 0, kcred::initial_cred(), true)
+}
+
+fn image_request_with(
+    data: Vec<u8>,
+    args: Vec<String>,
+    permission: u16,
+    owner: u32,
+    cred: Arc<kcred::Cred>,
+    ids_allowed: bool,
+) -> ExecRequest {
     let cached_data = data.clone();
     let size = data.len() as u64;
     let mut inode = None;
     let super_block = SimpleFs::new_with(&TEST_FS, 0, |fs| {
         let file = SimpleFile::new_regular_with_permission(
             fs.clone(),
-            NodePermission::from_bits_truncate(0o555),
+            NodePermission::from_bits_truncate(permission),
             move || Ok(data.clone()),
         );
         // Scalar reads expose the bytes; the loader also needs their inode size.
-        let init = file.inode_init().with_size(size);
+        let init = file
+            .inode_init()
+            .with_size(size)
+            .with_owner_links_and_rdev(owner, 0, 1, Default::default());
         inode = Some(VfsInode::new_file_with_operations(
             file.clone(),
             kvfs::empty_inode_operations(),
@@ -72,7 +86,7 @@ fn image_request(data: Vec<u8>, args: Vec<String>) -> ExecRequest {
     let mount = Mount::new_root(&super_block);
     let dentry = Dentry::new_file_from_inode(inode, None, "app".into());
     let location = Path::new(mount, dentry);
-    let file = super::open_exec_file(&location, kcred::initial_cred()).unwrap();
+    let file = super::open_exec_file(&location, cred.clone()).unwrap();
     for (index, bytes) in cached_data.chunks(4096).enumerate() {
         file.mapping()
             .with_folio_or_create(index as u64, |folio| {
@@ -86,8 +100,17 @@ fn image_request(data: Vec<u8>, args: Vec<String>) -> ExecRequest {
         "/fixture/app".into(),
         args,
         vec!["EXEC_TEST=owned".into()],
-        kcred::initial_cred(),
+        cred,
     )
+    .with_ids_allowed(ids_allowed)
+}
+
+fn aux_value(prepared: &super::PreparedExecImage, kind: AuxType) -> Option<usize> {
+    prepared
+        .saved_aux_words()
+        .chunks_exact(2)
+        .find(|pair| pair[0] as usize == kind as usize)
+        .map(|pair| pair[1] as usize)
 }
 
 #[def_test]
@@ -342,7 +365,7 @@ fn identity_aux_entries_report_ids_and_secure_exec() {
     cred.set_resuid(Some(1000), Some(2000), Some(3000))
         .expect("root must be able to set user IDs");
 
-    let entries = identity_aux_entries(&cred);
+    let entries = identity_aux_entries(&cred, None, false);
     assert!(entries[0].get_type() == AuxType::UID);
     assert_eq!(entries[0].value(), 1000);
     assert!(entries[1].get_type() == AuxType::EUID);
@@ -356,8 +379,94 @@ fn identity_aux_entries_report_ids_and_secure_exec() {
 }
 
 #[def_test]
+fn identity_aux_entries_publish_the_post_exec_identity() {
+    // A set-ID exec replaces the effective IDs, so the vector must report the
+    // identity the new program starts with, not the pre-exec one.
+    let cred = kcred::Cred::new(1000, 100);
+    let ids = kcred::ExecIds { euid: 0, egid: 0 };
+    let entries = identity_aux_entries(&cred, Some(ids), true);
+    assert_eq!(entries[0].value(), 1000);
+    assert_eq!(entries[1].value(), 0);
+    assert_eq!(entries[3].value(), 0);
+    assert_eq!(entries[4].value(), 1);
+}
+
+#[def_test]
 fn identity_aux_entries_include_zero_secure_value() {
-    let entries = identity_aux_entries(&kcred::Cred::new(1000, 100));
+    let entries = identity_aux_entries(&kcred::Cred::new(1000, 100), None, false);
     assert!(entries[4].get_type() == AuxType::SECURE);
     assert_eq!(entries[4].value(), 0);
+}
+
+// The vectors observe a global loader lock; keep this check serial like the
+// other prepared-image fixtures.
+#[def_test(serial)]
+fn finalized_stack_uses_the_guard_context() {
+    // A set-UID root image executed by a non-root caller: the guard-time
+    // filesystem-sharing sample must reach the rebuilt vector. A finalize that
+    // ignores its context keeps EUID 0 for both calls and fails below.
+    let request = image_request_with(
+        executable_bytes(),
+        vec!["app".to_owned()],
+        0o4755,
+        0,
+        Arc::new(kcred::Cred::new(1000, 100)),
+        true,
+    );
+    let mut prepared = super::prepare_user_app_request(request).expect("prepare fixture");
+    let unshared = super::ExecContext {
+        ids_allowed: true,
+        fs_shared: false,
+    };
+    prepared.finalize_stack(unshared).expect("finalize fixture");
+    assert_eq!(aux_value(&prepared, AuxType::EUID), Some(0));
+    assert_eq!(aux_value(&prepared, AuxType::SECURE), Some(1));
+
+    let shared = super::ExecContext {
+        ids_allowed: true,
+        fs_shared: true,
+    };
+    prepared.finalize_stack(shared).expect("finalize fixture");
+    assert_eq!(
+        aux_value(&prepared, AuxType::EUID),
+        Some(1000),
+        "a shared filesystem context must reset the set-UID elevation"
+    );
+    assert_eq!(aux_value(&prepared, AuxType::SECURE), Some(1));
+
+    // The stack is rebuilt from scratch: restoring the original context
+    // restores its vector.
+    prepared.finalize_stack(unshared).expect("finalize fixture");
+    assert_eq!(aux_value(&prepared, AuxType::EUID), Some(0));
+    let stack_data = prepared.stack_data.clone();
+    let repeated = prepared.finalize_stack(unshared).expect("finalize fixture");
+    assert!(repeated.ids.is_some());
+    assert_eq!(prepared.stack_data, stack_data);
+}
+
+#[def_test(serial)]
+fn finalized_stack_publishes_no_new_privs_identity_and_secure_flag() {
+    // Under `no_new_privs` the loader samples no set-ID identities, so the
+    // vector keeps the caller's EUID and `AT_SECURE` stays clear.
+    let request = image_request_with(
+        executable_bytes(),
+        vec!["app".to_owned()],
+        0o4755,
+        0,
+        Arc::new(kcred::Cred::new(1000, 100)),
+        false,
+    );
+    let mut prepared = super::prepare_user_app_request(request).expect("prepare fixture");
+
+    let security = prepared
+        .finalize_stack(super::ExecContext {
+            ids_allowed: false,
+            fs_shared: false,
+        })
+        .expect("finalize fixture");
+
+    assert!(security.ids.is_none());
+    assert_eq!(aux_value(&prepared, AuxType::EUID), Some(1000));
+    assert_eq!(aux_value(&prepared, AuxType::EGID), Some(100));
+    assert_eq!(aux_value(&prepared, AuxType::SECURE), Some(0));
 }

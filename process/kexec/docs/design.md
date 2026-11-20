@@ -34,7 +34,9 @@ credential commit, and post-exec policy belong to callers.
   `posix/process` and other callers own thread coordination, process publication,
   credential transitions, and the policy for a failed destructive commit.
 - VFS owns path-walk rules, file permissions, executable-write exclusion, and
-  file-version coherence. This crate does not detect changes to cached files.
+  file-version coherence. This crate keys cached headers on the inode's content
+  generation and treats a changed generation as a cache miss, but it does not
+  hold an executable-write denial for the duration of the mapping.
 - `memspace`, `filemap`, and the underlying MM crates own page tables, page-cache
   pages, anonymous memory, COW, and VMA teardown.
 - This crate does not randomize load addresses or provide a general-purpose ELF
@@ -42,8 +44,9 @@ credential commit, and post-exec policy belong to callers.
 
 ## Source scope and architecture
 
-`src/lib.rs` re-exports `ExecSource`, `ExecRequest`, `BinPrm`, `PreparedExecImage`,
-`prepare_user_app_request`, `load_prepared_user_app`, and `clear_elf_cache`.
+`src/lib.rs` re-exports `ExecSource`, `ExecContext`, `ExecRequest`, `BinPrm`,
+`PreparedExecImage`, `PartialInstallProbe`, `prepare_user_app_request`,
+`load_prepared_user_app`, and `clear_elf_cache`.
 `src/elf_image.rs` validates ELF
 metadata, normalizes load segments, and plans executable/interpreter addresses.
 `src/loader.rs` contains VFS loading, request preparation, the global `ElfLoader`,
@@ -165,8 +168,15 @@ file-backed segment registers a private file view in the inode address space,
 letting cache invalidation reach text pages mapped directly from the cache. The
 registered range is page-aligned; the partial tail page stays anonymous.
 Auxiliary entries describe the main image and interpreter base and include the
-credential snapshot's `AT_UID`, `AT_EUID`, `AT_GID`, `AT_EGID`, and explicit
-`AT_SECURE`. `app_stack_region` adds `AT_RANDOM` backed by the kernel entropy
+credential snapshot's `AT_UID` and `AT_GID`. `PreparedExecImage::finalize_stack()`
+rebuilds the initial stack and vector under the exec admission guard: it
+previews the credential transition on a clone with the guard's
+filesystem-sharing sample, so `AT_EUID`/`AT_EGID` publish the identity after any
+`no_new_privs` or shared-filesystem downgrade, `AT_SECURE` is set only when the
+transition actually gains privilege, and the caller commits the same sample.
+`prepare_user_app_request()` still builds a complete image with a default
+context for kernel-side callers and tests; the exec path overwrites the vectors
+under the guard. `app_stack_region` adds `AT_RANDOM` backed by the kernel entropy
 pool and `AT_EXECFN` backed by the resolved request's display path, including
 when `argv` is empty. Script redirects preserve the original script display
 path for `AT_EXECFN` while using the interpreter path for loading. `AT_HWCAP`
@@ -221,8 +231,11 @@ the caller's exclusive borrow.
 Cache eviction/flush releases entries after prepared requests drop their `Arc`
 references. VMAs retain mapped files through MM runtime ownership, so clearing
 the header cache does not unmap an executable. `clear_elf_cache` also clears the
-TA header cache when the signing feature is active. No file-change invalidation
-is integrated.
+TA header cache when the signing feature is active. Each entry records the
+inode content generation captured when it was parsed; lookup requires the
+current generation to match, so an in-place rewrite forces a reload. A write
+that lands between the generation check and installation can still race the
+mapping; executable deny-write remains the long-term fix.
 
 The request lifecycle is `ExecRequest -> BinPrm -> PreparedExecImage -> installation`.
 Before installation, dropping prepared state releases its file/cache references

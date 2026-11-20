@@ -573,11 +573,43 @@ Locks constrain only cooperating callers; file reads and writes without an advis
 
 - Effective process capabilities now cover file permissions, sticky directories,
   xattr, chown/chmod, and related checks; LSM, POSIX ACL, user-namespace ID
-  mapping, idmapped mounts, and file capabilities are not supported. Ambient
+  mapping and idmapped mounts are not supported. KVFS stores and validates the
+  `security.capability` attribute but does not interpret it: `execve(2)` decodes
+  it through `kcred`. Ambient
   capabilities are not a separate filesystem input; they affect a check only
   after becoming effective. `trusted.*` access and `security.*` mutation require
-  effective `CAP_SYS_ADMIN`; user xattr modification in a sticky directory
-  requires directory ownership or effective `CAP_FOWNER`.
+  effective `CAP_SYS_ADMIN`, except `security.capability` mutation, which
+  requires effective `CAP_SETFCAP` and a value that decodes as a supported
+  revision; user xattr modification in a sticky directory
+  requires directory ownership or effective `CAP_FOWNER`. Content writes strip
+  set-UID always and set-GID when group-execute marks it as a privilege or the
+  writer is outside the file's group, unless the writer holds effective
+  `CAP_FSETID`, and drop `security.capability`; chown drops it before
+  publishing the new owner or mode. The capability decision uses the writing
+  task's credential supplied by the syscall entry, matching Linux's
+  `capable()`, not the opener's credential. An immutable target is rejected
+  before any revocation, and a write starting at or beyond the size limit
+  leaves the decision and the revocation to the backend, so an `EFBIG` does not
+  strip privileges. A per-inode privilege lock covers the revocation and the
+  protected backend change; `setxattr`, `chown`, `chmod`, file-attribute
+  changes, `truncate`, `fallocate`, native `copy_file_range` and exec metadata
+  sampling share it. Revocation precedes the first content or size commit:
+  a failed backend therefore leaves privileges removed, and a failed
+  revocation leaves content and length unchanged. `chown` samples and
+  authorizes inside the lock. Content-changing paths bump an inode content
+  generation that keys the exec ELF-header cache.
+  A write with nothing to revoke and no attribute store to consult returns
+  before any filesystem metadata work, so a buffered write never waits for
+  mount persistence. The `security.capability` presence is cached per inode
+  (`FileCapabilityState`) together with a generation counter: one lookup answers
+  it, absence is a constant-time check afterwards, and a cached absence is
+  published only when no concurrent capability operation overtook the lookup
+  and the removal's own snapshot still matches; a losing update degrades to
+  `Unknown`, so a stale absence can never hide a newly installed attribute. Empty writes take the fast
+  path without revoking, and native `copy_file_range` revokes on its output
+  before the backend copies. The transfer boundary carries the writing task's
+  credential, so `copy_file_range`, `splice` and `sendfile` use its
+  `CAP_FSETID` and group membership.
 - FAT and other backends cannot fully express Unix UID/GID owners.
 - The current POSIX rename path does not support `RENAME_WHITEOUT`. The types of inode lookup and getattr are
   established, but no extra semantic bits are defined yet; current calls use empty flags.

@@ -1000,6 +1000,21 @@ fn inline_xattr_offset(inode_len: usize, extra_isize: u16) -> Ext4Result<usize> 
     Ok(offset)
 }
 
+/// Returns whether the inline attribute area holds a valid entry header.
+///
+/// The area is a fixed slice of the inode body, so it is never empty and an
+/// emptiness test cannot stand in for "no attributes". ext4 writes the ibody
+/// magic only when at least one inline attribute exists; an unused area stays
+/// all zeroes. Backends use this as the `S_NOSEC`-style probe, which keeps an
+/// ordinary content write from touching the attribute store.
+pub(crate) fn inline_xattrs_present(bytes: &[u8]) -> bool {
+    bytes.len() >= disk_xattr::XATTR_IBODY_HEADER_SIZE
+        && matches!(
+            codec::le_u32(bytes, 0),
+            Ok(magic) if magic == disk_xattr::XATTR_MAGIC
+        )
+}
+
 fn read_inline_xattrs_from_bytes(bytes: &[u8]) -> Ext4Result<Vec<Ext4Xattr>> {
     let mut xattrs = Vec::new();
     if bytes.len() < disk_xattr::XATTR_IBODY_HEADER_SIZE {

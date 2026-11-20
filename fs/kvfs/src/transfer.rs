@@ -14,6 +14,7 @@
 
 use alloc::{sync::Arc, vec};
 
+use kcred::Cred;
 use kerrno::{KError, KResult, LinuxError};
 
 use crate::{FMode, MutexGuard, VfsFile, pipe::PipeObject};
@@ -234,6 +235,7 @@ fn pump(
 fn file_pair_step(
     input: &Arc<VfsFile>,
     output: &Arc<VfsFile>,
+    cred: &Cred,
     input_pos: &mut u64,
     output_pos: &mut u64,
     buf: &mut [u8],
@@ -248,7 +250,7 @@ fn file_pair_step(
         return Ok(Step::Eof);
     }
     let mut write_pos = *output_pos;
-    let written = output.write_from(&buf[..read], &mut write_pos)?;
+    let written = output.write_from_as(&buf[..read], &mut write_pos, cred)?;
     if written > read {
         return Err(KError::Io);
     }
@@ -292,6 +294,32 @@ pub fn transfer_files(
     len: usize,
     nonblocking: bool,
 ) -> KResult<usize> {
+    let cred = output.cred();
+    transfer_files_as(
+        input,
+        input_position,
+        output,
+        output_position,
+        len,
+        nonblocking,
+        cred,
+    )
+}
+
+/// [`transfer_files`] with the writing task's credential.
+///
+/// The destination write revokes set-ID bits and file capabilities using
+/// `cred` (Linux `file_remove_privs()` tests the current task's `CAP_FSETID`
+/// and group membership), which syscall entry points take from the caller.
+pub fn transfer_files_as(
+    input: &Arc<VfsFile>,
+    input_position: TransferPosition<'_>,
+    output: &Arc<VfsFile>,
+    output_position: TransferPosition<'_>,
+    len: usize,
+    nonblocking: bool,
+    cred: &Cred,
+) -> KResult<usize> {
     input.verify_mode(FMode::READ)?;
     output.verify_mode(FMode::WRITE)?;
     let source_pipe = PipeObject::from_file(input).ok();
@@ -317,7 +345,7 @@ pub fn transfer_files(
         return pump_file_to_pipe(pipe, output, input, input_position, len, nonblocking);
     }
     if let Some(pipe) = &source_pipe {
-        return pump_pipe_to_file(pipe, input, output, output_position, len, nonblocking);
+        return pump_pipe_to_file(pipe, input, output, output_position, len, nonblocking, cred);
     }
     // Plain file pair: the boundary resolves the cursor protocol, the pump
     // runs on local positions, and the results publish back through the
@@ -336,7 +364,15 @@ pub fn transfer_files(
     let mut input_pos = input_start;
     let mut output_pos = output_start;
     let result = pump(len, |buf, chunk, _total| {
-        file_pair_step(input, output, &mut input_pos, &mut output_pos, buf, chunk)
+        file_pair_step(
+            input,
+            output,
+            cred,
+            &mut input_pos,
+            &mut output_pos,
+            buf,
+            chunk,
+        )
     });
     positions.commit(input_pos, output_pos);
     result
@@ -395,6 +431,7 @@ fn pump_pipe_to_file(
     output_position: TransferPosition<'_>,
     len: usize,
     nonblocking: bool,
+    cred: &Cred,
 ) -> KResult<usize> {
     let output_offset = match output_position {
         TransferPosition::Managed => None,
@@ -406,9 +443,9 @@ fn pump_pipe_to_file(
         let wait = nonblocking || input.is_nonblocking() || total > 0;
         let confirmed = pipe.splice_read(wait, &mut buf[..chunk], |staged| {
             if output_managed && !output.is_stream() {
-                output.write_from(staged, &mut output.position_lock())
+                output.write_from_as(staged, &mut output.position_lock(), cred)
             } else {
-                output.write_from(staged, &mut output_pos)
+                output.write_from_as(staged, &mut output_pos, cred)
             }
         })?;
         Ok(Step::Data {
@@ -539,7 +576,32 @@ pub fn copy_file_range(
     output: &Arc<VfsFile>,
     output_position: TransferPosition<'_>,
     len: usize,
+    nonblocking: bool,
+) -> KResult<usize> {
+    let cred = output.cred();
+    copy_file_range_as(
+        input,
+        input_position,
+        output,
+        output_position,
+        len,
+        nonblocking,
+        cred,
+    )
+}
+
+/// [`copy_file_range`] with the writing task's credential.
+///
+/// The destination revocation tests `cred` rather than the opener's
+/// credential, matching Linux's current-task `CAP_FSETID` and group checks.
+pub fn copy_file_range_as(
+    input: &Arc<VfsFile>,
+    input_position: TransferPosition<'_>,
+    output: &Arc<VfsFile>,
+    output_position: TransferPosition<'_>,
+    len: usize,
     _nonblocking: bool,
+    cred: &Cred,
 ) -> KResult<usize> {
     input.verify_mode(FMode::READ)?;
     output.verify_mode(FMode::WRITE)?;
@@ -556,10 +618,29 @@ pub fn copy_file_range(
     );
     let (input_start, output_start) = positions.starts();
     let count = verify_copy_file_range(input, output, input_start, output_start, len as u64)?;
+    // A native copy writes the target through the backend, bypassing
+    // `VfsFile::write_iter_from`. Probe once (zero-length admission) so each
+    // native chunk can revoke under the mount and privilege locks directly
+    // around the backend copy, as Linux `vfs_copy_file_range()` does with
+    // `file_remove_privs(file_out)`. The fallback pair step takes the same
+    // locks through the normal write path.
+    let native_copy = count > 0
+        && output
+            .copy_chunk_from(input, input_start, output_start, 0)
+            .is_some();
     let mut input_pos = input_start;
     let mut output_pos = output_start;
     let result = pump(count as usize, |buf, chunk, _total| {
-        match output.copy_chunk_from(input, input_pos, output_pos, chunk) {
+        let native = if native_copy {
+            let _mount_guard = output.path().lock_writable_mount()?;
+            let inode = output.inode();
+            let _privilege_guard = inode.lock_privileges();
+            output.path().file_remove_privs_locked(cred)?;
+            output.copy_chunk_from(input, input_pos, output_pos, chunk)
+        } else {
+            None
+        };
+        match native {
             Some(native) => {
                 let confirmed = native?;
                 if confirmed > chunk {
@@ -572,7 +653,15 @@ pub fn copy_file_range(
                     stop: confirmed < chunk,
                 })
             }
-            None => file_pair_step(input, output, &mut input_pos, &mut output_pos, buf, chunk),
+            None => file_pair_step(
+                input,
+                output,
+                cred,
+                &mut input_pos,
+                &mut output_pos,
+                buf,
+                chunk,
+            ),
         }
     });
 
@@ -580,6 +669,10 @@ pub fn copy_file_range(
     // after real progress — a zero-byte return leaves `f_pos` alone.
     if matches!(result, Ok(count) if count > 0) {
         positions.commit(input_pos, output_pos);
+    }
+    if count > 0 {
+        // Conservative: a failed copy may have committed a prefix.
+        output.inode().bump_content_generation();
     }
     result
 }

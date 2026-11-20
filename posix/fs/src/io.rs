@@ -62,7 +62,7 @@ where
     }
 }
 
-fn write_zeros_range(file: &VfsFile, start: u64, end: u64) -> KResult<()> {
+fn write_zeros_range(file: &VfsFile, start: u64, end: u64, cred: &kcred::Cred) -> KResult<()> {
     if end <= start {
         return Ok(());
     }
@@ -72,7 +72,7 @@ fn write_zeros_range(file: &VfsFile, start: u64, end: u64) -> KResult<()> {
     let mut remaining = end - start;
     while remaining > 0 {
         let write_len = remaining.min(zeros.len() as u64) as usize;
-        let written = file.write_from(&zeros[..write_len], &mut pos)?;
+        let written = file.write_from_as(&zeros[..write_len], &mut pos, cred)?;
         if written == 0 {
             return Err(KError::WriteZero);
         }
@@ -98,20 +98,24 @@ fn write_file_from_io_with_pos(
     file: &VfsFile,
     src: impl Read + IoBuf + RewindBytes,
     pos: &mut u64,
+    cred: &kcred::Cred,
 ) -> KResult<usize> {
     let mut src = IoSourceAdapter(src);
     let mut iter = iov_iter_source(&mut src);
-    file.write_iter_from(&mut iter, pos)
+    file.write_iter_from_as(&mut iter, pos, cred)
 }
 
 // Finalize a complete request, not one step of an aggregate transfer.
 fn write_request_from_io(file: &VfsFile, src: impl Read + IoBuf + RewindBytes) -> KResult<usize> {
+    // Write-time privilege revocation tests the writing task's `CAP_FSETID`,
+    // not the credential captured when the descriptor was opened.
+    let cred = kprocess::current_cred();
     let result = if file.is_stream() {
         let mut pos = 0;
-        write_file_from_io_with_pos(file, src, &mut pos)
+        write_file_from_io_with_pos(file, src, &mut pos, &cred)
     } else {
         let mut pos = file.position_lock();
-        write_file_from_io_with_pos(file, src, &mut pos)
+        write_file_from_io_with_pos(file, src, &mut pos, &cred)
     };
     notify_write_result(file, &result);
     finish_restartable_io(result)
@@ -124,9 +128,10 @@ fn write_file_at_from_io(
 ) -> KResult<usize> {
     reject_positioned_stream_io(file)?;
 
+    let cred = kprocess::current_cred();
     let mut src = IoSourceAdapter(src);
     let mut iter = iov_iter_source(&mut src);
-    let result = file.write_iter_from(&mut iter, &mut offset);
+    let result = file.write_iter_from_as(&mut iter, &mut offset, &cred);
     notify_write_result(file, &result);
     result
 }
@@ -257,7 +262,8 @@ pub fn sys_ftruncate(fd: c_int, length: __kernel_off_t) -> KResult<isize> {
         return Err(KError::InvalidInput);
     }
     let f = kprocess::current_files().get_file(fd)?;
-    f.truncate(length as _)?;
+    let cred = kprocess::current_cred();
+    f.truncate_as(length as _, &cred)?;
     crate::notify::notify_modified(f.path());
     Ok(0)
 }
@@ -335,6 +341,9 @@ pub fn sys_fallocate(
     if offset < 0 || len <= 0 {
         return Err(KError::InvalidInput);
     }
+    // Range zeroing writes content through the descriptor; revocation must use
+    // the calling task's credential, not the opener's.
+    let cred = kprocess::current_cred();
     let flags = parse_fallocate(mode)?;
     let keep_size = flags.contains(FallocateFlags::KEEP_SIZE);
     let base_mode = flags - FallocateFlags::KEEP_SIZE;
@@ -372,7 +381,7 @@ pub fn sys_fallocate(
     // apply; keep the hosting `max_file_size()` bound for regular files
     // only.
     if f.inode().node_type() == NodeType::BlockDevice {
-        f.fallocate(flags, start, len_u)?;
+        f.fallocate_as(flags, start, len_u, &cred)?;
         crate::notify::notify_modified(f.path());
         return Ok(0);
     }
@@ -391,7 +400,7 @@ pub fn sys_fallocate(
         // declares no fallocate capability (empty mask) is emulated; one that
         // declares modes but still answers EOPNOTSUPP is rejecting the file and
         // propagates instead of silently succeeding.
-        match f.fallocate(flags, start, len_u) {
+        match f.fallocate_as(flags, start, len_u, &cred) {
             Ok(()) => {}
             Err(error)
                 if error.canonicalize() == KError::OperationNotSupported
@@ -404,7 +413,7 @@ pub fn sys_fallocate(
                         // Force EOF advancement with a single-byte write at target_size - 1.
                         let z = [0u8; 1];
                         let mut pos = target_size - 1;
-                        let written = f.write_from(&z[..], &mut pos)?;
+                        let written = f.write_from_as(&z[..], &mut pos, &cred)?;
                         if written != 1 {
                             return Err(KError::WriteZero);
                         }
@@ -418,13 +427,13 @@ pub fn sys_fallocate(
             .contains(FallocateFlags::PUNCH_HOLE)
         {
             // Backend owns the release; its errors propagate.
-            f.fallocate(flags, start, len_u)?;
+            f.fallocate_as(flags, start, len_u, &cred)?;
         } else {
             // Emulate punch hole by zeroing the range; the blocks stay
             // allocated, so this frees nothing (unlike Linux ext4).
             let target_end = end.min(old_size);
             if target_end > start {
-                write_zeros_range(&f, start, target_end)?;
+                write_zeros_range(&f, start, target_end, &cred)?;
             }
         }
     } else if base_mode == FallocateFlags::ZERO_RANGE {
@@ -432,16 +441,16 @@ pub fn sys_fallocate(
             .contains(FallocateFlags::ZERO_RANGE)
         {
             // Backend owns the zeroing/allocation; its errors propagate.
-            f.fallocate(flags, start, len_u)?;
+            f.fallocate_as(flags, start, len_u, &cred)?;
         } else {
             // Emulate zero-range by writing zeros. KEEP_SIZE only affects bytes
             // within the current size; avoid temporary i_size growth.
             let target_end = if keep_size { end.min(old_size) } else { end };
             if target_end > start {
                 if !keep_size && target_end > old_size {
-                    f.truncate(target_end)?;
+                    f.truncate_as(target_end, &cred)?;
                 }
-                write_zeros_range(&f, start, target_end)?;
+                write_zeros_range(&f, start, target_end, &cred)?;
             }
         }
     } else if base_mode == FallocateFlags::UNSHARE_RANGE {
@@ -450,7 +459,7 @@ pub fn sys_fallocate(
         // lacks UNSHARE_RANGE -> EOPNOTSUPP) instead of emulating it with a
         // trailing-byte write or a KEEP_SIZE no-op. Linux ext4's mode mask
         // likewise excludes UNSHARE_RANGE.
-        f.fallocate(base_mode, start, len_u)?;
+        f.fallocate_as(base_mode, start, len_u, &cred)?;
     } else if base_mode == FallocateFlags::COLLAPSE_RANGE
         || base_mode == FallocateFlags::INSERT_RANGE
     {
@@ -463,7 +472,7 @@ pub fn sys_fallocate(
         if base_mode == FallocateFlags::INSERT_RANGE && start > old_size {
             return Err(KError::InvalidInput);
         }
-        f.fallocate(base_mode, start, len_u)?;
+        f.fallocate_as(base_mode, start, len_u, &cred)?;
     } else {
         // Other flag combinations are not supported by the emulation;
         // fallocate mode errors are EOPNOTSUPP on Linux (fs-op default),
@@ -658,13 +667,15 @@ pub fn sys_sendfile(
         Some(offset) => TransferPosition::At(offset),
         None => TransferPosition::Managed,
     };
-    let result = kvfs::transfer_files(
+    let cred = kprocess::current_cred();
+    let result = kvfs::transfer_files_as(
         &input,
         input_position,
         &output,
         TransferPosition::Managed,
         len,
         false,
+        &cred,
     );
     notify_write_result(&output, &result);
     // Linux sendfile copies back an explicit offset even after EOF or error.
@@ -721,8 +732,16 @@ pub fn sys_copy_file_range(
         Some(offset) => TransferPosition::At(offset),
         None => TransferPosition::Managed,
     };
-    let result =
-        kvfs::copy_file_range(&input, input_position, &output, output_position, len, false);
+    let cred = kprocess::current_cred();
+    let result = kvfs::copy_file_range_as(
+        &input,
+        input_position,
+        &output,
+        output_position,
+        len,
+        false,
+        &cred,
+    );
     notify_write_result(&output, &result);
     // Linux copy_file_range copies offsets out only after progress; both
     // write-backs are attempted before the first fault is reported.
@@ -793,13 +812,15 @@ pub fn sys_splice(
         Some(offset) => TransferPosition::At(offset),
         None => TransferPosition::Managed,
     };
-    let result = kvfs::transfer_files(
+    let cred = kprocess::current_cred();
+    let result = kvfs::transfer_files_as(
         &input,
         input_position,
         &output,
         output_position,
         len,
         flags & linux_raw_sys::general::SPLICE_F_NONBLOCK != 0,
+        &cred,
     );
     notify_write_result(&output, &result);
     // Linux splice copies out after any successful result, including EOF.

@@ -94,6 +94,7 @@ impl<V, const CAP: usize> LruCache<V, CAP> {
     }
 
     /// Returns an iterator over the cache items, ordered from MRU to LRU.
+    #[cfg(unittest)]
     pub(super) fn items(&self) -> LruIter<'_, V, CAP> {
         LruIter::<V, CAP> {
             cache: self,
@@ -149,11 +150,13 @@ impl<V, const CAP: usize> LruCache<V, CAP> {
 }
 
 /// Iterator over the `LruCache` items, from MRU to LRU.
+#[cfg(unittest)]
 pub(super) struct LruIter<'a, V, const CAP: usize> {
     cache: &'a LruCache<V, CAP>,
     pos: u16,
 }
 
+#[cfg(unittest)]
 impl<'a, V, const CAP: usize> Iterator for LruIter<'a, V, CAP> {
     type Item = &'a V;
 

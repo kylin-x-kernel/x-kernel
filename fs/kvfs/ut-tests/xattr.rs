@@ -152,6 +152,133 @@ fn security_namespace_mutations_require_privilege() {
 }
 
 #[def_test]
+fn capability_cache_ignores_a_stale_observation() {
+    // The revocation protocol publishes a cached absence only while no other
+    // capability operation intervened: a compare-and-swap from an observation
+    // that a later `setxattr` already superseded must fail.
+    let inode = inode(NodeType::RegularFile, 0o644, 0);
+    let stale = inode.file_capability_snapshot();
+    inode.mark_file_capability(crate::FileCapabilityState::Present);
+    assert_eq!(
+        inode.file_capability_state(),
+        crate::FileCapabilityState::Present
+    );
+    assert!(!inode.try_mark_file_capability(stale, crate::FileCapabilityState::Absent));
+    assert_eq!(
+        inode.file_capability_state(),
+        crate::FileCapabilityState::Present
+    );
+
+    // A stale observation whose *state* still matches must also fail: the
+    // intervening set-then-remove cycle returned the cache to `Absent` but
+    // changed the generation. A comparison that ignored the generation would
+    // accept this observation and mask the race the protocol exists to stop.
+    inode.mark_file_capability(crate::FileCapabilityState::Absent);
+    let stale_absent = inode.file_capability_snapshot();
+    inode.mark_file_capability(crate::FileCapabilityState::Present);
+    inode.mark_file_capability(crate::FileCapabilityState::Absent);
+    assert!(!inode.try_mark_file_capability(stale_absent, crate::FileCapabilityState::Absent));
+
+    // A fresh observation may publish the absence.
+    let current = inode.file_capability_snapshot();
+    assert!(inode.try_mark_file_capability(current, crate::FileCapabilityState::Absent));
+    assert_eq!(
+        inode.file_capability_state(),
+        crate::FileCapabilityState::Absent
+    );
+}
+
+#[def_test]
+fn removal_publication_keeps_a_concurrent_present() {
+    // The successful-remove path snapshots the generation before the backend
+    // delete. If a concurrent setxattr marks Present in between, publishing
+    // Absent must lose and degrade to Unknown, never hide the new attribute.
+    let inode = inode(NodeType::RegularFile, 0o644, 0);
+    let observed = inode.file_capability_snapshot();
+    inode.mark_file_capability(crate::FileCapabilityState::Present);
+    super::publish_capability_removal(&inode, observed);
+    assert_eq!(
+        inode.file_capability_state(),
+        crate::FileCapabilityState::Unknown
+    );
+
+    // An uncontested removal may publish Absent.
+    let fresh = inode.file_capability_snapshot();
+    super::publish_capability_removal(&inode, fresh);
+    assert_eq!(
+        inode.file_capability_state(),
+        crate::FileCapabilityState::Absent
+    );
+}
+
+#[def_test]
+fn inode_tracks_extended_attribute_storage() {
+    // The backend reports attribute storage at load and the VFS keeps the flag
+    // set once an attribute is installed, which is the `S_NOSEC`-style fast
+    // path an ordinary content write relies on.
+    let plain = inode(NodeType::RegularFile, 0o644, 0);
+    assert!(!plain.has_extended_attributes());
+    assert_eq!(
+        plain.file_capability_state(),
+        crate::FileCapabilityState::Unknown
+    );
+    plain.mark_extended_attributes();
+    assert!(plain.has_extended_attributes());
+
+    let init = VfsInodeInit::new(
+        7,
+        0,
+        Umode::new(
+            NodeType::RegularFile,
+            NodePermission::from_bits_truncate(0o644),
+        ),
+    )
+    .with_extended_attributes(true);
+    let reported = VfsInode::new_file_with_flags(Arc::new(TestOps), NodeFlags::empty(), init);
+    assert!(reported.has_extended_attributes());
+}
+
+#[def_test]
+fn file_capability_attribute_is_gated_by_setfcap() {
+    // Linux gates `security.capability` on CAP_SETFCAP rather than
+    // CAP_SYS_ADMIN, so a packaging tool can manage file capabilities without
+    // the broader authority over every security.* attribute.
+    let packaging = {
+        let mut cred = Cred::root();
+        let bit = kcred::CapSet::from_bits(1 << kcred::CAP_SETFCAP);
+        cred.set_capabilities(kcred::CapSets::new(bit, bit, kcred::CapSet::EMPTY))
+            .unwrap();
+        cred
+    };
+    assert!(!packaging.has_sys_admin());
+    let capability = XattrName::new(b"security.capability".to_vec()).unwrap();
+    let regular = inode(NodeType::RegularFile, 0o000, 1000);
+    assert_eq!(
+        check_xattr_permission(&regular, &capability, XattrAccess::Write, &packaging),
+        Ok(())
+    );
+
+    // Without CAP_SETFCAP the write is refused, and an unrelated security.*
+    // attribute still needs CAP_SYS_ADMIN.
+    let other = Cred::new(2000, 2000);
+    assert!(matches!(
+        check_xattr_permission(&regular, &capability, XattrAccess::Write, &other),
+        Err(err) if LinuxError::from(err) == LinuxError::EPERM
+    ));
+    let selinux = XattrName::new(b"security.selinux".to_vec()).unwrap();
+    assert!(matches!(
+        check_xattr_permission(&regular, &selinux, XattrAccess::Write, &packaging),
+        Err(err) if LinuxError::from(err) == LinuxError::EPERM
+    ));
+
+    // Reads stay unrestricted, as they are for every security.* name.
+    assert_eq!(
+        check_xattr_permission(&regular, &capability, XattrAccess::Read, &other),
+        Ok(())
+    );
+}
+
+#[def_test]
 fn immutable_and_append_only_inodes_reject_all_xattr_mutations() {
     let root = Cred::new(0, 0);
     let security = XattrName::new(b"security.test".to_vec()).unwrap();

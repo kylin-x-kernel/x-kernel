@@ -16,6 +16,7 @@ use core::{
 
 use hashbrown::HashMap;
 use kcred::{Cred, NamespaceId, UserNamespace, initial_user_namespace};
+use kerrno::LinuxError;
 use klazy::Once;
 use ktime_types::TimeSpan;
 
@@ -28,7 +29,7 @@ use crate::{
     GetattrRequestMask, InodeUpdateTime, Metadata, MetadataUpdate, Mutex, NodeFlags,
     NodePermission, NodeType, OpenFlags, Permission, RemovedEntry, RenameFlags, RenameOutcome,
     SetattrTime, StatFs, SuperBlock, SuperBlockFlags, Umode, VfsError, VfsFile, VfsFileBuilder,
-    VfsInode, VfsResult, nullfs, path::PathBuf,
+    VfsInode, VfsResult, XattrName, nullfs, path::PathBuf,
 };
 
 bitflags::bitflags! {
@@ -1345,6 +1346,9 @@ impl Path {
 
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
+        // Immutability is an exec-security input; serialize the flag change
+        // with sampling and with privilege revocation.
+        let _privilege_guard = inode.lock_privileges();
         if cred.fsuid() != inode.metadata().uid && !cred.has_cap_fowner() {
             return Err(VfsError::OperationNotPermitted);
         }
@@ -1676,6 +1680,13 @@ impl Path {
     /// Changes this inode's owner after applying Linux chown/chgrp authorization.
     pub fn chown(&self, uid: Option<u32>, gid: Option<u32>, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
+        let inode = self.inode();
+        // Linux `chown_common()` samples, authorizes and commits under the
+        // inode lock. Taking the privilege lock before the snapshot keeps a
+        // concurrent chown from losing the other's fields or authorizing
+        // against an owner/mode that is already stale.
+        let _privilege_guard = inode.lock_privileges();
+        inode.check_mutable()?;
         let metadata = self.metadata();
         let is_owner = cred.fsuid() == metadata.uid;
         let can_chown = cred.has_cap_chown();
@@ -1703,6 +1714,13 @@ impl Path {
         {
             return Err(VfsError::OperationNotPermitted);
         }
+        // Linux `setattr_prepare()` handles `ATTR_KILL_PRIV` before the
+        // metadata commit, so a failed capability removal leaves the owner and
+        // mode untouched. The reverse failure is not transactional and leaves
+        // the capability removed with the old metadata, as Linux does.
+        if metadata.mode.node_type() != NodeType::Directory {
+            self.kill_file_caps_locked()?;
+        }
         self.dentry.update_metadata(MetadataUpdate {
             owner: Some((uid.unwrap_or(metadata.uid), new_gid)),
             mode: Some(mode),
@@ -1713,6 +1731,10 @@ impl Path {
     /// Changes this inode's permission bits after applying Linux chmod authorization.
     pub fn chmod(&self, mut mode: NodePermission, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
+        let inode = self.inode();
+        // Mode and owner are part of the exec security sample; a concurrent
+        // chmod must not interleave with it or with a revocation.
+        let _privilege_guard = inode.lock_privileges();
         let metadata = self.metadata();
         if cred.fsuid() != metadata.uid && !cred.has_cap_fowner() {
             return Err(VfsError::OperationNotPermitted);
@@ -1727,6 +1749,149 @@ impl Path {
             mode: Some(mode),
             ..Default::default()
         })
+    }
+
+    /// Removes privileges a content write would otherwise carry over.
+    ///
+    /// Mirrors Linux `should_remove_suid()` and `setattr_should_drop_sgid()`:
+    /// set-UID is always killed, and set-GID is killed when group-execute marks
+    /// it as a privilege or when the writer is outside the file's group. A
+    /// caller holding effective `CAP_FSETID` keeps both. The
+    /// `security.capability` attribute is then dropped unconditionally, so
+    /// changing a file's content cannot leave it with a file capability set
+    /// that its new content never earned (Linux
+    /// `security_inode_killpriv()`).
+    ///
+    /// The caller must hold the writable-mount lock.
+    pub fn file_remove_privs(&self, cred: &Cred) -> VfsResult<()> {
+        let inode = self.inode();
+        let _privilege_guard = inode.lock_privileges();
+        self.file_remove_privs_locked(cred)
+    }
+
+    /// Revokes a content write's inherited privileges while the caller holds
+    /// [`VfsInode::lock_privileges`] and the writable-mount lock.
+    pub(crate) fn file_remove_privs_locked(&self, cred: &Cred) -> VfsResult<()> {
+        // Linux rejects an immutable target before `notify_change()`; doing it
+        // here keeps a doomed write, truncate or copy from stripping
+        // `security.capability` first.
+        self.inode().check_mutable()?;
+        let metadata = self.metadata();
+        if metadata.mode.node_type() != NodeType::RegularFile {
+            return Ok(());
+        }
+        let permission = metadata.mode.permission();
+        let strips_uid = permission.contains(NodePermission::SET_UID);
+        // `strip_write_privileges()` drops set-GID for a group-execute mark
+        // and for a writer outside the file's group, so both must keep the
+        // fast path from skipping the metadata update.
+        let strips_gid = permission.contains(NodePermission::SET_GID)
+            && (permission.contains(NodePermission::GROUP_EXEC) || !cred.in_group(metadata.gid));
+        let has_attributes = self.inode().has_extended_attributes();
+        // Linux `S_NOSEC` fast path: with no set-ID bit to clear and no
+        // attribute store to consult, a content write must not touch
+        // filesystem metadata at all.
+        if !strips_uid && !strips_gid && !has_attributes {
+            return Ok(());
+        }
+        let mode = Self::strip_write_privileges(permission, metadata.gid, cred);
+        if mode.bits() != permission.bits() {
+            self.dentry.update_metadata(MetadataUpdate {
+                mode: Some(mode),
+                ..Default::default()
+            })?;
+        }
+        if has_attributes {
+            self.kill_file_caps_locked()?;
+        }
+        Ok(())
+    }
+
+    /// Returns the permission bits a content write must leave behind.
+    ///
+    /// Linux `should_remove_suid()`: set-UID is always killed; set-GID only
+    /// when group-execute is set, because without it the bit is the
+    /// mandatory-locking mark. Effective `CAP_FSETID` preserves both.
+    fn strip_write_privileges(mode: NodePermission, gid: u32, cred: &Cred) -> NodePermission {
+        let mut mode = mode;
+        if !cred.has_cap(kcred::CAP_FSETID) {
+            mode.remove(NodePermission::SET_UID);
+            // Linux drops set-GID when group-execute marks it as a privilege,
+            // or when the writer is not a member of the file's group
+            // (`setattr_should_drop_sgid`).
+            if mode.contains(NodePermission::GROUP_EXEC) || !cred.in_group(gid) {
+                mode.remove(NodePermission::SET_GID);
+            }
+        }
+        mode
+    }
+
+    /// Drops the file-capability attribute, ignoring one that is absent.
+    ///
+    /// A filesystem without extended-attribute support has no attribute to
+    /// drop, which Linux's `security_inode_killpriv()` also reports as success.
+    ///
+    /// The caller must hold the writable-mount lock.
+    fn kill_file_caps_locked(&self) -> VfsResult<()> {
+        use crate::FileCapabilityState;
+
+        let name = XattrName::new(kcred::SECURITY_CAPABILITY_XATTR.as_bytes().to_vec())?;
+        let inode = self.inode();
+        // Lookup, removal and cache updates form a small protocol: a cached
+        // absence is only published while no other capability operation
+        // intervened, so a concurrent `setxattr` can never be masked by a
+        // stale `Absent`.
+        for _ in 0..4 {
+            let observed = inode.file_capability_snapshot();
+            if inode.file_capability_state_of(observed) == FileCapabilityState::Absent {
+                return Ok(());
+            }
+            if !inode.has_extended_attributes() {
+                if inode.try_mark_file_capability(observed, FileCapabilityState::Absent) {
+                    return Ok(());
+                }
+                continue;
+            }
+            match self.get_xattr_unchecked(&name) {
+                // `remove_xattr_unchecked` bumps the generation and caches
+                // absence itself. A concurrent remover may have won the race;
+                // an already-absent attribute is success, not an error.
+                Ok(_) => match self.remove_xattr_unchecked(&name) {
+                    Err(error)
+                        if error == VfsError::from(LinuxError::ENODATA)
+                            || error == VfsError::OperationNotSupported =>
+                    {
+                        return Ok(());
+                    }
+                    // `remove_xattr_unchecked()` publishes the absence through
+                    // the snapshot CAS taken before the backend removal.
+                    result => return result,
+                },
+                Err(error)
+                    if error == VfsError::from(LinuxError::ENODATA)
+                        || error == VfsError::OperationNotSupported =>
+                {
+                    if inode.try_mark_file_capability(observed, FileCapabilityState::Absent) {
+                        return Ok(());
+                    }
+                    // Overtaken by a concurrent capability operation; re-read
+                    // instead of caching an absence that is no longer true.
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        // The generation kept changing: take the conservative slow path and
+        // remove the attribute without trusting the cache. An absent or
+        // unsupported attribute is still success, as in the fast paths above.
+        match self.remove_xattr_unchecked(&name) {
+            Err(error)
+                if error == VfsError::from(LinuxError::ENODATA)
+                    || error == VfsError::OperationNotSupported =>
+            {
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     /// Changes this inode's timestamps after applying Linux utimens authorization.
@@ -2393,12 +2558,19 @@ impl Path {
         inode.acquire_write_access();
         let result = inode
             .break_leases(true, false)
-            .and_then(|()| self.truncate_opened(len));
+            .and_then(|()| self.truncate_opened(len, cred));
         inode.release_write_access();
         result
     }
 
-    pub(crate) fn truncate_opened(&self, len: u64) -> VfsResult<()> {
+    /// Changes a regular file length, revoking privileges a content change
+    /// would otherwise leave behind.
+    ///
+    /// Linux `do_truncate()` reaches `notify_change()` with
+    /// `ATTR_KILL_SUID`/`ATTR_KILL_SGID`/`ATTR_KILL_PRIV`, so truncation drops
+    /// set-ID bits and the file capability attribute exactly like a write. The
+    /// caller must hold the writable-mount lock.
+    pub(crate) fn truncate_opened(&self, len: u64, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
         if self.is_dir() {
             return Err(VfsError::IsADirectory);
@@ -2415,6 +2587,13 @@ impl Path {
         if len > self.max_file_size() {
             return Err(VfsError::FileTooLarge);
         }
+        let _privilege_guard = inode.lock_privileges();
+        // Linux `setattr_prepare()` removes inherited privileges before the
+        // filesystem commits `ATTR_SIZE`, so a failed capability removal must
+        // leave the old length in place. The reverse failure (privileges gone,
+        // length unchanged) is the safe direction and is not rolled back.
+        inode.check_mutable()?;
+        self.file_remove_privs_locked(cred)?;
         if !inode.flags().contains(NodeFlags::NON_CACHEABLE) {
             inode.set_len(len)?;
         } else {
@@ -2423,6 +2602,7 @@ impl Path {
                 ..Default::default()
             })?;
         }
+        inode.bump_content_generation();
         Ok(())
     }
 

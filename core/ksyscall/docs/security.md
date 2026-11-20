@@ -180,19 +180,31 @@ registered wakeups rather than polling or a timer.
 - Capability, seccomp, and `no_new_privileges` security ABIs must not
   return success inconsistent with actual enforcement. `PR_SET_NO_NEW_PRIVS`
   records the flag on the calling thread and returns success; seccomp install
-  consults it. Exec applies Linux's no-file-capability transition, merges
+  consults it. The loader samples the executable's set-ID bits and file
+  capability set and applies them through `Cred::apply_exec_with_security`: a
+  `nosuid` mount suppresses both, `no_new_privs` declines only the identity
+  change while the capability set is still applied and clamped, a malformed
+  attribute fails the exec with `EINVAL`, and file permitted capabilities are
+  bounded by the capability bounding set (a privileged root keeps its bounding
+  reconstruction on top),
+  merges
   ambient capabilities into permitted after the growth clamp, and clears
-  ambient when the effective GID leaves the old filesystem/supplementary
-  groups. When privileged-root reconstruction would grow permitted or the
-  group identity changes under `no_new_privs` or cross-process `CLONE_FS`
+  ambient when an identity changed or the effective GID leaves the old
+  filesystem/supplementary groups. When privileged-root reconstruction would
+  grow permitted or the
+  identity changes under `no_new_privs` or cross-process `CLONE_FS`
   sharing, a growing set is intersected with the pre-exec set; effective/group
   IDs reset to real IDs when `no_new_privs` is set or the pre-exec credential
   lacks effective `CAP_SETUID`. The cross-process
   `CLONE_FS` sharing sample and `in_exec` admission are atomic with runtime
   adoption, so a child cannot attach after the sample and before credentials
-  are committed. There is no setuid/setgid or file-capability elevation today;
-  adding one must extend this transition and refuse elevation under the flag
-  instead of silently dropping the guarantee.
+  are committed. Under that guard `ksyscall` takes one sample of the sharing
+  state and `no_new_privs`, has the loader rebuild `AT_EUID`/`AT_EGID` and
+  `AT_SECURE` from a transition preview, and then commits the same sample, so
+  the published identity and the installed credentials agree. An undeliverable
+  effective file capability set fails the exec with `EPERM` before the address
+  space is replaced, so a rejected exec leaves the old image and credentials
+  untouched.
 - `unshare` and `setns` require effective `CAP_SYS_ADMIN`, matching the
   `UnshareContext::privileged` input documented in `kns`: both syscalls refuse
   namespace creation or entry without that capability, standing in for

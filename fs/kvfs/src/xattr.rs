@@ -9,7 +9,19 @@ use alloc::vec::Vec;
 use kcred::Cred;
 use kerrno::LinuxError;
 
-use crate::{NodePermission, NodeType, Path, Permission, VfsError, VfsInode, VfsResult};
+use crate::{
+    FileCapabilityState, NodePermission, NodeType, Path, Permission, VfsError, VfsInode, VfsResult,
+};
+
+/// Publishes an absence only when no capability operation overtook the
+/// snapshot taken before the backend removal. A losing update degrades to
+/// `Unknown` so the next revocation re-reads the store instead of trusting a
+/// stale `Absent`.
+fn publish_capability_removal(inode: &VfsInode, observed: u64) {
+    if !inode.try_mark_file_capability(observed, FileCapabilityState::Absent) {
+        inode.mark_file_capability(FileCapabilityState::Unknown);
+    }
+}
 
 /// Maximum byte length of a Linux extended-attribute name, excluding NUL.
 pub const XATTR_NAME_MAX: usize = 255;
@@ -168,8 +180,20 @@ fn check_xattr_permission(
 
     // Linux delegates security.* authorization to LSM hooks. Until KVFS has
     // that hook boundary, require `CAP_SYS_ADMIN` for mutations instead of
-    // letting a caller without that authority forge security data.
+    // letting a caller without that authority forge security data. The
+    // file-capability attribute is the exception: Linux gates
+    // `security.capability` on effective `CAP_SETFCAP`, so packaging tools can
+    // manage file capabilities without `CAP_SYS_ADMIN`.
     if name.starts_with(SECURITY_PREFIX) {
+        if matches!(access, XattrAccess::Write)
+            && name == kcred::SECURITY_CAPABILITY_XATTR.as_bytes()
+        {
+            return if cred.has_cap(kcred::CAP_SETFCAP) {
+                Ok(())
+            } else {
+                Err(VfsError::OperationNotPermitted)
+            };
+        }
         return if matches!(access, XattrAccess::Write) && !cred.has_sys_admin() {
             Err(VfsError::OperationNotPermitted)
         } else {
@@ -246,8 +270,28 @@ impl Path {
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
         check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
+        // A file-capability attribute that does not decode is rejected here, so
+        // the exec path never has to distinguish "no capabilities" from
+        // "corrupt capabilities" once the value is stored.
+        if name.as_bytes() == kcred::SECURITY_CAPABILITY_XATTR.as_bytes() {
+            kcred::FileCapabilities::validate_for_write(value).map_err(|error| {
+                if error == VfsError::OperationNotPermitted {
+                    VfsError::OperationNotPermitted
+                } else {
+                    VfsError::InvalidInput
+                }
+            })?;
+        }
+        let _privilege_guard = inode.lock_privileges();
         let _data_guard = inode.lock_data();
-        inode.set_xattr(self.dentry(), name, value, flags)
+        let result = inode.set_xattr(self.dentry(), name, value, flags);
+        if result.is_ok() {
+            inode.mark_extended_attributes();
+            if name.as_bytes() == kcred::SECURITY_CAPABILITY_XATTR.as_bytes() {
+                inode.mark_file_capability(crate::FileCapabilityState::Present);
+            }
+        }
+        result
     }
 
     /// Removes one extended attribute.
@@ -258,8 +302,46 @@ impl Path {
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
         check_xattr_permission(&inode, name, XattrAccess::Write, cred)?;
+        let _privilege_guard = inode.lock_privileges();
         let _data_guard = inode.lock_data();
-        inode.remove_xattr(self.dentry(), name)
+        let observed = inode.file_capability_snapshot();
+        let result = inode.remove_xattr(self.dentry(), name);
+        if result.is_ok() && name.as_bytes() == kcred::SECURITY_CAPABILITY_XATTR.as_bytes() {
+            publish_capability_removal(&inode, observed);
+        }
+        result
+    }
+
+    /// Reads one extended attribute without the caller-policy checks.
+    ///
+    /// Trusted kernel paths use this for attributes whose namespace policy
+    /// would demand authority the operation does not require, as Linux's
+    /// `vfs_getxattr_alloc()` does for `get_vfs_caps_from_disk()`: the
+    /// executing task may hold no capability at all.
+    pub fn get_xattr_unchecked(&self, name: &XattrName) -> VfsResult<Vec<u8>> {
+        self.inode().get_xattr(self.dentry(), name)
+    }
+
+    /// Removes one extended attribute without the caller-policy checks.
+    ///
+    /// This backs kernel-initiated removals such as
+    /// `security_inode_killpriv()`, which Linux performs on behalf of the
+    /// kernel rather than the caller. The caller must hold the writable-mount
+    /// lock.
+    ///
+    /// It deliberately does not take the inode data lock: the write path calls
+    /// it while a filesystem writeback may already hold its superblock lock,
+    /// and nesting the data lock under that order inverts the writeback lock
+    /// order. The backend serializes the attribute update itself. The caller
+    /// must hold [`VfsInode::lock_privileges`].
+    pub fn remove_xattr_unchecked(&self, name: &XattrName) -> VfsResult<()> {
+        let inode = self.inode();
+        let observed = inode.file_capability_snapshot();
+        let result = inode.remove_xattr(self.dentry(), name);
+        if result.is_ok() && name.as_bytes() == kcred::SECURITY_CAPABILITY_XATTR.as_bytes() {
+            publish_capability_removal(&inode, observed);
+        }
+        result
     }
 }
 

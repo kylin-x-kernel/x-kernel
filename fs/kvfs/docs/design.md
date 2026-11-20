@@ -1443,12 +1443,55 @@ released with its last reference; hard links share the same active session becau
 ## Known limitations
 
 - The effective process capability set now covers DAC, sticky directories,
-  xattr, chown/chmod, and related checks; LSM, ACL, user-namespace ID mapping,
-  idmapped mounts, and file capabilities are not supported. Ambient
+  xattr, chown/chmod, and related checks; LSM, ACL, user-namespace ID mapping
+  and idmapped mounts are not supported. The `security.capability` attribute is
+  stored and validated here (revisions 1–3, version 3 only for this kernel's
+  namespace root) but decoded by `kcred` at exec. Ambient
   capabilities are not a separate filesystem input; they affect a check only
   after becoming effective. `trusted.*` access and `security.*` mutation require
-  effective `CAP_SYS_ADMIN`; user xattr modification in a sticky directory also
-  requires directory ownership or effective `CAP_FOWNER`.
+  effective `CAP_SYS_ADMIN`; `security.capability` mutation instead requires
+  effective `CAP_SETFCAP`; user xattr modification in a sticky directory also
+  requires directory ownership or effective `CAP_FOWNER`. Content writes strip
+  set-UID always and set-GID when group-execute marks it as a privilege or the
+  writer is outside the file's group, unless the writer holds effective
+  `CAP_FSETID`, and drop `security.capability`; chown drops the attribute
+  before publishing the new owner or mode. The revocation tests the writing
+  task's credential, which the syscall entry supplies, because Linux's
+  `capable(CAP_FSETID)` is the current task and not the descriptor's opener
+  credential. Every revocation first rejects an immutable inode, and a write
+  whose position is at or beyond the file size limit skips the revocation and
+  lets the backend rule, so an `EFBIG` does not strip privileges. A per-inode
+  privilege lock, taken after the writable-mount lock and before the inode
+  data lock, covers the revocation and the backend content or metadata change
+  it protects; `setxattr`, `chown`, `chmod`, file-attribute changes,
+  `truncate`, `fallocate`, native `copy_file_range` and exec
+  security-metadata sampling take the same lock. The revocation runs before
+  the first content or size commit, so a failed backend leaves the privileges
+  removed (the safe direction) and a failed revocation leaves the content and
+  length untouched. `chown` samples owner/mode and authorizes inside the lock,
+  not from a pre-lock snapshot. Content-changing paths bump the inode's content
+  generation; the exec ELF-header cache keys entries on it and reloads after an
+  in-place rewrite, while executable deny-write remains unimplemented.
+  Writes take an
+  `S_NOSEC`-style fast path: when the inode has no set-ID bit to clear for
+  this writer and reports no extended-attribute storage (ext4 derives that
+  from its attribute block and inline area at load, and `setxattr` marks the
+  inode), the write touches no filesystem metadata. `VfsInode` also caches whether
+  `security.capability` is present, packed with a generation counter: the first
+  revocation on an inode with attribute storage performs one lookup and records
+  the answer only while no concurrent capability operation intervened. A
+  removal snapshots the generation before the backend delete and publishes
+  `Absent` only through a compare-and-swap; a losing update degrades to
+  `Unknown`, so a concurrent `setxattr` can never be masked by a stale absence.
+  A file that never carried capabilities costs no attribute transaction on
+  later writes or ownership changes. Empty writes return before the revocation, and native
+  `copy_file_range` revokes on the output through the same entry point before
+  the backend copies, because it bypasses the write path. The boundary takes
+  the writing task's credential so `copy_file_range`, `splice` and `sendfile`
+  evaluate `CAP_FSETID` and group membership for the task that performs the
+  transfer rather than for the descriptor's opener. An empty write skips
+  only the revocation: it still reaches the backend, so a filesystem's own
+  denial (`EPERM` for a quota-exhausted writer, for example) keeps applying.
 - Backends such as FAT that cannot natively express Unix UID/GID cannot fully persist the creator identity.
 - The current POSIX rename path does not support `RENAME_WHITEOUT`.
 - The superblock dentry cache has no Linux-style LRU/shrinker yet.

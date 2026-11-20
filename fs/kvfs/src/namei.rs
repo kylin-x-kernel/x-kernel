@@ -760,7 +760,7 @@ impl<'a> Nameidata<'a> {
         if !may_open.truncate {
             return Ok(());
         }
-        file.path().truncate_opened(0)
+        file.path().truncate_opened(0, file.cred())
     }
 
     fn may_open_resolved(

@@ -704,3 +704,15 @@ fn settable_xattr_validation_rejects_unsupported_namespace() {
     );
     validate_settable_xattr(Ext4XattrNamespace::Trusted, b"name").unwrap();
 }
+
+#[def_test]
+fn inline_attribute_presence_follows_the_ibody_magic() {
+    // An unused inline area is a fixed, all-zero slice of the inode body.
+    let mut area = [0u8; 160];
+    assert!(!inline_xattrs_present(&area));
+    assert!(!inline_xattrs_present(&[]));
+
+    // ext4 writes the ibody magic once an inline attribute exists.
+    area[..4].copy_from_slice(&crate::disk::xattr::XATTR_MAGIC.to_le_bytes());
+    assert!(inline_xattrs_present(&area));
+}

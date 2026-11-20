@@ -1090,7 +1090,7 @@ impl VfsFile {
         self.inode().check_mutable()?;
         // Timestamp policy may acquire filesystem locks; keep it outside the folio.
         self.file_update_time()?;
-        self.mapping().page_mkwrite(
+        let result = self.mapping().page_mkwrite(
             index,
             |pos, len| {
                 if let Some(ops) = self.operations().mapping_operations() {
@@ -1099,7 +1099,11 @@ impl VfsFile {
                 Ok(())
             },
             update_mapping,
-        )
+        );
+        if result.is_ok() {
+            self.inode().bump_content_generation();
+        }
+        result
     }
 
     /// Waits for the resources needed by a shared write fault without an MM lock.
@@ -1199,8 +1203,18 @@ impl VfsFile {
     /// Descriptor-based truncation uses the authority established by the open
     /// file description and therefore does not repeat pathname DAC checks.
     pub fn truncate(&self, len: u64) -> VfsResult<()> {
+        let cred = self.cred();
+        self.truncate_as(len, cred)
+    }
+
+    /// Truncates using `cred`, the task performing the truncation.
+    ///
+    /// Linux `do_truncate()` revokes set-ID bits and file capabilities with
+    /// the current task's `CAP_FSETID`, so `ftruncate(2)` passes its caller's
+    /// credential rather than the opener's.
+    pub fn truncate_as(&self, len: u64, cred: &Cred) -> VfsResult<()> {
         self.verify_mode(FMode::WRITE)?;
-        self.path().truncate_opened(len)
+        self.path().truncate_opened(len, cred)
     }
 
     fn verify_io_area(&self, pos: u64, count: usize) -> VfsResult<()> {
@@ -1284,10 +1298,37 @@ impl VfsFile {
         self.write_iter(&mut iter)
     }
 
+    /// Revokes privileges a content change would otherwise leave behind.
+    ///
+    /// Transfer paths that bypass [`Self::write_iter_from`] — native
+    /// `copy_file_range` backends in particular — call this before modifying
+    /// the target, exactly as Linux `vfs_copy_file_range()` calls
+    /// `file_remove_privs()` on the output.
+    pub fn file_remove_privs(&self) -> VfsResult<()> {
+        let cred = self.cred();
+        self.file_remove_privs_as(cred)
+    }
+
+    /// Revokes privileges using `cred`, the task performing the transfer.
+    ///
+    /// Linux `file_remove_privs()` tests the current task's effective
+    /// `CAP_FSETID` and group membership, so transfer syscalls pass their
+    /// caller's credential rather than the opener's.
+    pub fn file_remove_privs_as(&self, cred: &Cred) -> VfsResult<()> {
+        let _write_guard = self.path().lock_writable_mount()?;
+        self.path().file_remove_privs(cred)
+    }
+
     /// Writes to this open file using a caller-owned position.
     pub fn write_from(&self, buf: &[u8], pos: &mut u64) -> VfsResult<usize> {
         let mut iter = iov_iter_kvec_source(buf);
         self.write_iter_from(&mut iter, pos)
+    }
+
+    /// Writes using `cred` for write-time privilege revocation.
+    pub fn write_from_as(&self, buf: &[u8], pos: &mut u64, cred: &Cred) -> VfsResult<usize> {
+        let mut iter = iov_iter_kvec_source(buf);
+        self.write_iter_from_as(&mut iter, pos, cred)
     }
 
     /// Writes from an iterator, locking and advancing `f_pos` only for non-streams.
@@ -1301,38 +1342,74 @@ impl VfsFile {
 
     /// Writes to this open file from an iterator source using a caller-owned position.
     pub fn write_iter_from(&self, iter: &mut IovIterSource<'_>, pos: &mut u64) -> VfsResult<usize> {
+        let cred = self.cred();
+        self.write_iter_from_as(iter, pos, cred)
+    }
+
+    /// Writes from an iterator using `cred` for write-time privilege checks.
+    ///
+    /// Linux `file-remove-privs` consults the writing task's effective
+    /// `CAP_FSETID` (`capable()`), not the credential captured when the file
+    /// was opened, so syscall entry points pass the current credential here.
+    pub fn write_iter_from_as(
+        &self,
+        iter: &mut IovIterSource<'_>,
+        pos: &mut u64,
+        cred: &Cred,
+    ) -> VfsResult<usize> {
         let _write_guard = if self.mode().contains(FMode::WRITER) {
             Some(self.path().lock_writable_mount()?)
         } else {
             None
         };
-        if self.is_stream() {
-            self.verify_write_area(0, iter.count())?;
-            let mut iocb = Kiocb::new(self, 0);
-            self.operations().write_iter(&mut iocb, iter)
-        } else if self.flags().contains(OpenFlags::APPEND)
-            && self.inode().node_type() != NodeType::BlockDevice
-        {
-            // Block devices keep the caller's position for appends: Linux
-            // `blkdev_write_iter` writes at `ki_pos` and never repositions to
-            // the capacity end like regular-file append handling does.
-            let end = self.size();
-            self.verify_write_area(end, iter.count())?;
-            let mut iocb = Kiocb::new(self, end);
-            let written = self.operations().write_iter(&mut iocb, iter)?;
-            if written != 0 {
-                *pos = iocb.ki_pos();
-            }
-            Ok(written)
+        // Block devices keep the caller's position for appends: Linux
+        // `blkdev_write_iter` writes at `ki_pos` and never repositions to the
+        // capacity end like regular-file append handling does.
+        let appends_at_end = self.flags().contains(OpenFlags::APPEND)
+            && self.inode().node_type() != NodeType::BlockDevice;
+        let start = if self.is_stream() {
+            0
+        } else if appends_at_end {
+            self.size()
         } else {
-            self.verify_write_area(*pos, iter.count())?;
-            let mut iocb = Kiocb::new(self, *pos);
-            let written = self.operations().write_iter(&mut iocb, iter)?;
-            if written != 0 {
-                *pos = iocb.ki_pos();
-            }
-            Ok(written)
+            *pos
+        };
+        // Reject an impossible range before touching metadata.
+        self.verify_write_area(start, iter.count())?;
+        // Linux runs its generic write checks before `file_remove_privs()`, so
+        // a write the filesystem rejects with `EFBIG` must not revoke the
+        // file's privileges first. A position at or beyond the size limit is
+        // always such a write; leave the decision (and any earlier denial,
+        // such as an immutable inode's `EPERM`) to the backend.
+        let beyond_size_limit =
+            self.inode().node_type() == NodeType::RegularFile && start >= self.max_file_size();
+        // Linux `vfs_write()` drops set-UID/set-GID bits and the file
+        // capability attribute before the filesystem sees the data, so a
+        // writable privileged executable cannot keep authority it no longer
+        // matches. The privilege lock covers the revocation and the backend
+        // write, so a concurrent `setxattr` cannot install a capability
+        // between them. An empty or doomed write changes no content and takes
+        // no revocation; it still reaches the backend so its own checks report
+        // as before.
+        let revokes_privileges =
+            iter.count() > 0 && !beyond_size_limit && self.mode().contains(FMode::WRITER);
+        let privilege_inode = revokes_privileges.then(|| self.inode());
+        let _privilege_guard = privilege_inode
+            .as_ref()
+            .map(|inode| inode.lock_privileges());
+        if revokes_privileges {
+            self.path().file_remove_privs_locked(cred)?;
         }
+        let mut iocb = Kiocb::new(self, start);
+        let written = self.operations().write_iter(&mut iocb, iter)?;
+        if written != 0 {
+            // Invalidate content-keyed consumers (the exec ELF header cache).
+            self.inode().bump_content_generation();
+        }
+        if !self.is_stream() && written != 0 {
+            *pos = iocb.ki_pos();
+        }
+        Ok(written)
     }
 
     pub(crate) fn file_accessed(&self) {
@@ -1675,16 +1752,43 @@ impl VfsFile {
     /// keeps a batch from carrying a stale size snapshot past a disk-size
     /// advance.
     pub fn fallocate(&self, flags: FallocateFlags, offset: u64, len: u64) -> VfsResult<()> {
+        let cred = self.cred();
+        self.fallocate_as(flags, offset, len, cred)
+    }
+
+    /// [`Self::fallocate`] with the calling task's credential.
+    ///
+    /// Linux `vfs_fallocate()` calls `file_modified()` after a successful
+    /// backend call, so the privilege revocation uses the current task, not
+    /// the descriptor's opener.
+    pub fn fallocate_as(
+        &self,
+        flags: FallocateFlags,
+        offset: u64,
+        len: u64,
+        cred: &Cred,
+    ) -> VfsResult<()> {
         let _write_guard = self.path().lock_writable_mount()?;
         let inode = self.inode();
         let operations = self.operations();
         if !operations.supported_fallocate_modes().contains(flags) {
             return Err(VfsError::from(LinuxError::EOPNOTSUPP));
         }
+        let _privilege_guard = inode.lock_privileges();
         let _data_guard = inode.lock_data();
+        // Recheck under the data lock: a concurrent `FS_IOC_SETFLAGS` also
+        // takes it, so IMMUTABLE cannot be installed between the check and the
+        // first backend write.
         inode.check_mutable()?;
+        // Linux `setattr_prepare()` removes inherited privileges before the
+        // filesystem commits any content or size change; revoke before the
+        // backend can partially allocate and then fail.
+        self.path().file_remove_privs_locked(cred)?;
         let _invalidate_guard = self.mapping().lock_invalidate_exclusive();
-        operations.fallocate(self, flags, offset, len)
+        let result = operations.fallocate(self, flags, offset, len);
+        // A failed backend may still have committed a prefix (kext4).
+        inode.bump_content_generation();
+        result
     }
 
     /// Returns this file's backend fallocate capability mask.

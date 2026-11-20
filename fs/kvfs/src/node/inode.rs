@@ -13,7 +13,7 @@ use core::{
     any::Any,
     fmt,
     hash::{Hash, Hasher},
-    sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 use bitflags::bitflags;
@@ -32,9 +32,9 @@ use super::{
 use crate::{
     AddressSpace, AddressSpaceOperations, DelayedCall, Dentry, DeviceId, FiemapExtentInfo,
     FileOperations, InodeTimes, LockedDentry, Metadata, MetadataUpdate, MountIdmap, Mutex,
-    NodePermission, NodeType, Path, Permission, RwLock, RwLockReadGuard, RwLockWriteGuard,
-    SuperBlock, Umode, VfsError, VfsFileBuilder, VfsResult, XattrName, XattrNameSink,
-    XattrSetFlags,
+    MutexGuard, NodePermission, NodeType, Path, Permission, RwLock, RwLockReadGuard,
+    RwLockWriteGuard, SuperBlock, Umode, VfsError, VfsFileBuilder, VfsResult, XattrName,
+    XattrNameSink, XattrSetFlags,
     address_space::{default_address_space_operations, empty_address_space_operations},
     generic_permission,
     pipe::{PipeObject, fifo_file_operations},
@@ -1296,12 +1296,65 @@ pub struct VfsInode {
     notification_mask: AtomicU32,
     data_lock: RwLock<()>,
     namespace_lock: RwLock<()>,
+    /// Serializes privilege revocation with the content/metadata change it
+    /// protects (Linux's `inode_lock` around `file_remove_privs()` and the
+    /// write). Acquire after the writable-mount lock and before
+    /// [`Self::lock_data`]; the writeback path never takes it.
+    privilege_lock: Mutex<()>,
     inode_operations: Arc<dyn InodeOperations>,
     file_operations: Arc<dyn FileOperations>,
     private_data: Arc<dyn Any + Send + Sync>,
     mapping: Arc<AddressSpace>,
     special_state: InodeSpecialState,
     file_locks: klazy::Once<KBox<crate::locks::FileLockContext>>,
+    /// Counts content substitutions (write, truncate, fallocate, native copy).
+    ///
+    /// Consumers that cache file bytes, such as the exec ELF header cache,
+    /// key on this generation so an in-place rewrite cannot reuse headers
+    /// from an earlier version of the same file.
+    content_generation: AtomicU64,
+    /// Cached `security.capability` presence packed with a generation counter.
+    ///
+    /// Low eight bits hold [`FileCapabilityState`]; the upper bits count every
+    /// installed or removed attribute, so a revocation that observed a value
+    /// can detect that a concurrent capability operation overtook it.
+    capability_state: AtomicU64,
+    /// Whether this inode may carry extended attributes.
+    ///
+    /// Backends that can answer from on-disk metadata set it at load and the
+    /// VFS keeps it set when an attribute is installed, so an ordinary content
+    /// write can skip the attribute store entirely (Linux `S_NOSEC`).
+    has_extended_attributes: AtomicBool,
+}
+
+/// Cached presence of the `security.capability` attribute on an inode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileCapabilityState {
+    /// Not consulted yet; the first write performs one store lookup.
+    Unknown = 0,
+    /// The attribute exists.
+    Present = 1,
+    /// The attribute is known to be absent (or the store has no xattrs).
+    Absent  = 2,
+}
+
+impl FileCapabilityState {
+    const fn from_raw(raw: u64) -> Self {
+        match raw & 0xff {
+            1 => Self::Present,
+            2 => Self::Absent,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+fn decode_file_capability_state(packed: u64) -> FileCapabilityState {
+    FileCapabilityState::from_raw(packed)
+}
+
+/// Packs a new state and generation into an inode's capability cache word.
+fn pack_file_capability(observed: u64, state: FileCapabilityState) -> u64 {
+    ((observed >> 8).wrapping_add(1) << 8) | state as u64
 }
 
 /// Weak reference to a VFS inode identity.
@@ -1359,6 +1412,7 @@ pub struct VfsInodeInit {
     block_bytes: u16,
     block_bits: u8,
     blocks: u64,
+    has_extended_attributes: bool,
 }
 
 impl VfsInodeInit {
@@ -1379,7 +1433,22 @@ impl VfsInodeInit {
             block_bytes: 0,
             block_bits: 0,
             blocks: 0,
+            has_extended_attributes: false,
         }
+    }
+
+    /// Marks whether the inode may carry extended attributes.
+    ///
+    /// A backend that cannot tell from its on-disk metadata leaves this clear;
+    /// the VFS then learns about attributes when they are installed.
+    pub const fn with_extended_attributes(mut self, has: bool) -> Self {
+        self.has_extended_attributes = has;
+        self
+    }
+
+    /// Returns whether the inode may carry extended attributes.
+    pub(crate) const fn has_extended_attributes(self) -> bool {
+        self.has_extended_attributes
     }
 
     /// Build inode fields from a metadata snapshot.
@@ -1816,6 +1885,7 @@ impl VfsInode {
             notification_mask: AtomicU32::new(0),
             data_lock: RwLock::new(()),
             namespace_lock: RwLock::new(()),
+            privilege_lock: Mutex::new(()),
             inode_operations,
             file_operations: file_operations.unwrap_or_else(no_open_file_operations),
             private_data,
@@ -1826,6 +1896,9 @@ impl VfsInode {
             ),
             special_state: InodeSpecialState::new(),
             file_locks: klazy::Once::new(),
+            has_extended_attributes: AtomicBool::new(init.has_extended_attributes()),
+            content_generation: AtomicU64::new(0),
+            capability_state: AtomicU64::new(FileCapabilityState::Unknown as u64),
         })
     }
 
@@ -2153,6 +2226,16 @@ impl VfsInode {
         self.data_lock.write()
     }
 
+    /// Serializes a privilege-sensitive operation for this inode.
+    ///
+    /// Covers the revocation plus the content or metadata change it guards, so
+    /// `setxattr`, `chown`, `truncate`, native copies and buffered writes agree
+    /// on one order. Acquire after the writable-mount lock and before
+    /// [`Self::lock_data`]. Writeback never takes it.
+    pub fn lock_privileges(&self) -> MutexGuard<'_, ()> {
+        self.privilege_lock.lock()
+    }
+
     pub(crate) fn lock_data_shared(&self) -> crate::RwLockReadGuard<'_, ()> {
         self.data_lock.read()
     }
@@ -2281,6 +2364,69 @@ impl VfsInode {
     /// Returns the flags of the node.
     pub fn flags(&self) -> NodeFlags {
         self.attributes.flags()
+    }
+
+    /// Returns the cached `security.capability` presence.
+    /// Returns the generation of this inode's content.
+    ///
+    /// Bumped whenever a write, truncate, fallocate or native copy may have
+    /// substituted bytes; consumers cache parsed content against it.
+    pub fn content_generation(&self) -> u64 {
+        self.content_generation.load(Ordering::Acquire)
+    }
+
+    /// Records a possible content substitution.
+    pub fn bump_content_generation(&self) {
+        self.content_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn file_capability_state(&self) -> FileCapabilityState {
+        decode_file_capability_state(self.capability_state.load(Ordering::Acquire))
+    }
+
+    /// Returns the packed state and generation for a compare-and-swap update.
+    pub(crate) fn file_capability_snapshot(&self) -> u64 {
+        self.capability_state.load(Ordering::Acquire)
+    }
+
+    /// Decodes the presence recorded in a snapshot from [`Self::file_capability_snapshot`].
+    pub(crate) fn file_capability_state_of(&self, snapshot: u64) -> FileCapabilityState {
+        decode_file_capability_state(snapshot)
+    }
+
+    /// Records a capability operation, bumping the generation.
+    pub(crate) fn mark_file_capability(&self, state: FileCapabilityState) {
+        let _ =
+            self.capability_state
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    Some(pack_file_capability(current, state))
+                });
+    }
+
+    /// Records the state only while no other capability operation intervened.
+    pub(crate) fn try_mark_file_capability(
+        &self,
+        observed: u64,
+        state: FileCapabilityState,
+    ) -> bool {
+        self.capability_state
+            .compare_exchange(
+                observed,
+                pack_file_capability(observed, state),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Returns whether this inode may carry extended attributes.
+    pub fn has_extended_attributes(&self) -> bool {
+        self.has_extended_attributes.load(Ordering::Relaxed)
+    }
+
+    /// Records that an extended attribute was installed on this inode.
+    pub(crate) fn mark_extended_attributes(&self) {
+        self.has_extended_attributes.store(true, Ordering::Relaxed);
     }
 
     /// Returns operation flags cached on this inode.

@@ -79,13 +79,13 @@ pub use namei::{DelayedCall, LastType, ParentLookup, dentry_open, may_mknod};
 pub use node::{
     CharacterDeviceRegistration, Dentry, DentryNotification, DentryOperations, DeviceAccess,
     DeviceAccessPolicy, DeviceFileOps, DirContext, DirEntrySink, FiemapCapability, FileAttr,
-    GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations, InodeDirOperations,
-    InodeFiemapOperations, InodeLookupFlags, InodeOperations, InodeSymlinkOperations,
-    InodeUpdateTime, LockedDentry, MmapMapper, NodeFlags, RenameFlags, VfsInode, VfsInodeInit,
-    WeakVfsInode, cdev_add, cdev_add_named, cdev_del, check_device_access, empty_inode_operations,
-    generic_update_time, get_next_ino, inode_init_owner, metadata_only_inode_operations,
-    open_character_device, register_device_access_policy, registered_character_devices,
-    subscribe_character_devices,
+    FileCapabilityState, GetattrQueryFlags, GetattrRequestMask, InodeAttributeOperations,
+    InodeDirOperations, InodeFiemapOperations, InodeLookupFlags, InodeOperations,
+    InodeSymlinkOperations, InodeUpdateTime, LockedDentry, MmapMapper, NodeFlags, RenameFlags,
+    VfsInode, VfsInodeInit, WeakVfsInode, cdev_add, cdev_add_named, cdev_del, check_device_access,
+    empty_inode_operations, generic_update_time, get_next_ino, inode_init_owner,
+    metadata_only_inode_operations, open_character_device, register_device_access_policy,
+    registered_character_devices, subscribe_character_devices,
 };
 pub(crate) use node::{
     DentryKey, d_inode, d_is_dir, d_is_negative, d_is_symlink, d_really_is_positive,
@@ -111,7 +111,9 @@ pub use super_block::{
     SuperBlockRegistry, default_evict_inode, get_tree_bdev, get_tree_nodev, super_block_registry,
     sync_filesystems,
 };
-pub use transfer::{TransferPosition, copy_file_range, transfer_files};
+pub use transfer::{
+    TransferPosition, copy_file_range, copy_file_range_as, transfer_files, transfer_files_as,
+};
 pub(crate) use type_map::TypeMap;
 pub use types::{
     DeviceId, FallocateFlags, InodeTimes, Metadata, MetadataUpdate, NodePermission, NodeType,

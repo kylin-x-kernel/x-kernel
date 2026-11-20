@@ -1784,6 +1784,18 @@ impl Ext4Inode {
         self.with_metadata(|metadata| metadata.file_acl)
     }
 
+    /// Returns whether this inode stores any extended attributes.
+    ///
+    /// Either an external attribute block or an inline attribute area can hold
+    /// `security.capability`, so the VFS keeps the `S_NOSEC`-style fast path
+    /// disabled for both. The inline area is a fixed slice of the inode body
+    /// and is never empty, so presence follows its ibody magic instead.
+    pub(crate) fn has_extended_attributes(&self) -> bool {
+        self.with_metadata(|metadata| {
+            metadata.file_acl != 0 || crate::xattr::inline_xattrs_present(&metadata.inline_xattr)
+        })
+    }
+
     pub(crate) fn extra_isize(&self) -> u16 {
         self.with_metadata(|metadata| metadata.extra_isize)
     }

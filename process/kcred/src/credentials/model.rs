@@ -10,7 +10,8 @@ use kerrno::{KError, KResult};
 
 use super::{
     CAP_FS_MASK, CAP_LAST_CAP, CAP_SETGID, CAP_SETPCAP, CAP_SETUID, CAP_SYS_NICE, CAP_SYS_PTRACE,
-    CapSet, CapSets, Gid, Uid, is_valid_gid, is_valid_uid, securebits::SecureBits,
+    CapSet, CapSets, FileCapabilities, Gid, Uid, is_valid_gid, is_valid_uid,
+    securebits::SecureBits,
 };
 
 /// Credential mode used by Linux `PTRACE_MODE_READ_*` access checks.
@@ -20,6 +21,37 @@ pub enum PtraceAccessMode {
     RealCreds,
     /// Compare against caller filesystem IDs and effective capabilities.
     FsCreds,
+}
+
+/// Identity changes an executable's set-ID bits request at `execve(2)`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExecIds {
+    /// Effective user ID after the exec.
+    pub euid: Uid,
+    /// Effective group ID after the exec.
+    pub egid: Gid,
+}
+
+/// Executable-derived inputs to the exec credential transition.
+///
+/// `execve(2)` samples these from the resolved image: its set-ID bits (when the
+/// mount is not `nosuid` and `no_new_privs` is clear) and its
+/// `security.capability` attribute. A transition without either is the plain
+/// no-file-capability exec that [`ExecSecurity::NONE`] describes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExecSecurity {
+    /// Set-ID identity change requested by the file's mode bits.
+    pub ids: Option<ExecIds>,
+    /// File capabilities stored in the file's `security.capability` attribute.
+    pub file_caps: Option<FileCapabilities>,
+}
+
+impl ExecSecurity {
+    /// An exec that grants nothing: no set-ID bits and no file capabilities.
+    pub const NONE: Self = Self {
+        ids: None,
+        file_caps: None,
+    };
 }
 
 /// User/group identity and keep-capabilities state for a task credential.
@@ -864,34 +896,119 @@ impl Cred {
     /// through `CLONE_FS`, so a set-ID or capability-gaining exec must not let
     /// the two processes observe inconsistent privilege. Same-thread-group
     /// sharing is not unsafe and must be reported as `false`.
-    pub fn apply_exec(&mut self, no_new_privs: bool, fs_shared_with_other_process: bool) {
+    pub fn apply_exec(
+        &mut self,
+        no_new_privs: bool,
+        fs_shared_with_other_process: bool,
+    ) -> KResult<()> {
+        self.apply_exec_with_security(
+            no_new_privs,
+            fs_shared_with_other_process,
+            ExecSecurity::NONE,
+        )
+        .map(|_| ())
+    }
+
+    /// Executes Linux's full exec transition, including set-ID identities and
+    /// file capabilities, and reports whether the exec is privileged.
+    ///
+    /// `security` carries what `execve(2)` sampled from the executable: the
+    /// set-ID identity changes authorized by its mode bits and mount, and the
+    /// `security.capability` sets it stores. Under `no_new_privs` the loader
+    /// omits the set-ID identities, matching Linux `bprm_fill_uid()`, but it
+    /// still samples the file capabilities; the downgrade clamp below keeps
+    /// them from growing the permitted set.
+    ///
+    /// Returns `true` when the result is a secure exec (`bprm->secureexec`):
+    /// a set-ID identity change, or a non-real-root caller whose exec gains an
+    /// effective set or a permitted set wider than the new ambient set.
+    /// Callers publish that as `AT_SECURE`.
+    pub fn apply_exec_with_security(
+        &mut self,
+        no_new_privs: bool,
+        fs_shared_with_other_process: bool,
+        security: ExecSecurity,
+    ) -> KResult<bool> {
         let old_permitted = self.capabilities.permitted();
         let old_effective_setuid = self.capabilities.has_effective(CAP_SETUID);
-        let privileged_root =
-            !self.securebits.contains(SecureBits::NOROOT) && (self.ruid == 0 || self.euid == 0);
         let inheritable = self.capabilities.inheritable();
-        let mut permitted = if privileged_root {
+        let old_ruid = self.ruid;
+        let old_rgid = self.rgid;
+
+        // Linux `bprm_fill_uid()` runs before the capability transition.
+        if let Some(ids) = security.ids {
+            self.euid = ids.euid;
+            self.egid = ids.egid;
+        }
+        // Linux `__is_setuid()`/`__is_setgid()` compare the post-fill effective
+        // IDs with the pre-exec REAL IDs. A set-GID target is not exempted by
+        // group membership, and a pre-existing euid/egid mismatch is already a
+        // set-ID condition. This drives ambient clearing, the downgrade clamp
+        // and `bprm->secureexec`.
+        let is_setid = self.euid != old_ruid || self.egid != old_rgid;
+
+        // Linux `handle_privileged_root()` classifies by the post-fill IDs:
+        // `__is_real` is the real UID and `__is_eff` the effective UID. A
+        // non-real caller elevated to effective UID 0 by a set-UID file whose
+        // own capability attribute exists keeps the file formula; every other
+        // real/effective root caller overrides it with the root reconstruction.
+        let root_privileged = !self.securebits.contains(SecureBits::NOROOT);
+        let effective_root = self.euid == 0;
+        let real_root = self.ruid == 0;
+        let file_caps = security.file_caps;
+        let has_fcap = file_caps.is_some();
+        let file_effective = file_caps.is_some_and(FileCapabilities::effective);
+        // Linux `bprm_caps_from_vfs_caps()`: pP' = (X & fP) | (pI & fI).
+        let file_permitted = file_caps.map_or(CapSet::EMPTY, |caps| {
+            caps.permitted()
+                .intersection(self.cap_bounding)
+                .union(inheritable.intersection(caps.inheritable()))
+        });
+        let mixed_setuid_fcaps = has_fcap && !real_root && effective_root;
+        let root_reconstruction =
+            root_privileged && !mixed_setuid_fcaps && (effective_root || real_root);
+        let mut permitted = if root_reconstruction {
+            // pP' = (cap_bset & ~0) | (pI & ~0)
             self.cap_bounding
                 .union(inheritable)
                 .intersection(CapSet::FULL)
         } else {
-            CapSet::EMPTY
+            file_permitted
         };
-        let grant_effective = privileged_root && self.euid == 0;
+        // `handle_privileged_root()` forces the effective bit only for
+        // effective UID 0; otherwise the file's flag survives, so a privileged
+        // root caller that moves its effective UID off root keeps it.
+        let grant_effective = file_effective || (root_reconstruction && effective_root);
 
-        // Linux's id_changed has an euid half and an egid-group half. This
-        // kernel's exec changes no IDs, so the euid half cannot fire; a
-        // preceding setfsgid() can still leave egid outside the old
-        // filesystem/supplementary group set.
-        let id_changed = !self.in_group(self.egid);
-        let ambient = if id_changed {
+        // Linux rejects an exec whose effective file capability set cannot be
+        // delivered: `bprm_caps_from_vfs_caps()` fails with `EPERM` when the
+        // file's permitted set is not contained in the resulting permitted set
+        // (for example because the bounding set dropped one of its bits).
+        if file_effective {
+            let declared = file_caps.map_or(CapSet::EMPTY, FileCapabilities::permitted);
+            // Check against the file formula, not the root reconstruction: a
+            // bit that only the old inheritable set could deliver is not a
+            // deliverable file capability.
+            if !declared.is_subset_of(file_permitted) {
+                return Err(KError::OperationNotPermitted);
+            }
+        }
+
+        // A file capability set is also a privilege transition: ambient
+        // capabilities do not survive it even when the IDs stay put.
+        let ambient = if is_setid || has_fcap {
             CapSet::EMPTY
         } else {
             self.cap_ambient
         };
 
         let grows_permitted = !permitted.is_subset_of(old_permitted);
-        if (id_changed || grows_permitted) && (no_new_privs || fs_shared_with_other_process) {
+        if (is_setid || grows_permitted) && (no_new_privs || fs_shared_with_other_process) {
+            // Linux tests the prospective credential's effective `CAP_SETUID`,
+            // which is still the pre-exec effective set at this point. The
+            // identity reset does not depend on the permitted set growing, so
+            // a set-UID or set-GID file under a shared filesystem context is
+            // normalized even when it confers no capability.
             if no_new_privs || !old_effective_setuid {
                 self.euid = self.ruid;
                 self.egid = self.rgid;
@@ -903,7 +1020,6 @@ impl Cred {
         // inheritable sets, so merging them here cannot bypass the clamp above.
         permitted = permitted.union(ambient);
 
-        // Future executable metadata support must update euid/egid before this reset.
         self.suid = self.euid;
         self.fsuid = self.euid;
         self.sgid = self.egid;
@@ -915,6 +1031,11 @@ impl Cred {
 
         // Keep-capabilities does not survive exec, even when its lock is set.
         self.securebits.remove(SecureBits::KEEP_CAPS);
+
+        // Linux `bprm->secureexec`: an identity change, or a non-real-root
+        // caller whose effective set is granted or whose permitted set exceeds
+        // the ambient set (`__cap_grew(permitted, ambient)`).
+        Ok(is_setid || (!real_root && (grant_effective || !permitted.is_subset_of(ambient))))
     }
 
     /// Applies Linux's set-user-ID capability fixup (`cap_emulate_setxuid`).
