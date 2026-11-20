@@ -1240,10 +1240,11 @@ fn test_apply_prepared_unshare_installs_namespace_bundle() {
         .prepare_unshare(
             kns::NamespaceFlags::NEWUTS | kns::NamespaceFlags::NEWIPC,
             kns::UnshareContext {
-                privileged: true,
+                cred: initial_cred(),
                 fs_shared_with_others: false,
                 unshare_fs: false,
                 unshare_files: false,
+                current_cgroup: None,
             },
             &thread.process().fs_context().expect("fs context").lock(),
         )
@@ -1282,10 +1283,11 @@ fn test_apply_prepared_unshare_installs_namespace_bundle() {
         .prepare_unshare(
             kns::NamespaceFlags::empty(),
             kns::UnshareContext {
-                privileged: false,
+                cred: Arc::new(Cred::new(1000, 1000)),
                 fs_shared_with_others: false,
                 unshare_fs: false,
                 unshare_files: true,
+                current_cgroup: None,
             },
             &thread.process().fs_context().expect("fs context").lock(),
         )
@@ -1579,7 +1581,8 @@ fn test_final_thread_preparation_failure_rolls_back_child_relation() {
             exit_signal: Some(ksignal::Signo::SIGCHLD),
             cgroup_target: None,
         },
-        |runtime, identity| {
+        parent_task.as_thread().real_cred().clone(),
+        |runtime: Arc<crate::process_runtime::ProcessRuntime>, identity, _user_ns| {
             observation = Some((
                 runtime.process().clone(),
                 Arc::downgrade(&runtime),
@@ -1723,6 +1726,9 @@ fn test_clone_fs_shares_the_filesystem_context_umask() {
             namespace_flags: kns::NamespaceFlags::empty(),
             exit_signal: Some(ksignal::Signo::SIGCHLD),
             cgroup_target: None,
+        })
+        .inspect_err(|err| {
+            unittest::ktest_println!("CLONE_FS prepare error: {:?}", err);
         })
         .expect("CLONE_FS test child should prepare");
     let child_process = child.process().clone();
@@ -2315,6 +2321,38 @@ fn test_process_exit_notifies_pidfd_and_parent_waiters() {
 }
 
 #[def_test(serial)]
+fn test_zombie_retains_namespace_owner_after_task_drop() {
+    let init = ensure_init();
+    let child = init.fork(581);
+    let task = publish_test_thread(&child, 581);
+    let is_last = process_exit::finish_thread_exit(&child, &task, 0);
+    assert!(is_last, "fixture child must have a single thread");
+
+    let autoreap = process_exit::complete_process_exit(&child);
+    assert!(!autoreap, "default SIGCHLD must leave a waitable child");
+
+    // Production drops the exited Task (and its strong ProcessRuntime owner)
+    // in the final context switch; the zombie must still retain its namespace
+    // owner independently of that runtime.
+    drop(task);
+
+    // Production drops the exited Task (and its runtime) after the final
+    // switch; the zombie must still retain the namespace owner independently.
+    // The real do_exit path is covered by posix-process's
+    // `do_exit_retains_namespaces_until_reap`.
+    child
+        .mnt_ns()
+        .expect("waitable zombie must keep its namespace owner");
+
+    wait_reap::assert_reap_zombie_process(&child);
+
+    assert!(
+        child.mnt_ns().is_err(),
+        "reaped process must release its namespace owner"
+    );
+}
+
+#[def_test(serial)]
 fn test_complete_process_exit_wakes_parent_after_child_is_waitable() {
     let init = ensure_init();
     let child = init.fork(579);
@@ -2857,6 +2895,52 @@ fn test_thread_pidfd_fdinfo_reports_its_own_tid() {
     assert!(!process.exit_thread(sibling.task(), 0));
     assert_eq!(pidfd.fdinfo_pid(None), -1);
     drop(sibling);
+
+    assert!(process.exit_thread(&leader_task, 0));
+    process.exit_with_publication(ProcessExitPublication::WaitableZombie);
+    process.free();
+    let _ = process_publication().unpublish_process_if_matches(&process);
+    drop(leader_task);
+    process_publication().cleanup();
+}
+
+#[def_test(user, serial)]
+fn test_namespaced_process_lookup_uses_namespace_index() {
+    let init = ensure_init();
+    let root_ns = init.active_pid_namespace();
+    let child_ns = kidentity::PidNamespace::new_child(&root_ns);
+    let leader_number = kidentity::PidHandle::allocate_in(&child_ns).unwrap();
+    let process = init.fork_with_task_number(leader_number, Some(ksignal::Signo::SIGCHLD));
+    let leader_task = publish_test_thread(&process, process.pid());
+
+    // The child has local number 1 in `child_ns`; the lookup must hit the
+    // publication index and return the same process identity.
+    crate::publication::NS_INDEX_HITS.store(0, core::sync::atomic::Ordering::Relaxed);
+    let resolved = crate::procfs::process_task_in_namespace(1, Some(&child_ns)).unwrap();
+    assert!(Arc::ptr_eq(resolved.as_thread().process(), &process));
+    assert!(
+        crate::publication::NS_INDEX_HITS.load(core::sync::atomic::Ordering::Relaxed) > 0,
+        "namespaced lookup must use the publication index, not the scan fallback"
+    );
+
+    // `/proc/<pid>/stat` projection: the leader is 1 in the child namespace,
+    // while the parent, process group and session leaders live outside it and
+    // therefore have no projection (Linux `pid_nr_ns` renders 0).
+    let mut stat = crate::TaskStat::from_thread(&leader_task);
+    stat.project_pid_namespace(&process, &child_ns);
+    assert_eq!(stat.pid, 1);
+    assert_eq!(stat.ppid, 0);
+    assert_eq!(stat.pgrp, 0);
+    assert_eq!(stat.session, 0);
+
+    // A root-namespace lookup still resolves by the global number.
+    let root_resolved =
+        crate::procfs::process_task_in_namespace(process.pid(), Some(&root_ns)).unwrap();
+    assert!(Arc::ptr_eq(root_resolved.as_thread().process(), &process));
+
+    // An unrelated sibling namespace has no number 1 for this process.
+    let other_ns = kidentity::PidNamespace::new_child(&root_ns);
+    assert!(crate::procfs::process_task_in_namespace(1, Some(&other_ns)).is_err());
 
     assert!(process.exit_thread(&leader_task, 0));
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);

@@ -6,7 +6,7 @@
 
 use alloc::sync::Arc;
 
-use kcred::NamespaceId;
+use kcred::{NamespaceId, UserNamespace};
 use ksync::{Mutex, static_lock};
 
 /// IPC namespace.
@@ -15,6 +15,7 @@ use ksync::{Mutex, static_lock};
 /// Full migration of message queue and shared memory managers will follow.
 pub struct IpcNamespace {
     id: NamespaceId,
+    owner: Arc<UserNamespace>,
 }
 
 impl Default for IpcNamespace {
@@ -24,16 +25,27 @@ impl Default for IpcNamespace {
 }
 
 impl IpcNamespace {
-    /// Creates a new IPC namespace.
+    /// Creates a new IPC namespace owned by the initial user namespace.
     pub fn new() -> Self {
+        Self::new_in(kcred::initial_user_namespace())
+    }
+
+    /// Creates a new IPC namespace owned by `owner`.
+    pub fn new_in(owner: Arc<UserNamespace>) -> Self {
         Self {
             id: NamespaceId::new(),
+            owner,
         }
     }
 
     /// Returns the namespace ID.
     pub fn id(&self) -> NamespaceId {
         self.id
+    }
+
+    /// Returns the user namespace that owns this IPC namespace.
+    pub fn owner(&self) -> &Arc<UserNamespace> {
+        &self.owner
     }
 }
 

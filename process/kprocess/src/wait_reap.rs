@@ -53,12 +53,31 @@ pub fn try_reap_zombie_process(process: &Arc<Process>) -> bool {
     if !process.reap_waitable_zombie_from_parent() {
         return false;
     }
+    release_zombie_namespaces(process);
     lookup::unpublish_process_if_matches(process);
     // Namespace ownership is deliberately retained through the zombie window
     // so /proc/<pid>/ns/* can pin a container init's namespaces. Releasing it
     // here runs in the waiting/reaping task context, not in IRQ context.
     let _ = process.exit_namespaces();
     true
+}
+
+/// Releases the namespace owner of an exiting process at reap time.
+///
+/// Linux releases `nsproxy` in `release_task()`, not in `do_exit()`, so an
+/// unreaped zombie keeps serving `/proc/<pid>/ns/*`; container runtimes pin
+/// the container init's namespaces through those files after the container
+/// process has exited. `do_exit()` therefore only drops mm/files, and this
+/// helper completes the namespace release once the process identity is
+/// consumed. Errors are ignored: the runtime may already be gone when a
+/// racing reaper wins the consumption.
+fn release_zombie_namespaces(process: &Arc<Process>) {
+    if let Err(err) = process.exit_namespaces() {
+        debug!(
+            "namespace release at reap failed for {}: {err:?}",
+            process.pid()
+        );
+    }
 }
 
 /// Scans `parent` for a matching waitable child and optionally consumes it.
@@ -79,6 +98,7 @@ pub fn scan_waitable_child(
     {
         let (utime, stime) = waited.total_cpu_time();
         record_reaped_child_cpu_time(parent, utime, stime);
+        release_zombie_namespaces(waited.process());
         // Identity was already retired in-process-domain; this drops the map
         // entry when the PID has not been reused under a different slot.
         lookup::unpublish_process_if_matches(waited.process());
@@ -89,6 +109,7 @@ pub fn scan_waitable_child(
 /// Releases a process that has already transitioned out of the waitable state.
 pub fn reap_exited_process(process: &Arc<Process>) {
     if process.detach_dead_from_parent() {
+        release_zombie_namespaces(process);
         lookup::unpublish_process_if_matches(process);
         let _ = process.exit_namespaces();
     }
@@ -96,6 +117,7 @@ pub fn reap_exited_process(process: &Arc<Process>) {
 
 /// Removes a process identity after the process-domain relation was already detached.
 pub fn reap_detached_process_identity(process: &Arc<Process>) {
+    release_zombie_namespaces(process);
     lookup::unpublish_process_if_matches(process);
     let _ = process.exit_namespaces();
 }

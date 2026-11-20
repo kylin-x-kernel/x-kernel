@@ -592,6 +592,15 @@ impl Dentry {
         self.0.super_block.poll().and_then(Weak::upgrade)
     }
 
+    /// Returns the user namespace that owns this dentry's superblock
+    /// (Linux `s_user_ns`), falling back to the initial namespace before the
+    /// superblock binding is published.
+    pub fn user_namespace(&self) -> alloc::sync::Arc<kcred::UserNamespace> {
+        self.super_block()
+            .map(|super_block| super_block.user_ns())
+            .unwrap_or_else(kcred::initial_user_namespace)
+    }
+
     /// Attaches this dentry subtree to a superblock.
     pub(crate) fn bind_super_block(&self, super_block: &Arc<SuperBlock>) {
         let inode = self.0.inode.lock().clone();

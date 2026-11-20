@@ -29,7 +29,14 @@ pub(crate) fn sys_getsid(pid: i32) -> KResult<isize> {
 pub(crate) fn sys_setsid() -> KResult<isize> {
     let current_thread = kprocess::current_user_thread();
     let proc = current_thread.process();
-    if kprocess::job_control::target_group(proc.pid()).is_ok() {
+    // Linux rejects setsid only when the caller already owns a registered
+    // process group. The kernel-created init process never goes through
+    // setpgid, yet it is pre-registered as its own group and session leader
+    // (pgid == sid == pid) at boot — precisely the state setsid() would
+    // establish — so exempt it. Every other group leader, e.g. one created
+    // via setpgid, keeps failing with EPERM as on Linux. PID 1 dependencies
+    // such as kata-agent's init mode rely on this succeeding.
+    if !proc.is_init() && kprocess::job_control::target_group(proc.pid()).is_ok() {
         return Err(KError::OperationNotPermitted);
     }
 

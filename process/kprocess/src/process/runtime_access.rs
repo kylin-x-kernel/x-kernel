@@ -10,7 +10,7 @@ use alloc::{
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use fs_context::FsStruct;
-use kcred::Cred;
+use kcred::{Cred, UserNamespace};
 use kerrno::{KError, KResult};
 use khal::paging::MappingFlags;
 use ksignal::api::ProcessSignalManager;
@@ -211,7 +211,33 @@ impl ProcessExecUpdate {
 impl Process {
     /// Records a weak reference to the runtime owned by this process.
     pub(crate) fn set_runtime_ref(&self, runtime: &Arc<ProcessRuntime>) {
+        if let Some(nsproxy) = runtime.nsproxy() {
+            let mut retained = self.retained_nsproxy.lock();
+            let previous = retained.take();
+            *retained = Some(nsproxy);
+            drop(retained);
+            drop(previous);
+        }
         *self.runtime_ref.lock() = Some(Arc::downgrade(runtime));
+    }
+
+    /// Returns the namespace owner retained through the zombie window.
+    pub(crate) fn retained_nsproxy(&self) -> Option<Arc<kns::NsProxy>> {
+        self.retained_nsproxy.lock().clone()
+    }
+
+    /// Replaces the retained namespace owner after a namespace switch.
+    pub(crate) fn set_retained_nsproxy(&self, nsproxy: Option<Arc<kns::NsProxy>>) {
+        let mut retained = self.retained_nsproxy.lock();
+        let previous = retained.take();
+        *retained = nsproxy;
+        drop(retained);
+        drop(previous);
+    }
+
+    /// Takes the retained namespace owner out of the lock for teardown.
+    fn take_retained_nsproxy(&self) -> Option<Arc<kns::NsProxy>> {
+        self.retained_nsproxy.lock().take()
     }
 
     /// Returns the current task's IPC namespace while its owner is attached.
@@ -273,7 +299,7 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
     /// has been released.
     pub fn uts_ns(&self) -> KResult<Arc<kns::UtsNamespace>> {
-        self.runtime()?.uts_ns().ok_or(KError::NoSuchProcess)
+        Ok(self.nsproxy()?.uts_ns().clone())
     }
 
     /// Returns the process namespace bundle while the runtime remains attached.
@@ -283,6 +309,9 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
     /// has been released.
     pub fn nsproxy(&self) -> KResult<Arc<kns::NsProxy>> {
+        if let Some(nsproxy) = self.retained_nsproxy() {
+            return Ok(nsproxy);
+        }
         self.runtime()?.nsproxy().ok_or(KError::NoSuchProcess)
     }
 
@@ -293,10 +322,7 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
     /// has been released.
     pub fn ipc_ns(&self) -> KResult<Arc<kns::IpcNamespace>> {
-        self.runtime()?
-            .nsproxy()
-            .map(|nsproxy| nsproxy.ipc_ns().clone())
-            .ok_or(KError::NoSuchProcess)
+        Ok(self.nsproxy()?.ipc_ns().clone())
     }
 
     /// Returns the process network namespace identity while its owner is attached.
@@ -306,10 +332,7 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
     /// has been released.
     pub fn net_ns(&self) -> KResult<Arc<kns::NetNamespace>> {
-        self.runtime()?
-            .nsproxy()
-            .map(|nsproxy| nsproxy.net_ns().clone())
-            .ok_or(KError::NoSuchProcess)
+        Ok(self.nsproxy()?.net_ns().clone())
     }
 
     /// Returns the PID namespace used for future children of this process.
@@ -319,10 +342,7 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
     /// has been released.
     pub fn pid_ns_for_children(&self) -> KResult<Arc<kns::PidNamespace>> {
-        self.runtime()?
-            .nsproxy()
-            .map(|nsproxy| nsproxy.pid_ns_for_children().clone())
-            .ok_or(KError::NoSuchProcess)
+        Ok(self.nsproxy()?.pid_ns_for_children().clone())
     }
 
     /// Returns the process mount namespace while its namespace owner is attached.
@@ -332,10 +352,7 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime or namespace owner
     /// has been released.
     pub fn mnt_ns(&self) -> KResult<Arc<kns::MntNamespace>> {
-        self.runtime()?
-            .nsproxy()
-            .map(|nsproxy| nsproxy.mnt_ns().clone())
-            .ok_or(KError::NoSuchProcess)
+        Ok(self.nsproxy()?.mnt_ns().clone())
     }
 
     /// Returns the process cgroup namespace while runtime remains attached.
@@ -345,14 +362,10 @@ impl Process {
     /// Returns `KError::NoSuchProcess` when the runtime or the required namespace/mm
     /// owner has been detached.
     pub fn cgroup_ns(&self) -> KResult<Arc<kns::CgroupNamespace>> {
-        self.runtime()?
-            .nsproxy()
-            .map(|nsproxy| nsproxy.cgroup_ns().clone())
-            .ok_or(KError::NoSuchProcess)
+        Ok(self.nsproxy()?.cgroup_ns().clone())
     }
 
-    /// Returns whether the process `fs_struct` is shared with at least one
-    /// other task.
+    /// Returns whether this process's `fs_struct` has another process owner.
     ///
     /// Threads of the same process always share the filesystem context, and a
     /// `CLONE_FS` child shares it across processes. Both cases must prevent an
@@ -383,7 +396,10 @@ impl Process {
     ///
     /// Unshare preparation has already performed authorization and combination
     /// checks; this only installs the precomputed namespace bundle and
-    /// optionally replaces the filesystem context (`NEWNS`/`CLONE_FS`). The
+    /// optionally replaces the filesystem context (`NEWNS`/`CLONE_FS`). A new
+    /// user namespace is committed together with the bundle: switching only
+    /// the namespace would leave the task's capability sets attached to its
+    /// former user namespace until some later credential change. The
     /// `CLONE_FILES` descriptor-table detach is thread-owned state: the syscall
     /// adapter commits it on the calling thread after this bundle install, so
     /// sibling threads keep their own bindings.
@@ -393,7 +409,13 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the runtime is gone.
     pub fn apply_prepared_unshare(&self, prepared: kns::PreparedUnshare) -> KResult<()> {
         let runtime = self.runtime()?;
+        let user_ns = prepared.user_ns().cloned();
         let (nsproxy, new_fs, _) = prepared.into_parts();
+        if let Some(user_ns) = user_ns {
+            let thread = crate::current_user_thread();
+            let cred = thread.prepare_creds().with_user_namespace(user_ns);
+            thread.commit_creds(cred);
+        }
         runtime.set_nsproxy(nsproxy);
         if let Some(new_fs) = new_fs {
             runtime.set_fs_context(Arc::new(Mutex::new(new_fs)));
@@ -401,12 +423,18 @@ impl Process {
         Ok(())
     }
 
-    /// Enters the namespaces of `new_proxy`, optionally retargeting the process
-    /// filesystem root/pwd into a mount namespace.
+    /// Enters the namespaces of `new_proxy`, installing the credential
+    /// transition for a user-namespace switch and retargeting the filesystem
+    /// root/pwd for a mount-namespace switch.
+    ///
+    /// `user_ns` is present exactly when `setns(2)` requested `CLONE_NEWUSER`.
+    /// The matching credential is committed together with the namespace
+    /// bundle; leaving the old credential in place would keep capability
+    /// checks attached to the caller's former user namespace.
     ///
     /// `target_mnt` retargets the fs context so `CLONE_NEWNS` setns also
-    /// switches the VFS view. The caller has already authorized the switch and
-    /// validated that the namespace kind is supported.
+    /// switches the VFS view. A time-namespace switch freezes the target's
+    /// offsets once the caller is committed to it, mirroring `timens_commit`.
     ///
     /// # Errors
     ///
@@ -427,7 +455,7 @@ impl Process {
     /// #     process: &kprocess::Process,
     /// #     nsfd: alloc::sync::Arc<kns::NsFd>,
     /// # ) -> kerrno::KResult<()> {
-    /// // The NsFd channel already checked `nstype` and the caller's privilege.
+    /// // The syscall layer authorized the switch before reaching this commit.
     /// let target_mnt = match &*nsfd {
     ///     kns::NsFd::Mnt(ns) => Some(ns.clone()),
     ///     _ => None,
@@ -436,16 +464,19 @@ impl Process {
     ///     .nsproxy()?
     ///     .with_namespace(&nsfd)
     ///     .expect("kind was validated before the commit");
-    /// process.apply_setns(new_proxy, target_mnt)?;
+    /// process.apply_setns(new_proxy, None, target_mnt)?;
     /// # Ok(())
     /// # }
     /// ```
     pub fn apply_setns(
         &self,
         new_proxy: Arc<kns::NsProxy>,
+        user_ns: Option<Arc<UserNamespace>>,
         target_mnt: Option<Arc<kns::MntNamespace>>,
     ) -> KResult<()> {
         let runtime = self.runtime()?;
+        let old_proxy = runtime.nsproxy().ok_or(KError::NoSuchProcess)?;
+        let is_time_switch = !Arc::ptr_eq(old_proxy.time_ns(), new_proxy.time_ns());
         // The filesystem retarget is the only fallible step, so it is drafted
         // against a snapshot before anything is committed: a failed
         // `CLONE_NEWNS` switch must leave the namespace bundle and the fs
@@ -466,10 +497,18 @@ impl Process {
             }
             None => None,
         };
-        runtime.set_nsproxy(new_proxy);
+        if let Some(user_ns) = user_ns {
+            let thread = crate::current_user_thread();
+            let cred = thread.prepare_creds().with_user_namespace(user_ns);
+            thread.commit_creds(cred);
+        }
         if let Some(fs) = new_fs {
             runtime.set_fs_context(Arc::new(Mutex::new(fs)));
         }
+        if is_time_switch {
+            new_proxy.time_ns().freeze_offsets();
+        }
+        runtime.set_nsproxy(new_proxy);
         Ok(())
     }
 
@@ -943,7 +982,12 @@ impl Process {
     /// Returns [`KError::NoSuchProcess`] when the process runtime is no longer
     /// reachable.
     pub fn exit_namespaces(&self) -> KResult<()> {
-        self.runtime()?.exit_namespaces();
+        // Drop the retained owner (and run nsproxy teardown) outside the lock.
+        let nsproxy = self.take_retained_nsproxy();
+        drop(nsproxy);
+        if let Some(runtime) = self.runtime_ref() {
+            runtime.exit_namespaces();
+        }
         Ok(())
     }
 

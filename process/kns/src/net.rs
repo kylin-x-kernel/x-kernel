@@ -11,7 +11,9 @@
 //! stack. Socket routing still resolves through the global stack at this
 //! layer; per-namespace data-plane routing is the follow-up layer.
 
-use kcred::NamespaceId;
+use alloc::sync::Arc;
+
+use kcred::{NamespaceId, UserNamespace};
 use ksync::{Mutex, static_lock};
 
 static_lock! {
@@ -38,6 +40,7 @@ pub fn set_net_namespace_drop_hook(hook: fn(u64)) {
 /// Network namespace.
 pub struct NetNamespace {
     id: NamespaceId,
+    owner: Arc<UserNamespace>,
 }
 
 impl Default for NetNamespace {
@@ -56,10 +59,16 @@ impl Drop for NetNamespace {
 }
 
 impl NetNamespace {
-    /// Creates a new network namespace.
+    /// Creates a new network namespace owned by the initial user namespace.
     pub fn new() -> Self {
+        Self::new_in(kcred::initial_user_namespace())
+    }
+
+    /// Creates a new network namespace owned by `owner`.
+    pub fn new_in(owner: Arc<UserNamespace>) -> Self {
         Self {
             id: NamespaceId::new(),
+            owner,
         }
     }
 
@@ -67,9 +76,7 @@ impl NetNamespace {
     ///
     /// Called exactly once from `NsProxy::new_initial*`.
     pub fn new_initial() -> Self {
-        let initial = Self {
-            id: NamespaceId::new(),
-        };
+        let initial = Self::new_in(kcred::initial_user_namespace());
         *INITIAL_NET_ID.lock() = Some(initial.id.as_u64());
         initial
     }
@@ -87,5 +94,10 @@ impl NetNamespace {
     /// protocol-stack instance.
     pub fn id(&self) -> NamespaceId {
         self.id
+    }
+
+    /// Returns the user namespace that owns this network namespace.
+    pub fn owner(&self) -> &Arc<UserNamespace> {
+        &self.owner
     }
 }

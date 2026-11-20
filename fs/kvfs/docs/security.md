@@ -104,6 +104,44 @@ successful registrations, recheck readiness, and keep an expired binding
 distinct from an absent binding. Registration may run waker callbacks when
 its temporary source owner is released, so conflicting outer locks are forbidden.
 
+## User-namespace ID projection and `s_user_ns` ownership
+
+Filesystem inodes store global (initial-user-namespace) `Kuid`/`Kgid` values.
+A caller in a child user namespace names IDs in its own coordinate space, so the
+VFS projects only at its boundaries: `Kuid::from_inside`/`Kgid::from_inside`
+translate a supplied ID to the stored global value and return `INVALID` when the
+caller's namespace has no mapping (syscalls then report `EINVAL` or `EOVERFLOW`);
+`Kuid::to_inside`/`Kgid::to_inside` render stored IDs for `stat`/procfs and
+return `OVERFLOW_ID` (65534) when the reader has no mapping.
+
+This establishes a trust boundary between the caller's namespace view and the
+globally stored identity. The superblock records the mounting task's user
+namespace as `s_user_ns` (`SuperBlock::init_user_ns`), and
+`Dentry::user_namespace` exposes it. Inode capability checks follow Linux
+`capable_wrt_inode_uidgid()`: the capability is evaluated in the caller's user
+namespace and only counts when the inode's global uid/gid are both mapped into
+that namespace. `s_user_ns` records superblock ownership for mount/namespace
+lifetime decisions and for the ID-mapping projection; it is not a capability
+override target when the inode IDs are unmapped. `MntNamespace::clone_with_root_and_pwd_in` binds the new
+namespace as owner when `CLONE_NEWNS|CLONE_NEWUSER` is combined, so a container
+cannot inherit authority over a host-owned superblock by mounting a clone.
+Internally all owner/group comparisons and map lookups use global values; no
+projection is stored in the inode.
+
+## Namespace-aware inode authorization
+
+`chown`, `chmod`, sticky-directory deletion, fileattr/xattr writes, and generic
+read/write/execute DAC all use `capable_wrt_inode_uidgid`: the capability is
+checked in the caller's user namespace and the inode's global uid/gid must be
+mapped there. There is no fallback to `s_user_ns` when the IDs are unmapped.
+`CAP_CHOWN`, `CAP_FOWNER`, and `CAP_FSETID` are therefore namespace-scoped to
+the caller, not to the superblock owner. Owner/group
+tests compare the caller's global `fsuid`/`fsgid` and projected supplementary
+groups with the stored inode IDs, so an unmapped caller ID cannot claim
+ownership by numeric coincidence. Unmapped `chown` targets are rejected before
+mutation, and a failed capability or ownership check returns `EPERM` without
+changing metadata.
+
 ## Trust Model
 
 A plain open of a magic link follows the Path it holds, rather than re-resolving the

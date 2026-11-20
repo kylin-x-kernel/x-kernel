@@ -23,7 +23,7 @@ use kvfs::{FMode, FileOperations, OpenFlags, VfsFile};
 
 use crate::{
     IpcNamespace, MntNamespace, NamespaceFlags, NamespaceType, NetNamespace, PidNamespace,
-    UtsNamespace,
+    TimeNamespace, UtsNamespace,
 };
 
 /// Anonymous-inode display name per namespace type.
@@ -65,6 +65,8 @@ pub enum NsFd {
     User(Arc<UserNamespace>),
     /// Cgroup hierarchy view.
     Cgroup(Arc<CgroupNamespace>),
+    /// Monotonic/boottime clock offsets.
+    Time(Arc<TimeNamespace>),
 }
 
 impl NsFd {
@@ -78,6 +80,43 @@ impl NsFd {
             Self::Net(_) => NamespaceType::Net,
             Self::User(_) => NamespaceType::User,
             Self::Cgroup(_) => NamespaceType::Cgroup,
+            Self::Time(_) => NamespaceType::Time,
+        }
+    }
+
+    /// Returns the namespace's stable kernel identity.
+    ///
+    /// Every fd referring to the same namespace reports the same number, which
+    /// is what `/proc/<pid>/ns/<type>` uses as its inode number so `stat(2)`
+    /// identifies the namespace (Linux nsfs semantics).
+    pub fn id(&self) -> u64 {
+        match self {
+            Self::Uts(ns) => ns.id().as_u64(),
+            Self::Ipc(ns) => ns.id().as_u64(),
+            Self::Mnt(ns) => ns.id().as_u64(),
+            Self::Pid(ns) => ns.id(),
+            Self::Net(ns) => ns.id().as_u64(),
+            Self::User(ns) => ns.id().as_u64(),
+            Self::Cgroup(ns) => ns.id().as_u64(),
+            Self::Time(ns) => ns.id().as_u64(),
+        }
+    }
+
+    /// Returns the user namespace that owns the referenced namespace.
+    ///
+    /// `setns(2)` authorizes every switch against this namespace, not against
+    /// the caller's active user namespace, so a namespace fd is a capability
+    /// scoped to its owner.
+    pub fn owner(&self) -> &Arc<UserNamespace> {
+        match self {
+            Self::Uts(ns) => ns.owner(),
+            Self::Ipc(ns) => ns.owner(),
+            Self::Mnt(ns) => ns.user_ns(),
+            Self::Pid(ns) => ns.owner(),
+            Self::Net(ns) => ns.owner(),
+            Self::User(ns) => ns,
+            Self::Cgroup(ns) => ns.owner(),
+            Self::Time(ns) => ns.owner(),
         }
     }
 
@@ -91,6 +130,7 @@ impl NsFd {
             Self::Net(_) => NamespaceFlags::NEWNET,
             Self::User(_) => NamespaceFlags::NEWUSER,
             Self::Cgroup(_) => NamespaceFlags::NEWCGROUP,
+            Self::Time(_) => NamespaceFlags::NEWTIME,
         }
     }
 

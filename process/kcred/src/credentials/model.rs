@@ -13,6 +13,7 @@ use super::{
     CapSet, CapSets, FileCapabilities, Gid, Uid, is_valid_gid, is_valid_uid,
     securebits::SecureBits,
 };
+use crate::{UserNamespace, initial_user_namespace};
 
 /// Credential mode used by Linux `PTRACE_MODE_READ_*` access checks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +79,8 @@ pub struct Cred {
     cap_ambient: CapSet,
     /// Capabilities allowed in file capability sets installed by exec.
     cap_bounding: CapSet,
+    /// User namespace in which the IDs and capability checks are interpreted.
+    user_ns: Arc<UserNamespace>,
 }
 
 /// Returns the single-capability mask for `cap`.
@@ -90,8 +93,44 @@ fn cap_bit(cap: u32) -> KResult<CapSet> {
 
 impl Cred {
     /// Creates root credentials for the initial process.
+    ///
+    /// The result owns the full bounding, permitted, and effective sets in the
+    /// initial user namespace. The inheritable and ambient sets start empty,
+    /// matching a freshly booted Linux process.
     pub fn root() -> Self {
-        Self::new(0, 0)
+        Self::root_in_user_namespace(initial_user_namespace())
+    }
+
+    /// Creates root credentials interpreted in `user_ns`.
+    ///
+    /// All IDs are zero in `user_ns`, not in the initial namespace. The result
+    /// owns the full capability sets, which makes it the credential a task
+    /// receives immediately after creating a user namespace. This is a trusted
+    /// constructor: it neither maps the IDs nor grants the caller authority
+    /// over `user_ns`.
+    pub fn root_in_user_namespace(user_ns: Arc<UserNamespace>) -> Self {
+        let mut cred = Self::new_in_user_namespace(0, 0, user_ns);
+        cred.capabilities = CapSets::FULL_PRIVILEGED;
+        cred
+    }
+
+    /// Returns a copy whose capabilities are interpreted in `user_ns`.
+    ///
+    /// This is the credential transition performed by `set_cred_user_ns()`:
+    /// entering a user namespace resets every piece of capability state that
+    /// describes authority rather than identity. The permitted, effective and
+    /// bounding sets become full in the new namespace, while the inheritable
+    /// and ambient sets are cleared because their old values are only
+    /// meaningful in the previous namespace. Securebits return to their
+    /// defaults for the same reason. IDs are left untouched.
+    pub fn with_user_namespace(&self, user_ns: Arc<UserNamespace>) -> Self {
+        let mut cred = self.prepare();
+        cred.user_ns = user_ns;
+        cred.securebits = SecureBits::empty();
+        cred.capabilities = CapSets::new(CapSet::FULL, CapSet::FULL, CapSet::EMPTY);
+        cred.cap_ambient = CapSet::EMPTY;
+        cred.cap_bounding = CapSet::FULL;
+        cred
     }
 
     /// Creates credentials with all user IDs set to `uid` and all group IDs to `gid`.
@@ -101,6 +140,17 @@ impl Cred {
     /// must authorize these IDs before publishing the credential. Allocation
     /// of the shared group storage follows the allocator's failure policy.
     pub fn new(uid: Uid, gid: Gid) -> Self {
+        Self::new_in_user_namespace(uid, gid, initial_user_namespace())
+    }
+
+    /// Creates credentials with every user and group ID set to `uid` and `gid`
+    /// in `user_ns`.
+    ///
+    /// Capability sets follow the same rules as [`Self::new`]: a numeric-root
+    /// identity starts fully privileged inside `user_ns`. This trusted
+    /// constructor performs no authorization or ID mapping; the caller must
+    /// establish that the IDs are valid in `user_ns` before publishing.
+    pub fn new_in_user_namespace(uid: Uid, gid: Gid, user_ns: Arc<UserNamespace>) -> Self {
         Self {
             ruid: uid,
             euid: uid,
@@ -119,6 +169,7 @@ impl Cred {
             },
             cap_ambient: CapSet::EMPTY,
             cap_bounding: CapSet::FULL,
+            user_ns,
         }
     }
 
@@ -168,6 +219,10 @@ impl Cred {
     /// Returns the effective user ID.
     pub fn euid(&self) -> Uid {
         self.euid
+    }
+
+    fn is_root_id(&self, id: Uid) -> bool {
+        self.user_ns.map_uid_to_initial(0) == Some(id)
     }
 
     /// Returns whether the effective user ID is root.
@@ -247,7 +302,7 @@ impl Cred {
         if changes_locked != 0 || unlocks != 0 {
             return Err(KError::OperationNotPermitted);
         }
-        if !self.has_cap(CAP_SETPCAP) {
+        if !self.has_cap_in(self.user_ns(), CAP_SETPCAP) {
             let unprivileged = SecureBits::UNPRIVILEGED.bits();
             if old == new || (old.bits() ^ new.bits()) & !unprivileged != 0 {
                 return Err(KError::OperationNotPermitted);
@@ -390,7 +445,57 @@ impl Cred {
     /// capability. Real, saved and filesystem IDs do not grant authority, and
     /// capability numbers above [`CAP_LAST_CAP`] are never reported as held.
     pub fn has_cap(&self, cap: u32) -> bool {
-        self.capabilities.has_effective(cap)
+        core::ptr::eq(&*self.user_ns, &*crate::initial_user_namespace())
+            && self.capabilities.has_effective(cap)
+    }
+
+    /// Returns the user namespace this credential is interpreted in.
+    pub fn user_ns(&self) -> &UserNamespace {
+        &self.user_ns
+    }
+
+    /// Returns the shared handle to this credential's user namespace.
+    pub fn user_ns_arc(&self) -> &Arc<UserNamespace> {
+        &self.user_ns
+    }
+
+    /// Returns whether this credential holds `cap` over `target_ns`.
+    ///
+    /// This is Linux `cap_capable()`: walk from the target namespace up the
+    /// parent chain, granting authority through two implicit rules before
+    /// consulting the caller's effective set in its own namespace:
+    ///
+    /// 1. The owner (`euid`) of a user namespace has all capabilities over
+    ///    that namespace when acting from its direct parent.
+    /// 2. Authority never flows downward: a target at or below the caller's
+    ///    own namespace level is denied outright.
+    pub fn has_cap_in(&self, target_ns: &UserNamespace, cap: u32) -> bool {
+        let own_ns = self.user_ns();
+        let mut namespace = target_ns;
+        loop {
+            if core::ptr::eq(namespace, own_ns) {
+                return self.capabilities.has_effective(cap);
+            }
+            // A target that is not a strict descendant of the caller's
+            // namespace cannot be administered from here.
+            if namespace.level() <= own_ns.level() {
+                return false;
+            }
+            // Rule 1: the creator of a user namespace owns all capabilities
+            // inside it when checking from the namespace's direct parent.
+            if let Some(parent) = namespace.parent()
+                && core::ptr::eq(&**parent, own_ns)
+                && namespace.owner_euid() == self.euid()
+            {
+                return true;
+            }
+            match namespace.parent() {
+                Some(parent) => namespace = parent,
+                // Walking past the initial namespace without meeting the
+                // caller's namespace means the caller is unrelated.
+                None => return false,
+            }
+        }
     }
 
     /// Applies Linux `capset(2)` transition rules and installs `new`.
@@ -430,7 +535,7 @@ impl Cred {
     /// Returns [`KError::OperationNotPermitted`] without `CAP_SETPCAP`, or
     /// [`KError::InvalidInput`] when `cap` exceeds [`CAP_LAST_CAP`].
     pub fn drop_bounding_cap(&mut self, cap: usize) -> KResult<()> {
-        if !self.has_cap(CAP_SETPCAP) {
+        if !self.has_cap_in(self.user_ns(), CAP_SETPCAP) {
             return Err(KError::OperationNotPermitted);
         }
         if cap > CAP_LAST_CAP as usize {
@@ -478,7 +583,7 @@ impl Cred {
     /// set. This is the capability half of scheduler authorization; Linux's
     /// ownership check (`check_same_owner()`) remains the caller's responsibility.
     pub fn has_scheduler_capability_over(&self, target: &Self) -> bool {
-        self.has_cap(CAP_SYS_NICE)
+        self.has_cap_in(target.user_ns(), CAP_SYS_NICE)
             || target
                 .capabilities
                 .permitted()
@@ -499,7 +604,7 @@ impl Cred {
     /// Same-thread-group callers are exempted by the process-layer access
     /// checks, not here.
     pub fn can_read_ptrace(&self, target: &Self, mode: PtraceAccessMode) -> bool {
-        if self.has_cap(CAP_SYS_PTRACE) {
+        if self.has_cap_in(target.user_ns(), CAP_SYS_PTRACE) {
             return true;
         }
         let (caller_uid, caller_gid) = match mode {
@@ -543,7 +648,7 @@ impl Cred {
         }
 
         let old = self.prepare();
-        if self.has_cap(CAP_SETUID) {
+        if self.has_cap_in(self.user_ns(), CAP_SETUID) {
             self.set_resuid_unchecked(Some(uid), Some(uid), Some(uid));
             self.apply_setid_caps(&old);
             return Ok(());
@@ -576,7 +681,7 @@ impl Cred {
             return Err(KError::InvalidInput);
         }
 
-        if self.has_cap(CAP_SETGID) {
+        if self.has_cap_in(self.user_ns(), CAP_SETGID) {
             self.set_resgid_unchecked(Some(gid), Some(gid), Some(gid));
             return Ok(());
         }
@@ -609,7 +714,7 @@ impl Cred {
         let old_ruid = self.ruid;
         let old_euid = self.euid;
 
-        if !self.has_cap(CAP_SETUID) {
+        if !self.has_cap_in(self.user_ns(), CAP_SETUID) {
             if let Some(ruid) = ruid
                 && ruid != old_ruid
                 && ruid != old_euid
@@ -658,7 +763,7 @@ impl Cred {
         let old_rgid = self.rgid;
         let old_egid = self.egid;
 
-        if !self.has_cap(CAP_SETGID) {
+        if !self.has_cap_in(self.user_ns(), CAP_SETGID) {
             if let Some(rgid) = rgid
                 && rgid != old_rgid
                 && rgid != old_egid
@@ -707,7 +812,7 @@ impl Cred {
         euid: Option<Uid>,
         suid: Option<Uid>,
     ) -> KResult<()> {
-        if !self.has_cap(CAP_SETUID) {
+        if !self.has_cap_in(self.user_ns(), CAP_SETUID) {
             self.check_uid_change(ruid)?;
             self.check_uid_change(euid)?;
             self.check_uid_change(suid)?;
@@ -742,7 +847,7 @@ impl Cred {
         egid: Option<Gid>,
         sgid: Option<Gid>,
     ) -> KResult<()> {
-        if !self.has_cap(CAP_SETGID) {
+        if !self.has_cap_in(self.user_ns(), CAP_SETGID) {
             self.check_gid_change(rgid)?;
             self.check_gid_change(egid)?;
             self.check_gid_change(sgid)?;
@@ -770,7 +875,7 @@ impl Cred {
     /// affected by a filesystem-ID change.
     pub fn set_fsuid(&mut self, fsuid: Uid) -> Uid {
         let old_fsuid = self.fsuid;
-        let permitted = self.has_cap(CAP_SETUID)
+        let permitted = self.has_cap_in(self.user_ns(), CAP_SETUID)
             || fsuid == self.ruid
             || fsuid == self.euid
             || fsuid == self.suid
@@ -792,7 +897,7 @@ impl Cred {
     /// The returned old value does not indicate whether the change succeeded.
     pub fn set_fsgid(&mut self, fsgid: Gid) -> Gid {
         let old_fsgid = self.fsgid;
-        if self.has_cap(CAP_SETGID)
+        if self.has_cap_in(self.user_ns(), CAP_SETGID)
             || fsgid == self.rgid
             || fsgid == self.egid
             || fsgid == self.sgid
@@ -1051,10 +1156,10 @@ impl Cred {
             return;
         }
 
-        if (old.ruid == 0 || old.euid == 0 || old.suid == 0)
-            && self.ruid != 0
-            && self.euid != 0
-            && self.suid != 0
+        if (old.is_root_id(old.ruid) || old.is_root_id(old.euid) || old.is_root_id(old.suid))
+            && !self.is_root_id(self.ruid)
+            && !self.is_root_id(self.euid)
+            && !self.is_root_id(self.suid)
         {
             if !self.keep_caps() {
                 self.capabilities = CapSets::new(
@@ -1068,11 +1173,11 @@ impl Cred {
             self.cap_ambient = CapSet::EMPTY;
         }
 
-        if old.euid == 0 && self.euid != 0 {
+        if old.is_root_id(old.euid) && !self.is_root_id(self.euid) {
             let permitted = self.capabilities.permitted();
             self.capabilities =
                 CapSets::new(CapSet::EMPTY, permitted, self.capabilities.inheritable());
-        } else if old.euid != 0 && self.euid == 0 {
+        } else if !old.is_root_id(old.euid) && self.is_root_id(self.euid) {
             let permitted = self.capabilities.permitted();
             self.capabilities = CapSets::new(permitted, permitted, self.capabilities.inheritable());
         }
@@ -1089,10 +1194,10 @@ impl Cred {
         }
 
         let inheritable = self.capabilities.inheritable();
-        if old_fsuid == 0 && self.fsuid != 0 {
+        if self.is_root_id(old_fsuid) && !self.is_root_id(self.fsuid) {
             let effective = self.capabilities.effective().difference(CAP_FS_MASK);
             self.capabilities = CapSets::new(effective, self.capabilities.permitted(), inheritable);
-        } else if old_fsuid != 0 && self.fsuid == 0 {
+        } else if !self.is_root_id(old_fsuid) && self.is_root_id(self.fsuid) {
             let effective = self
                 .capabilities
                 .effective()

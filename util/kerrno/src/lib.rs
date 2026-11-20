@@ -185,6 +185,8 @@ pub enum KErrorKind {
     /// The resolved object has the wrong file type for the request
     /// (Linux `EFTYPE`, e.g. `openat2` `OPENAT2_REGULAR` on a non-regular file).
     WrongFileType,
+    /// Too many users or user namespaces are already attached.
+    TooManyUsers,
 }
 
 impl KErrorKind {
@@ -233,6 +235,7 @@ impl KErrorKind {
             StorageFull => "No storage space",
             TimedOut => "Timed out",
             TooManyOpenFiles => "Too many open files",
+            TooManyUsers => "Too many users",
             UnexpectedEof => "Unexpected end of file",
             Unsupported => "Operation not supported",
             WouldBlock => "Operation would block",
@@ -305,6 +308,7 @@ impl KErrorKind {
             47 => Stale,
             48 => Deadlock,
             49 => WrongFileType,
+            50 => TooManyUsers,
             _ => return None,
         })
     }
@@ -369,6 +373,7 @@ impl From<KErrorKind> for LinuxError {
             StorageFull => LinuxError::ENOSPC,
             TimedOut => LinuxError::ETIMEDOUT,
             TooManyOpenFiles => LinuxError::EMFILE,
+            TooManyUsers => LinuxError::EUSERS,
             UnexpectedEof | WriteZero => LinuxError::EIO,
             Unsupported => LinuxError::ENOSYS,
             WouldBlock => LinuxError::EAGAIN,
@@ -424,6 +429,7 @@ impl TryFrom<LinuxError> for KErrorKind {
             LinuxError::ENOSPC => StorageFull,
             LinuxError::ETIMEDOUT => TimedOut,
             LinuxError::EMFILE => TooManyOpenFiles,
+            LinuxError::EUSERS => TooManyUsers,
             LinuxError::ENOSYS => Unsupported,
             LinuxError::EAGAIN => WouldBlock,
             LinuxError::EDEADLK => Deadlock,
@@ -662,6 +668,7 @@ kerror_consts!(
     StorageFull,
     TimedOut,
     TooManyOpenFiles,
+    TooManyUsers,
     UnexpectedEof,
     Unsupported,
     WouldBlock,

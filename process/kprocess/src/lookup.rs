@@ -7,7 +7,7 @@ use alloc::{sync::Arc, vec::Vec};
 use kerrno::KResult;
 use ktask::KtaskRef;
 
-use crate::{Pid, Process, ProcessGroup, Tid, publication::process_publication};
+use crate::{Pid, PidNamespace, Process, ProcessGroup, Tid, publication::process_publication};
 
 pub(crate) fn published_processes() -> Vec<Arc<Process>> {
     process_publication().published_processes()
@@ -19,6 +19,13 @@ pub(crate) fn published_process_count() -> usize {
 
 pub(crate) fn published_process(pid: Pid) -> KResult<Arc<Process>> {
     process_publication().published_process(pid)
+}
+
+pub(crate) fn published_process_in_namespace(
+    pid: Pid,
+    observer_ns: &Arc<PidNamespace>,
+) -> KResult<Arc<Process>> {
+    process_publication().published_process_in_namespace(pid, observer_ns)
 }
 
 pub(crate) fn task(tid: Tid) -> KResult<KtaskRef> {

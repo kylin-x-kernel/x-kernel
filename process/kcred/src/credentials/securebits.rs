@@ -14,7 +14,7 @@
 //! other settings survive.
 
 bitflags::bitflags! {
-    /// Process secure-bits stored on [`super::Cred`].
+    /// Process secure-bits controlling set-ID and capability transitions.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub(crate) struct SecureBits: u32 {
         /// UID zero has no compatibility privileges during exec.
@@ -27,7 +27,7 @@ bitflags::bitflags! {
         const NO_SETUID_FIXUP_LOCKED = 1 << 3;
         /// Suppress the drop when any old set-user ID was root and all new ones leave it.
         const KEEP_CAPS = 1 << 4;
-        /// Reject keep-capabilities setters; exec still clears [`Self::KEEP_CAPS`].
+        /// Prevent clearing [`Self::KEEP_CAPS`].
         const KEEP_CAPS_LOCKED = 1 << 5;
         /// Deny ambient-capability raises.
         const NO_CAP_AMBIENT_RAISE = 1 << 6;

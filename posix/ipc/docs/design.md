@@ -94,9 +94,11 @@ Message permission checks mirror Linux `ipcperms()`: the creator and current
 owner UIDs select the owner class, the creator and current owner GIDs select the
 group class through the filesystem GID plus supplementary groups, and the raw
 operation flags are folded into the requested read/write bits. Effective
-`CAP_IPC_OWNER` is the read/write override. Control operations use the separate
-Linux rule: effective UID equal to the owner or creator, or effective
-`CAP_SYS_ADMIN`. Raising `msg_qbytes` above `MSGMNB` additionally requires
+`CAP_IPC_OWNER` is the read/write override, evaluated with
+`Cred::has_cap_in` against the queue's owning `UserNamespace` (the IPC
+namespace's owner at creation), so it only applies in that namespace or an
+ancestor. Control operations use the separate Linux rule: effective UID equal to
+the owner or creator, or `CAP_SYS_ADMIN` in the queue's owning namespace. Raising `msg_qbytes` above `MSGMNB` additionally requires
 `CAP_SYS_RESOURCE` and is validated before mutation.
 Shared-memory authorization and Linux flag semantics remain incomplete:
 nonzero-address `SHM_REMAP` replacement is not implemented, unknown bits are

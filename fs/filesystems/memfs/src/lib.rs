@@ -88,7 +88,7 @@ fn init_tmpfs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
 }
 
 /// Registered tmpfs filesystem type.
-pub static TMPFS_TYPE: FileSystemType = FileSystemType::nodev("tmpfs", init_tmpfs_context);
+pub static TMPFS_TYPE: FileSystemType = FileSystemType::nodev_userns("tmpfs", init_tmpfs_context);
 
 fn mqueue_get_tree(
     context: &mut FsContext<'_>,
@@ -220,7 +220,8 @@ fn init_mqueue_context(context: &mut FsContext<'_>) -> VfsResult<()> {
 /// empty directory tree shared across the mounts of the same IPC namespace
 /// ([`mqueue_tree_for_ipc_namespace`]), which is what container rootfs setup
 /// (`/dev/mqueue`) requires to succeed.
-pub static MQUEUE_TYPE: FileSystemType = FileSystemType::nodev("mqueue", init_mqueue_context);
+pub static MQUEUE_TYPE: FileSystemType =
+    FileSystemType::nodev_userns("mqueue", init_mqueue_context);
 #[macros::register_init]
 fn init_memory_filesystems() {
     #[expect(

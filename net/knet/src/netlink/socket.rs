@@ -43,6 +43,16 @@ impl NetlinkSocketType {
     }
 }
 
+/// Checks a network capability in the current network namespace's owner.
+fn net_capable(cred: &Cred, cap: u32) -> bool {
+    kprocess::try_current_user_process()
+        .and_then(|process| process.net_ns().ok())
+        .map_or_else(
+            || cred.has_cap(cap),
+            |namespace| cred.has_cap_in(namespace.owner(), cap),
+        )
+}
+
 /// Minimal AF_NETLINK socket.
 pub struct NetlinkSocket {
     pub(super) inner: Arc<NetlinkSocketInner>,
@@ -206,12 +216,17 @@ impl NetlinkSocket {
         self.send_inner(
             src,
             options,
-            sender_cred.has_cap(CAP_NET_ADMIN),
-            sender_cred.has_cap(CAP_SYS_ADMIN),
+            net_capable(sender_cred, CAP_NET_ADMIN),
+            net_capable(sender_cred, CAP_SYS_ADMIN),
             sender_cred.ruid(),
         )
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "CG-028-focused-functions: netlink send authorization and wire encoding form one \
+                  ordered path; splitting it would separate the policy checks from the send"
+    )]
     fn send_inner(
         &self,
         mut src: impl Read + IoBuf,
@@ -243,11 +258,13 @@ impl NetlinkSocket {
         let opener_can_route_mutate = options
             .opener_cred
             .as_ref()
-            .map_or(sender_can_route_mutate, |cred| cred.has_cap(CAP_NET_ADMIN));
+            .map_or(sender_can_route_mutate, |cred| {
+                net_capable(cred, CAP_NET_ADMIN)
+            });
         let opener_can_uevent = options
             .opener_cred
             .as_ref()
-            .map_or(sender_can_uevent, |cred| cred.has_cap(CAP_SYS_ADMIN));
+            .map_or(sender_can_uevent, |cred| net_capable(cred, CAP_SYS_ADMIN));
         // Linux authorises the destination supplied in `msg_name`; a connected
         // destination was authorised by `connect()` and is not rechecked
         // against the credentials of each later send.
@@ -443,7 +460,7 @@ impl NetlinkSocket {
     /// `CAP_NET_ADMIN`; keeping the credential explicit makes that check
     /// testable and avoids consulting ambient task state in the registry.
     pub(crate) fn bind_with_cred(&self, local_addr: SocketAddrEx, cred: &Cred) -> KResult {
-        self.bind_inner(local_addr, cred.has_cap(CAP_NET_ADMIN))
+        self.bind_inner(local_addr, net_capable(cred, CAP_NET_ADMIN))
     }
 
     /// Connects using the credential active at the syscall boundary.
@@ -451,7 +468,7 @@ impl NetlinkSocket {
     /// `netlink_connect` consults the protocol's `NL_CFG_F_NONROOT_SEND`
     /// policy for a nonzero destination, with `CAP_NET_ADMIN` as the override.
     pub(crate) fn connect_with_cred(&self, remote_addr: SocketAddrEx, cred: &Cred) -> KResult {
-        self.connect_inner(remote_addr, cred.has_cap(CAP_NET_ADMIN))
+        self.connect_inner(remote_addr, net_capable(cred, CAP_NET_ADMIN))
     }
 
     fn connect_inner(&self, remote_addr: SocketAddrEx, can_net_admin: bool) -> KResult {
@@ -645,7 +662,7 @@ impl Configurable for NetlinkSocket {
             // groups. `bind()` enforces the same rule here; subscribing by
             // `setsockopt` must not be the cheaper way in.
             if super::port::group_is_privileged(self.inner.protocol, *group)
-                && !kprocess::current_cred().has_cap(CAP_NET_ADMIN)
+                && !net_capable(&kprocess::current_cred(), CAP_NET_ADMIN)
             {
                 return Err(KError::OperationNotPermitted);
             }

@@ -10,6 +10,9 @@ use unittest_support::TestUserBuffer;
 
 use super::*;
 
+use crate::{has_ipc_control_permission, has_ipc_permission, has_ipc_permission_in};
+use kcred::{UserNamespace, initial_user_namespace};
+
 fn perm(uid: u32, gid: u32, cuid: u32, cgid: u32, mode: u32) -> IpcPerm {
     IpcPerm {
         key: 0,
@@ -274,6 +277,35 @@ fn ipc_permission_uses_cap_ipc_owner_instead_of_uid_zero() {
         ))
         .unwrap();
     assert!(has_ipc_permission(&denied, &ipc_owner, IPC_WRITE));
+}
+
+#[def_test]
+fn ipc_owner_capability_is_scoped_to_the_queue_namespace() {
+    let child = UserNamespace::new_child(&initial_user_namespace(), 1000, 1000, false).unwrap();
+    let queue = MessageQueue::new_in(1, 0o600, 1, 1000, 1000, child.clone());
+    let child_root = Cred::new(0, 0).with_user_namespace(child);
+    assert!(has_ipc_permission_in(
+        &queue.msqid_ds.msg_perm,
+        &child_root,
+        IPC_READ,
+        queue.owner_ns()
+    ));
+
+    // An unprivileged initial-namespace caller has no CAP_IPC_OWNER over the
+    // child-owned queue, while initial root can administer it through the
+    // ancestor chain.
+    assert!(!has_ipc_permission_in(
+        &queue.msqid_ds.msg_perm,
+        &Cred::new(2000, 2000),
+        IPC_READ,
+        queue.owner_ns()
+    ));
+    assert!(has_ipc_permission_in(
+        &queue.msqid_ds.msg_perm,
+        &Cred::root(),
+        IPC_READ,
+        queue.owner_ns()
+    ));
 }
 
 fn unprivileged_with_caps() -> Cred {

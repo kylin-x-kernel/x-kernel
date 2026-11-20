@@ -364,11 +364,22 @@ fn check_creds(body: &[u8], sender: &ScmSenderContext) -> KResult<knet::SenderCr
         return Err(KError::InvalidInput);
     }
     let cred = &sender.cred;
-    let pid_ok = claim.pid == sender.pid || cred.has_sys_admin();
-    let uid_ok = [cred.ruid(), cred.euid(), cred.suid()].contains(&claim.uid)
-        || cred.has_cap(kcred::CAP_SETUID);
-    let gid_ok = [cred.rgid(), cred.egid(), cred.sgid()].contains(&claim.gid)
-        || cred.has_cap(kcred::CAP_SETGID);
+    // Linux `make_kuid`/`make_kgid` translate the claimed local ids to global
+    // credentials; an id unmapped in the sender's namespace is EINVAL.
+    let uid = cred
+        .user_ns()
+        .map_uid_to_initial(claim.uid)
+        .ok_or(KError::from(LinuxError::EINVAL))?;
+    let gid = cred
+        .user_ns()
+        .map_gid_to_initial(claim.gid)
+        .ok_or(KError::from(LinuxError::EINVAL))?;
+    let pid_ns = sender.process.active_pid_namespace();
+    let pid_ok = claim.pid == sender.pid || cred.has_cap_in(pid_ns.owner(), kcred::CAP_SYS_ADMIN);
+    let uid_ok = [cred.ruid(), cred.euid(), cred.suid()].contains(&uid)
+        || cred.has_cap_in(cred.user_ns(), kcred::CAP_SETUID);
+    let gid_ok = [cred.rgid(), cred.egid(), cred.sgid()].contains(&gid)
+        || cred.has_cap_in(cred.user_ns(), kcred::CAP_SETGID);
     if !(pid_ok && uid_ok && gid_ok) {
         return Err(KError::from(LinuxError::EPERM));
     }
@@ -386,8 +397,8 @@ fn check_creds(body: &[u8], sender: &ScmSenderContext) -> KResult<knet::SenderCr
     };
     Ok(knet::SenderCredentials {
         pid: Some(identity),
-        uid: claim.uid,
-        gid: claim.gid,
+        uid,
+        gid,
     })
 }
 

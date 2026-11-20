@@ -98,9 +98,7 @@ fn do_mount(
     // mount(2) requires `CAP_SYS_ADMIN` in the initial user namespace, and
     // all x-kernel mount operations (bind, remount, private, tmpfs) mutate
     // the process-wide mount namespace.
-    if !cred.has_sys_admin() {
-        return Err(KError::OperationNotPermitted);
-    }
+    require_mount_privilege(cred)?;
     let target = lookup_mount_path(process, dir_name, cred)?;
     path_mount(process, cred, dev_name, &target, fs_type, flags, data)
 }
@@ -206,6 +204,7 @@ fn path_mount(
 
     let fs_type = fs_type.ok_or(KError::InvalidInput)?;
     let file_system_type = kvfs::get_filesystem_type(fs_type).ok_or(KError::NoSuchDevice)?;
+    require_userns_mountable(cred, file_system_type)?;
     let (root, pwd) = process.fs_context()?.lock().root_and_pwd();
     let mut context =
         kvfs::FsContext::new(file_system_type, dev_name, data, superblock_flags, cred)?;
@@ -249,7 +248,34 @@ fn lookup_mount_path_in(fs: &FsStruct, name: &str, cred: &kcred::Cred) -> KResul
 /// mount API (`mount_api`) so `fsopen`/`fsconfig`/`fsmount`/`move_mount` enforce
 /// the same authority as legacy `mount(2)`.
 pub(crate) fn require_mount_privilege(cred: &kcred::Cred) -> KResult<()> {
-    if cred.has_sys_admin() {
+    // Mount syscalls always run on a user thread. The `None` branch keeps
+    // kernel-only fixtures (and any future kernel caller) from panicking in
+    // `current_user_process`; kernel tasks are trusted, so the global
+    // `capable()` form is the fallback.
+    let allowed = match kprocess::try_current_user_process() {
+        Some(process) => {
+            let namespace = process.mnt_ns()?;
+            cred.has_cap_in(namespace.user_ns(), kcred::CAP_SYS_ADMIN)
+        }
+        None => cred.has_cap(kcred::CAP_SYS_ADMIN),
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(KError::OperationNotPermitted)
+    }
+}
+
+/// Applies Linux's `FS_USERNS_MOUNT` gate.
+///
+/// A caller in a non-initial user namespace may only mount filesystem types
+/// that declared themselves userns-mountable; all other types require
+/// `CAP_SYS_ADMIN` in the initial namespace (`mount_capable()`).
+pub(crate) fn require_userns_mountable(
+    cred: &kcred::Cred,
+    fs_type: &kvfs::FileSystemType,
+) -> KResult<()> {
+    if fs_type.is_userns_mountable() || cred.has_cap(kcred::CAP_SYS_ADMIN) {
         Ok(())
     } else {
         Err(KError::OperationNotPermitted)
@@ -287,6 +313,8 @@ fn do_new_mount(
     lookup_pwd: &Path,
 ) -> KResult<()> {
     namespace.mount_new(mountpoint, mount_flags, context, lookup_root, lookup_pwd)?;
+    // `mount_new` installs `s_user_ns` on the first mount of a new superblock;
+    // re-mounts of an already published superblock keep the first owner.
     Ok(())
 }
 

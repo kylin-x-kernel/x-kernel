@@ -22,6 +22,7 @@ mod file_slot;
 mod file_system_type;
 mod filename;
 mod fs_context;
+mod kid;
 mod kiocb;
 pub mod libfs;
 mod locks;
@@ -68,6 +69,7 @@ pub use file_system_type::{
 };
 pub use filename::Filename;
 pub use fs_context::{FsContext, FsContextPurpose};
+pub use kid::{Kgid, Kuid, OVERFLOW_ID};
 pub use kiocb::{Kiocb, KiocbFlags};
 pub use ktime_types::TimestampLimits;
 pub use locks::{FileLock, FileLockOwner, FileLockType};

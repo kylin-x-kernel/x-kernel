@@ -109,3 +109,21 @@ fn unshare_flag_set_accepts_thread_state_bits_only_for_single_thread() {
     // A multithreaded caller is rejected with EINVAL, as in Linux.
     assert!(unshare_flag_set(thread_bits, true).is_err());
 }
+
+#[def_test(user, serial)]
+fn cgroup_self_setns_still_requires_caller_admin() {
+    let process = current_user_process();
+    let target = process.cgroup_ns().unwrap();
+    let target_cred = Cred::root();
+    let caller = Cred::new(1000, 1000);
+    assert_eq!(
+        authorize_setns(
+            &process,
+            &target_cred,
+            &caller,
+            &NsFd::Cgroup(target),
+            false,
+        ),
+        Err(KError::OperationNotPermitted)
+    );
+}

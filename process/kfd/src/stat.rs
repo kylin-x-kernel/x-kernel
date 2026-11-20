@@ -42,6 +42,20 @@ pub struct Kstat {
     pub ctime: SystemTime,
 }
 
+/// Projects a rendered stat buffer into the calling task's user namespace.
+///
+/// Filesystems store global IDs; `stat(2)` output shows them through the
+/// caller's ID mapping, rendering unmapped values as the overflow UID/GID
+/// (65534). Inside the initial namespace this is the identity, matching the
+/// historical behavior of every existing filesystem.
+pub fn project_into_namespace(
+    value: &mut Kstat,
+    namespace: &alloc::sync::Arc<kcred::UserNamespace>,
+) {
+    value.uid = kvfs::Kuid::from_raw(value.uid).to_inside(namespace);
+    value.gid = kvfs::Kgid::from_raw(value.gid).to_inside(namespace);
+}
+
 impl From<kvfs::Metadata> for Kstat {
     fn from(metadata: kvfs::Metadata) -> Self {
         let mode = u32::from(metadata.mode.bits());

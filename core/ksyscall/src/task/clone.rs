@@ -292,14 +292,10 @@ impl CloneRequest {
             }
         }
 
-        // Creating a namespace requires `CAP_SYS_ADMIN` (Linux
-        // `copy_namespaces()`); a user namespace would be the only
-        // unprivileged escape hatch and is not implemented. `unshare(2)`
-        // and `setns(2)` apply the same gate, so the clone path must not
-        // be a way around it.
-        if !namespace_flags.is_empty() && !kprocess::current_cred().has_sys_admin() {
-            return Err(KError::from(LinuxError::EPERM));
-        }
+        // Namespace authorization happens in `kns::NamespacePlan::build`,
+        // after the user namespace (if any) has been created. That ordering
+        // matches Linux: `CLONE_NEWUSER` is capability-free and every other
+        // flag is checked against the new user namespace.
 
         let mut new_uctx = *uctx;
         if self.stack != 0 {
@@ -340,7 +336,7 @@ impl CloneRequest {
             current_thread
                 .prepare_thread_clone_with_files(self.flags.contains(CloneFlags::FILES))?
         } else {
-            current_thread.prepare_process_fork(ProcessForkConfig {
+            let config = ProcessForkConfig {
                 parent: if self.flags.contains(CloneFlags::PARENT) {
                     ForkParent::CallerParent
                 } else {
@@ -371,7 +367,8 @@ impl CloneRequest {
                 namespace_flags,
                 exit_signal,
                 cgroup_target: self.cgroup_target.take(),
-            })?
+            };
+            current_thread.prepare_process_fork(config)?
         };
         let tid = prepared.tid();
         let child_process = prepared.process().clone();
@@ -408,11 +405,10 @@ impl CloneRequest {
         };
         let child_cgroup = thr.cgroup();
         let mut new_task = new_user_task(&curr.name(), entry, task_number, thr);
-        // Linux copies the creator's requested CPU affinity into the child,
-        // but the cgroup cpuset bound is owned by the child's cgroup. Do not
-        // copy `curr.cpumask()` wholesale: that would copy the parent's
-        // effective bound and can pin a child to the boot CPU forever.
-        let _ = new_task.set_requested_cpus(curr.requested_cpus());
+        // Linux copies the creator's placement into the child, then applies
+        // the child's own cgroup cpuset bound. Keeping the two inputs separate
+        // prevents a stale parent bound from pinning the child.
+        new_task.inherit_placement(&curr);
         if let Some(cgroup) = child_cgroup
             && let Ok(cpus) = cgroup.cpuset_effective_cpus()
         {
@@ -549,6 +545,11 @@ impl CloneRequest {
         if ns.contains(CloneFlags::NEWNS | CloneFlags::FS) {
             return Err(KError::from(LinuxError::EINVAL));
         }
+        // A new user namespace must own a private fs_struct; sharing the
+        // parent's would leave the mount view owned by the old namespace.
+        if ns.contains(CloneFlags::NEWUSER | CloneFlags::FS) {
+            return Err(KError::from(LinuxError::EINVAL));
+        }
 
         // CLONE_NEWIPC | CLONE_SYSVSEM is invalid
         if ns.contains(CloneFlags::NEWIPC | CloneFlags::SYSVSEM) {
@@ -567,14 +568,11 @@ impl CloneRequest {
             return Err(KError::from(LinuxError::EINVAL));
         }
 
-        // Unimplemented namespace flags: return ENOSYS. These namespaces have
-        // no table isolation yet (see `kns::NsProxy::clone_for_child`), so
-        // accepting their flags would create pseudo-isolation: `knet` still
-        // resolves sockets through its global protocol stack, so a network
-        // namespace without a per-namespace data plane stays unsupported.
-        let unimplemented = CloneFlags::NEWUSER | CloneFlags::NEWCGROUP | CloneFlags::NEWTIME;
-        if ns.intersects(unimplemented) {
-            return Err(KError::from(LinuxError::ENOSYS));
+        // Linux rejects `CLONE_INTO_CGROUP` for threads: the target cgroup
+        // applies to a new process, and a thread inherits its group's
+        // membership.
+        if ns.contains(CloneFlags::INTO_CGROUP | CloneFlags::THREAD) {
+            return Err(KError::from(LinuxError::EINVAL));
         }
 
         Ok(())

@@ -174,12 +174,26 @@ impl MntNamespace {
     /// shared with the source filesystem instances, matching Linux's mount-tree
     /// copy semantics.
     pub fn clone_with_root_and_pwd(&self, root: &Path, pwd: &Path) -> VfsResult<NamespaceClone> {
+        self.clone_with_root_and_pwd_in(root, pwd, self.user_ns.clone())
+    }
+
+    /// Clones this mount namespace with `owner` as its owning user namespace.
+    ///
+    /// Linux gives a new mount namespace the caller's effective user namespace,
+    /// which differs from the source namespace's owner when `CLONE_NEWUSER` and
+    /// `CLONE_NEWNS` are combined.
+    pub fn clone_with_root_and_pwd_in(
+        &self,
+        root: &Path,
+        pwd: &Path,
+        owner: Arc<UserNamespace>,
+    ) -> VfsResult<NamespaceClone> {
         let _mounts_guard = self.mounts.lock();
         let mut mount_map = HashMap::new();
         let cloned_root = clone_mount_tree(&self.root, None, &mut mount_map);
         let namespace = Arc::new(Self {
             id: NamespaceId::new(),
-            user_ns: self.user_ns.clone(),
+            user_ns: owner,
             root: cloned_root,
             mounts: Mutex::default(),
         });
@@ -279,6 +293,12 @@ impl MntNamespace {
     ) -> VfsResult<Arc<Mount>> {
         loop {
             let super_block = context.get_tree(lookup_root, lookup_pwd)?;
+            if !super_block.has_active_mounts() {
+                // First mount of a newly created superblock fixes `s_user_ns`.
+                // A pre-existing singleton (sysfs/cgroup2) keeps the owner
+                // installed by its first mounter.
+                super_block.init_user_ns(context.cred().user_ns_arc().clone());
+            }
             let result = self.attach_with_requested_superblock_flags(
                 mountpoint,
                 &super_block,
@@ -1349,7 +1369,16 @@ impl Path {
         // Immutability is an exec-security input; serialize the flag change
         // with sampling and with privilege revocation.
         let _privilege_guard = inode.lock_privileges();
-        if cred.fsuid() != inode.metadata().uid && !cred.has_cap_fowner() {
+        let inode_ns = self.dentry.user_namespace();
+        let metadata = inode.metadata();
+        if cred.fsuid() != metadata.uid
+            && !crate::permission::capable_wrt_inode_uidgid(
+                cred,
+                &inode_ns,
+                &metadata,
+                kcred::CAP_FOWNER,
+            )
+        {
             return Err(VfsError::OperationNotPermitted);
         }
         let _namespace_guard = inode.lock_namespace_exclusive();
@@ -1655,7 +1684,14 @@ impl Path {
     /// repeats that check against the updated inode. Apply the same condition
     /// only on a generated mode change: a GID-only chown that leaves both
     /// set-ID bits untouched does not pass through the mode path.
-    fn chown_mode(mode: Umode, old_gid: u32, new_gid: Option<u32>, cred: &Cred) -> NodePermission {
+    fn chown_mode(
+        mode: Umode,
+        old_uid: u32,
+        old_gid: u32,
+        new_gid: Option<crate::kid::Kgid>,
+        cred: &Cred,
+        _caller_ns: &Arc<kcred::UserNamespace>,
+    ) -> NodePermission {
         let permission = mode.permission();
         if mode.node_type() == NodeType::Directory {
             return permission;
@@ -1664,13 +1700,22 @@ impl Path {
         let mut result = permission;
         result.remove(NodePermission::SET_UID);
         if permission.contains(NodePermission::SET_GID) {
-            let old_group_ok = cred.has_cap(kcred::CAP_FSETID) || cred.in_group(old_gid);
+            let old_group_ok =
+                crate::permission::capable_wrt_inode_ids(cred, old_uid, old_gid, kcred::CAP_FSETID)
+                    || cred.in_group(old_gid);
             if permission.contains(NodePermission::GROUP_EXEC) || !old_group_ok {
                 result.remove(NodePermission::SET_GID);
             }
         }
         if result.bits() != permission.bits()
-            && new_gid.is_some_and(|gid| !cred.has_cap(kcred::CAP_FSETID) && !cred.in_group(gid))
+            && new_gid.is_some_and(|gid| {
+                !crate::permission::capable_wrt_inode_ids(
+                    cred,
+                    old_uid,
+                    gid.as_raw(),
+                    kcred::CAP_FSETID,
+                ) && !cred.in_group(gid.as_raw())
+            })
         {
             result.remove(NodePermission::SET_GID);
         }
@@ -1678,6 +1723,13 @@ impl Path {
     }
 
     /// Changes this inode's owner after applying Linux chown/chgrp authorization.
+    ///
+    /// The `uid`/`gid` arguments are interpreted in the caller's user
+    /// namespace and stored as global values (`Kuid`/`Kgid` projection).
+    /// Unmapped IDs fail with `EINVAL` instead of being stored raw. The
+    /// `CAP_CHOWN` override uses Linux `capable_wrt_inode_uidgid`: it is
+    /// evaluated in the caller's user namespace and requires the inode IDs to
+    /// be mapped there.
     pub fn chown(&self, uid: Option<u32>, gid: Option<u32>, cred: &Cred) -> VfsResult<()> {
         let _write_guard = self.lock_writable_mount()?;
         let inode = self.inode();
@@ -1686,22 +1738,55 @@ impl Path {
         // concurrent chown from losing the other's fields or authorizing
         // against an owner/mode that is already stale.
         let _privilege_guard = inode.lock_privileges();
-        inode.check_mutable()?;
         let metadata = self.metadata();
-        let is_owner = cred.fsuid() == metadata.uid;
-        let can_chown = cred.has_cap_chown();
+        let inode_ns = self.dentry.user_namespace();
+        let caller_ns = cred.user_ns_arc().clone();
 
-        if uid.is_some_and(|uid| !can_chown && (!is_owner || uid != metadata.uid)) {
+        let uid_kuid = uid.map(|uid| crate::kid::Kuid::from_inside(uid, &caller_ns));
+        let gid_kgid = gid.map(|gid| crate::kid::Kgid::from_inside(gid, &caller_ns));
+        if uid_kuid.is_some_and(crate::kid::Kuid::is_invalid)
+            || gid_kgid.is_some_and(crate::kid::Kgid::is_invalid)
+        {
+            return Err(VfsError::from(kerrno::LinuxError::EINVAL));
+        }
+        inode.check_mutable()?;
+
+        // Stored IDs are global values; compare the caller's filesystem ID
+        // through the same projection so identity checks stay valid for
+        // callers inside a child namespace.
+        let fsuid_global = crate::kid::Kuid::from_raw(cred.fsuid());
+        let is_owner = fsuid_global.as_raw() == metadata.uid;
+        let can_chown = crate::permission::capable_wrt_inode_uidgid(
+            cred,
+            &inode_ns,
+            &metadata,
+            kcred::CAP_CHOWN,
+        );
+
+        if uid.is_some_and(|_| {
+            !can_chown && (!is_owner || uid_kuid != Some(crate::kid::Kuid::from_raw(metadata.uid)))
+        }) {
             return Err(VfsError::OperationNotPermitted);
         }
-        if gid.is_some_and(|gid| {
-            !can_chown && (!is_owner || (gid != metadata.gid && !cred.in_group(gid)))
+        let new_gid_in_group = gid_kgid.is_some_and(|gid| cred.in_group(gid.as_raw()));
+        if gid.is_some_and(|_| {
+            !can_chown
+                && (!is_owner
+                    || (gid_kgid != Some(crate::kid::Kgid::from_raw(metadata.gid))
+                        && !new_gid_in_group))
         }) {
             return Err(VfsError::OperationNotPermitted);
         }
 
-        let new_gid = gid.unwrap_or(metadata.gid);
-        let mode = Self::chown_mode(metadata.mode, metadata.gid, gid, cred);
+        let new_gid = gid_kgid.map_or(metadata.gid, crate::kid::Kgid::as_raw);
+        let mode = Self::chown_mode(
+            metadata.mode,
+            metadata.uid,
+            metadata.gid,
+            gid_kgid,
+            cred,
+            &caller_ns,
+        );
         // Linux `chown_common()` turns the set-ID cleanup into an `ATTR_MODE`
         // update, and `setattr_prepare()` authorizes that generated mode change
         // through inode ownership or effective `CAP_FOWNER` — not through
@@ -1709,11 +1794,20 @@ impl Path {
         // successful no-op for an unrelated caller unless it would actually
         // clear a set-ID bit.
         if mode.bits() != metadata.mode.permission().bits()
-            && cred.fsuid() != metadata.uid
-            && !cred.has_cap_fowner()
+            && fsuid_global.as_raw() != metadata.uid
+            && !crate::permission::capable_wrt_inode_uidgid(
+                cred,
+                &inode_ns,
+                &metadata,
+                kcred::CAP_FOWNER,
+            )
         {
             return Err(VfsError::OperationNotPermitted);
         }
+        let stored_uid = match uid_kuid {
+            Some(kuid) => kuid.as_raw(),
+            None => metadata.uid,
+        };
         // Linux `setattr_prepare()` handles `ATTR_KILL_PRIV` before the
         // metadata commit, so a failed capability removal leaves the owner and
         // mode untouched. The reverse failure is not transactional and leaves
@@ -1722,7 +1816,7 @@ impl Path {
             self.kill_file_caps_locked()?;
         }
         self.dentry.update_metadata(MetadataUpdate {
-            owner: Some((uid.unwrap_or(metadata.uid), new_gid)),
+            owner: Some((stored_uid, new_gid)),
             mode: Some(mode),
             ..Default::default()
         })
@@ -1736,12 +1830,25 @@ impl Path {
         // chmod must not interleave with it or with a revocation.
         let _privilege_guard = inode.lock_privileges();
         let metadata = self.metadata();
-        if cred.fsuid() != metadata.uid && !cred.has_cap_fowner() {
+        let inode_ns = self.dentry.user_namespace();
+        if cred.fsuid() != metadata.uid
+            && !crate::permission::capable_wrt_inode_uidgid(
+                cred,
+                &inode_ns,
+                &metadata,
+                kcred::CAP_FOWNER,
+            )
+        {
             return Err(VfsError::OperationNotPermitted);
         }
         if mode.contains(NodePermission::SET_GID)
             && !cred.in_group(metadata.gid)
-            && !cred.has_cap(kcred::CAP_FSETID)
+            && !crate::permission::capable_wrt_inode_uidgid(
+                cred,
+                &inode_ns,
+                &metadata,
+                kcred::CAP_FSETID,
+            )
         {
             mode.remove(NodePermission::SET_GID);
         }
@@ -1918,15 +2025,30 @@ impl Path {
         let _data_guard = inode.lock_data();
         let metadata = self.metadata();
         let is_owner = cred.fsuid() == metadata.uid;
+        let inode_ns = self.dentry.user_namespace();
         let is_touch = matches!(
             (atime, mtime),
             (Some(SetattrTime::Current), Some(SetattrTime::Current))
         );
         if !is_touch {
-            if !is_owner && !cred.has_cap_fowner() {
+            if !is_owner
+                && !crate::permission::capable_wrt_inode_uidgid(
+                    cred,
+                    &inode_ns,
+                    &metadata,
+                    kcred::CAP_FOWNER,
+                )
+            {
                 return Err(VfsError::OperationNotPermitted);
             }
-        } else if !is_owner && !cred.has_cap_fowner() {
+        } else if !is_owner
+            && !crate::permission::capable_wrt_inode_uidgid(
+                cred,
+                &inode_ns,
+                &metadata,
+                kcred::CAP_FOWNER,
+            )
+        {
             self.permission(Permission::MAY_WRITE, cred)?;
         }
 
@@ -2108,8 +2230,10 @@ impl Path {
         }
 
         // Linux `__check_sticky()` exempts the victim owner, the directory
-        // owner, and `CAP_FOWNER`.
-        if cred.has_cap(kcred::CAP_FOWNER)
+        // owner, and `CAP_FOWNER` held in the directory inode's user namespace
+        // (`capable_wrt_inode_uidgid`), not in the initial namespace.
+        let dir_ns = self.dentry.user_namespace();
+        if crate::permission::capable_wrt_inode_uidgid(cred, &dir_ns, &dir, kcred::CAP_FOWNER)
             || cred.fsuid() == dir.uid
             || cred.fsuid() == victim.metadata().uid
         {

@@ -32,9 +32,12 @@ extern crate alloc;
 mod msg;
 mod shm;
 
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicI32, Ordering};
 
-use kcred::{CAP_IPC_OWNER, Cred};
+#[cfg(unittest)]
+use kcred::initial_user_namespace;
+use kcred::{CAP_IPC_OWNER, Cred, UserNamespace};
 use linux_raw_sys::general::__kernel_time_t;
 use posix_types::IpcPerm;
 
@@ -74,7 +77,18 @@ pub(crate) const IPC_WRITE: u32 = 0o222;
 /// supplementary groups. The requested class bits are folded out of `flag`, so
 /// callers pass the raw operation flags (including `msgget` mode bits). Effective
 /// `CAP_IPC_OWNER` overrides a denial; UID zero alone grants no authority.
+#[cfg(unittest)]
 fn has_ipc_permission(perm: &IpcPerm, cred: &Cred, flag: u32) -> bool {
+    has_ipc_permission_in(perm, cred, flag, &initial_user_namespace())
+}
+
+/// Namespace-aware form used by syscall paths that know the queue owner.
+fn has_ipc_permission_in(
+    perm: &IpcPerm,
+    cred: &Cred,
+    flag: u32,
+    owner_ns: &Arc<UserNamespace>,
+) -> bool {
     let requested = (flag >> 6) | (flag >> 3) | flag;
     let euid = cred.euid();
     let granted = if euid == perm.cuid || euid == perm.uid {
@@ -89,7 +103,7 @@ fn has_ipc_permission(perm: &IpcPerm, cred: &Cred, flag: u32) -> bool {
         return true;
     }
 
-    cred.has_cap(CAP_IPC_OWNER)
+    cred.has_cap_in(owner_ns, CAP_IPC_OWNER)
 }
 
 /// Applies Linux `ipcctl_obtain_check()` control authority to `perm`.
@@ -97,7 +111,17 @@ fn has_ipc_permission(perm: &IpcPerm, cred: &Cred, flag: u32) -> bool {
 /// Queue control is reserved for the effective UID that matches the current
 /// owner or creator, with effective `CAP_SYS_ADMIN` as the privileged override.
 /// `CAP_IPC_OWNER` only overrides read/write access and is deliberately absent.
+#[cfg(unittest)]
 fn has_ipc_control_permission(perm: &IpcPerm, cred: &Cred) -> bool {
+    has_ipc_control_permission_in(perm, cred, &initial_user_namespace())
+}
+
+/// Namespace-aware form used by syscall paths that know the queue owner.
+fn has_ipc_control_permission_in(
+    perm: &IpcPerm,
+    cred: &Cred,
+    owner_ns: &Arc<UserNamespace>,
+) -> bool {
     let euid = cred.euid();
-    euid == perm.cuid || euid == perm.uid || cred.has_cap(kcred::CAP_SYS_ADMIN)
+    euid == perm.cuid || euid == perm.uid || cred.has_cap_in(owner_ns, kcred::CAP_SYS_ADMIN)
 }

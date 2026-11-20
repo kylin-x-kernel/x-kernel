@@ -8,3 +8,4 @@ pub(crate) mod mounts;
 pub(crate) mod root;
 #[cfg(feature = "tee")]
 mod tee;
+pub(crate) mod userns;

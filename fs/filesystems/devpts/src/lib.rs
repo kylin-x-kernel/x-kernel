@@ -327,7 +327,7 @@ fn init_fs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
 
 /// Registered devpts filesystem type.
 pub(crate) static FILE_SYSTEM_TYPE: FileSystemType =
-    FileSystemType::nodev("devpts", init_fs_context);
+    FileSystemType::nodev_userns("devpts", init_fs_context);
 
 /// Registers the devpts filesystem type during kernel initialization.
 #[macros::register_init]

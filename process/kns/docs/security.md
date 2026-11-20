@@ -52,10 +52,10 @@ namespace references.
 
 | ID | Threat and asset | Severity | Trigger | Response and residual risk |
 |---|---|---|---|---|
-| T-01 | False namespace isolation | High | Caller requests unsupported NEW flags | `clone_for_child`/`prepare_unshare` reject `Unimplemented`/`Unsupported`; `with_namespace` rejects User/Cgroup swaps; ID-only types do not prove manager isolation. Net switching is now supported at the lifecycle layer: the swap installs the target `NetNamespace` and `knet` materializes a private protocol stack (loopback + `127.0.0.1/8`), while socket creation, netlink and the listen table still resolve through knet's global singletons — data-plane isolation remains a follow-up, so the residual risk is that a net namespace provides identity and lifecycle only, not traffic isolation. Syscall policy and consumer state must be audited separately. |
+| T-01 | False namespace isolation | High | Caller requests a namespace type that does not fully isolate its resource (e.g. IPC ID-only creation) | `clone_for_child`/`prepare_unshare` validate every requested namespace; user-namespace switches install the matching credential; ID-only types do not prove manager isolation. Net switching is now supported at the lifecycle layer: the swap installs the target `NetNamespace` and `knet` materializes a private protocol stack (loopback + `127.0.0.1/8`), while socket creation, netlink and the listen table still resolve through knet's global singletons — data-plane isolation remains a follow-up, so the residual risk is that a net namespace provides identity and lifecycle only, not traffic isolation. Syscall policy and consumer state must be audited separately. |
 | T-02 | Wrong root/pwd after mount copy | High | NEWNS is combined with shared filesystem state or paths are not retargeted | Shared state returns `InvalidFlagCombination`; `prepare_unshare` checks `fs_shared_with_others` + `CLONE_FS`; private copy uses KVFS retargeting and paired `replace_root_and_pwd`. Caller must supply initialized paths. |
 | T-03 | UTS buffer overrun | High | Name length is 65 or greater | Setters return `NameTooLong` before mutation; safe copying and zero-filled arrays retain termination. |
-| T-04 | Unauthorized hostname/namespace changes | High | Unprivileged request reaches trusted APIs | Authorization is external (syscall layer passes `UnshareContext::privileged`); these APIs check data/flag consistency, not caller credentials. |
+| T-04 | Unauthorized hostname/namespace changes | High | Unprivileged request reaches trusted APIs | Authorization is external (syscall layer passes `UnshareContext::cred`); these APIs check data/flag consistency and namespace ownership, not ambient caller credentials. |
 | T-05 | Misinterpreted hostname text | Low | Name contains NUL or non-UTF-8 bytes | Stored bytes are preserved and slice reads stop at NUL; consumers must handle bytes rather than assume ASCII or full-string round trips. |
 | T-06 | Namespace ID collision | Medium | External `NamespaceId` counter wraps | No local wrap prevention; IDs are metadata, not a substitute for live object identity and authorization. |
 | T-07 | Stale namespace fd after process exit | Medium | `NsFd` from a bound procfs file opened after the owner exited | procfs nodes upgrade a weak task reference and fail with `ESRCH`; the `NsFd` fd itself pins the namespace, so the same-fd pattern stays valid. Bind-after-exit requires a registry (documented non-goal). |
@@ -65,7 +65,7 @@ namespace references.
 
 | ID | Failure mode | Cause | Local effect | System effect | Severity (1-4) | Handling |
 |---|---|---|---|---|---|---|
-| F-01 | Unsupported clone | Unimplemented namespace bit | Typed error | Child creation rejected | 3 | Caller translates `Unimplemented` to its ABI. |
+| F-01 | Unsupported clone | Unsupported namespace bit or invalid combination | Typed error | Child creation rejected | 3 | Caller translates the typed namespace error to its ABI. |
 | F-02 | Mount clone fails | KVFS copy/retarget error | `CloneNsError::Mount`/`UnshareError::Mount` | No child bundle or unshare | 3 | Preserve underlying `VfsError`. |
 | F-03 | Premature initial construction | VFS mount namespace absent | `expect` panic | Process boot fails | 2 | Initialize VFS before `new_initial`. |
 | F-04 | Private paths absent | NEWNS on uninitialized `FsStruct` | Root/pwd reader panic | Clone fails fatally | 2 | Construct a mounted private context first. |
@@ -79,12 +79,12 @@ This crate chooses typed errors, not errno. It has no retry/rollback manager
 beyond ownership cleanup of partially constructed values. Allocation follows the
 kernel allocator policy. Hostname/domainname and namespace IDs may reveal system
 identity to consumers; this crate does not log them or handle other user payload.
-User/capability, namespace-FD policy, net isolation, and full user/cgroup
-namespace switching are external or documented non-goals; IPC/net/time payloads
-are not owned here. `unshare` maps to `EOPNOTSUPP` for NEWUSER/NEWCGROUP/NEWTIME, deliberately
-avoiding pseudo-isolation; NEWNET is supported and materializes a private
-protocol stack through `knet` (data-plane routing stays global for now, see
-T-01).
+User/capability, namespace-FD policy, and net isolation are external or
+documented non-goals; IPC/net/time payloads and cgroup controller state are not
+owned here. `unshare`/`clone` accept all `CLONE_NEW*` flags; user namespaces carry
+credential and idmap state, cgroup namespaces carry a view rooted at the caller's
+current cgroup, and NET materializes a private protocol stack through `knet`
+(data-plane routing stays global for now, see T-01).
 
 ## Audit checklist
 
@@ -93,7 +93,9 @@ T-01).
 - Preserve private, initialized filesystem context for NEWNS.
 - Keep UTS bounds, one-allocation borrowing, and byte semantics aligned.
 - Preserve the single initial cgroup hierarchy reference.
-- Ensure `setns` rejects User/Cgroup swaps rather than switching references;
-  a Net swap is supported and materializes the target namespace's protocol
+- Authorize `setns` per namespace type against the target namespace's owner
+  user namespace. User swaps install the matching credential transition in the
+  syscall layer; cgroup swaps into the current view are a no-op and a real
+  switch uses the namespace's view; Net swaps materialize the target protocol
   stack (see T-01 for its data-plane residual risk).
 - Define owner, locks, authorization, and cleanup when adding namespace state.

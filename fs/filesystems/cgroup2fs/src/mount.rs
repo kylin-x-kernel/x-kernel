@@ -31,7 +31,7 @@ fn init_context(context: &mut FsContext<'_>) -> VfsResult<()> {
 }
 
 /// Registered cgroup v2 filesystem type.
-pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("cgroup2", init_context);
+pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev_userns("cgroup2", init_context);
 
 /// `cgroup` mount alias.
 ///

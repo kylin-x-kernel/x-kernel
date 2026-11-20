@@ -32,7 +32,7 @@ pub use self::{
     fd_table::FdTable,
     fd_table_owner::{FdTableOwner, FdTableRef},
     file_descriptor::{FdSnapshot, FileDescriptor},
-    stat::Kstat,
+    stat::{Kstat, project_into_namespace},
 };
 
 unittest::path_mod_test!(tests, "../ut-tests/lib.rs");

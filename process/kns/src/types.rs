@@ -10,24 +10,29 @@ bitflags::bitflags! {
     pub struct NamespaceFlags: u64 {
         /// Request a copy of the mount namespace.
         const NEWNS     = linux_raw_sys::general::CLONE_NEWNS as u64;
-        /// Request a new cgroup namespace; currently rejected by `NsProxy::clone_for_child`.
+        /// Request a new cgroup namespace pinning the caller's current cgroup.
         const NEWCGROUP = linux_raw_sys::general::CLONE_NEWCGROUP as u64;
         /// Request a private copy of hostname and domainname.
         const NEWUTS    = linux_raw_sys::general::CLONE_NEWUTS as u64;
         /// Request a distinct IPC namespace identity.
         const NEWIPC    = linux_raw_sys::general::CLONE_NEWIPC as u64;
-        /// Request a new user namespace; currently unsupported.
+        /// Request a new user namespace owning the other new namespaces.
         const NEWUSER   = linux_raw_sys::general::CLONE_NEWUSER as u64;
-        /// Request a new PID namespace for children; currently unsupported.
+        /// Request a new PID namespace for children.
         const NEWPID    = linux_raw_sys::general::CLONE_NEWPID as u64;
-        /// Request a new network namespace; currently unsupported.
+        /// Request a new network namespace.
         const NEWNET    = linux_raw_sys::general::CLONE_NEWNET as u64;
-        /// Request a new time namespace; currently unsupported.
+        /// Request a new time namespace for children.
         const NEWTIME   = linux_raw_sys::general::CLONE_NEWTIME as u64;
     }
 }
 
 /// The type of a namespace.
+///
+/// Every variant has a real backing object and can be named by an [`NsFd`];
+/// there is no "recognized but unsupported" namespace kind.
+///
+/// [`NsFd`]: crate::NsFd
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum NamespaceType {
     /// Mount-tree namespace.

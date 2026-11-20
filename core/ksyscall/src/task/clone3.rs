@@ -105,18 +105,19 @@ pub(crate) fn sys_clone3(uctx: &UserContext, cl_args: usize, size: usize) -> KRe
     // stays in do_clone.
     req.validate_pre_cgroup_flags()?;
 
-    // Resolve and authorize the target here so the fork path only ever sees
-    // a validated cgroup domain reference, never a user descriptor.
-    if flags.contains(CloneFlags::INTO_CGROUP) {
-        let target = clone_cgroup_target(kargs.cgroup)?;
-        req.set_cgroup_target(target);
-    }
-
     req.set_stack_with_size(kargs.stack, kargs.stack_size)
         .set_parent_tid(kargs.parent_tid as usize)
         .set_child_tid(kargs.child_tid as usize)
         .set_tls(kargs.tls as usize)
         .set_pidfd(kargs.pidfd as usize);
+
+    // Linux only interprets `cgroup` when CLONE_INTO_CGROUP is set; a
+    // non-zero field without the flag is ignored (`copy_clone_args_from_user`
+    // validates it only under the flag). Do not reject it with EINVAL.
+    if flags.contains(CloneFlags::INTO_CGROUP) {
+        let target = clone_cgroup_target(kargs.cgroup)?;
+        req.set_cgroup_target(target);
+    }
 
     req.do_clone(uctx)
 }

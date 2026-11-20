@@ -31,7 +31,8 @@ fn init_ramfs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
 }
 
 /// Registered ramfs filesystem type.
-pub(crate) static RAMFS_TYPE: FileSystemType = FileSystemType::nodev("ramfs", init_ramfs_context);
+pub(crate) static RAMFS_TYPE: FileSystemType =
+    FileSystemType::nodev_userns("ramfs", init_ramfs_context);
 
 /// Internal mutable bootstrap-root filesystem type.
 static ROOTFS_TYPE: FileSystemType = FileSystemType::internal("rootfs");

@@ -613,12 +613,18 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
         if let Err(err) = process.exit_fs() {
             error!("exit_fs on process exit failed: {err:?}");
         }
-        // Release the namespace proxy in the exiting task's context. Leaving
-        // it for ProcessRuntime::drop can run netns teardown from IRQ/reclaim
-        // context after the task object is freed.
-        if let Err(err) = process.exit_namespaces() {
-            error!("exit_namespaces on process exit failed: {err:?}");
-        }
+        // Regression guard for the zombie-namespace contract: the socket etc.
+        // Checked by unit tests that drive `do_exit()`; re-adding
+        // `exit_namespaces()` here makes the still-unreaped identity lose the
+        // `/proc/<pid>/ns/*` view that container runtimes pin.
+        #[cfg(unittest)]
+        assert!(
+            process.mnt_ns().is_ok(),
+            "do_exit must retain namespaces until wait_reap::release_zombie_namespaces"
+        );
+        // Namespace release is deferred to reap, like Linux release_task():
+        // an unreaped zombie must keep serving /proc/<pid>/ns/* so runtimes
+        // can pin the container init's namespaces.
         #[cfg(feature = "tipc")]
         if let Err(err) = process.close_all_tipc_handles() {
             error!("close_all_tipc_handles on process exit failed: {err:?}");

@@ -51,6 +51,7 @@ const KIND_LINUX_PAIRS: &[(KErrorKind, LinuxError)] = &[
     (KErrorKind::StorageFull, LinuxError::ENOSPC),
     (KErrorKind::TimedOut, LinuxError::ETIMEDOUT),
     (KErrorKind::TooManyOpenFiles, LinuxError::EMFILE),
+    (KErrorKind::TooManyUsers, LinuxError::EUSERS),
     (KErrorKind::UnexpectedEof, LinuxError::EIO),
     (KErrorKind::Unsupported, LinuxError::ENOSYS),
     (KErrorKind::WouldBlock, LinuxError::EAGAIN),

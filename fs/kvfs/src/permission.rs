@@ -30,15 +30,56 @@ bitflags::bitflags! {
     }
 }
 
+/// Linux `capable_wrt_inode_uidgid()`.
+///
+/// The capability is checked in the caller's user namespace and only counts
+/// when the inode's global uid/gid are both mapped into that namespace. There
+/// is deliberately no fallback to the inode's `s_user_ns`: Linux
+/// `privileged_wrt_inode_uidgid()` fails for an unmapped ID.
+pub(crate) fn capable_wrt_inode_uidgid(
+    cred: &Cred,
+    _inode_ns: &kcred::UserNamespace,
+    metadata: &Metadata,
+    cap: u32,
+) -> bool {
+    capable_wrt_inode_ids(cred, metadata.uid, metadata.gid, cap)
+}
+
+/// The uid/gid form of [`capable_wrt_inode_uidgid`], for callers that already
+/// have the inode IDs without a full `Metadata` value.
+pub(crate) fn capable_wrt_inode_ids(cred: &Cred, uid: u32, gid: u32, cap: u32) -> bool {
+    let caller_ns = cred.user_ns();
+    caller_ns.map_uid_from_initial(uid).is_some()
+        && caller_ns.map_gid_from_initial(gid).is_some()
+        && cred.has_cap_in(caller_ns, cap)
+}
+
 /// Applies the generic DAC permission policy to an inode.
 ///
 /// Filesystems that do not override [`crate::InodeOperations::permission`]
 /// reach this implementation.
 pub fn generic_permission(inode: &VfsInode, permission: Permission, cred: &Cred) -> KResult<()> {
-    check_dac_permission(&inode.metadata(), permission, cred)
+    // Linux `capable_wrt_inode_uidgid()` checks the capability in the caller's
+    // user namespace and additionally requires the inode's uid/gid to be
+    // mapped there.
+    let inode_ns = inode
+        .super_block()
+        .map(|super_block| super_block.user_ns())
+        .unwrap_or_else(|_| kcred::initial_user_namespace());
+    check_dac_permission_in(&inode.metadata(), permission, cred, &inode_ns)
 }
 
+#[cfg(unittest)]
 fn check_dac_permission(metadata: &Metadata, permission: Permission, cred: &Cred) -> KResult<()> {
+    check_dac_permission_in(metadata, permission, cred, &kcred::initial_user_namespace())
+}
+
+fn check_dac_permission_in(
+    metadata: &Metadata,
+    permission: Permission,
+    cred: &Cred,
+    user_ns: &kcred::UserNamespace,
+) -> KResult<()> {
     let permission = permission
         .intersection(Permission::MAY_READ | Permission::MAY_WRITE | Permission::MAY_EXEC);
     let mode = metadata.mode.permission();
@@ -56,11 +97,11 @@ fn check_dac_permission(metadata: &Metadata, permission: Permission, cred: &Cred
         return Err(KError::PermissionDenied);
     }
 
-    if cred.has_cap(CAP_DAC_OVERRIDE) {
+    if capable_wrt_inode_uidgid(cred, user_ns, metadata, CAP_DAC_OVERRIDE) {
         return Ok(());
     }
 
-    if cred.has_cap(CAP_DAC_READ_SEARCH) {
+    if capable_wrt_inode_uidgid(cred, user_ns, metadata, CAP_DAC_READ_SEARCH) {
         let readable = Permission::MAY_READ
             | if metadata.mode.node_type() == NodeType::Directory {
                 Permission::MAY_EXEC
@@ -72,9 +113,14 @@ fn check_dac_permission(metadata: &Metadata, permission: Permission, cred: &Cred
         }
     }
 
+    let in_group = cred.fsgid() == metadata.gid
+        || cred
+            .supplementary_groups()
+            .binary_search(&metadata.gid)
+            .is_ok();
     let is_allowed = if cred.fsuid() == metadata.uid {
         owner_allows(mode, permission)
-    } else if cred.in_group(metadata.gid) {
+    } else if in_group {
         group_allows(mode, permission)
     } else {
         other_allows(mode, permission)

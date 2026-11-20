@@ -129,6 +129,14 @@ pub fn current_user_process() -> Arc<Process> {
     with_current_user_thread(|thread| thread.process().clone())
 }
 
+/// Returns the current process when the task is a user thread, `None` for
+/// kernel tasks whose mount context has no PID namespace to observe.
+pub fn try_current_user_process() -> Option<Arc<Process>> {
+    current()
+        .try_as_thread()
+        .map(|thread| thread.process().clone())
+}
+
 /// Executes a closure with the current user thread.
 ///
 /// Borrows the current task instead of cloning a task handle, so hot syscall

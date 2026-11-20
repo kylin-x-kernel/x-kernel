@@ -2329,6 +2329,7 @@ dependencies = [
  "bitflags 2.13.2",
  "kerrno",
  "klazy",
+ "kspin",
  "unittest",
 ]
 
@@ -2697,6 +2698,7 @@ dependencies = [
 name = "kidentity"
 version = "0.3.0-dev"
 dependencies = [
+ "kcred",
  "kerrno",
  "lazyinit",
  "unittest",
@@ -4804,6 +4806,7 @@ dependencies = [
  "kerrno",
  "kfd_objects",
  "khal",
+ "kidentity",
  "kirq",
  "klockstat",
  "klogger",

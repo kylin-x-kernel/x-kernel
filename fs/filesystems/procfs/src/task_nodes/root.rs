@@ -18,6 +18,7 @@ use kcpu_id_map::text::{CpuTextDomain, bitmap_capacity, list_capacity, write_bit
 use kcred::Cred;
 use kfd_objects::inotify::Inotify;
 use khal::paging::MappingFlags;
+use kidentity::PidNamespace;
 use kprocess::{AsThread, LiveAddressSpace, PidFd, Process, TaskStat, procfs};
 use ktask::{KCpuMask, KtaskRef, WeakKtaskRef, current};
 use ktime_types::SystemTime;
@@ -46,9 +47,22 @@ pub(super) fn upgrade_task(task_weak: &WeakKtaskRef) -> VfsResult<KtaskRef> {
     task_weak.upgrade().ok_or(VfsError::NoSuchProcess)
 }
 
+/// Returns the target task's global inode-owner IDs.
+///
+/// `Cred` stores UID/GID in initial-namespace coordinates and
+/// `SimpleFile::new_regular_with_owner` expects those same global values, so
+/// no namespace projection belongs here.
+fn procfs_inode_owner(task: &WeakKtaskRef) -> (u32, u32) {
+    task.upgrade().map_or((0, 0), |task| {
+        let cred = task.as_thread().real_cred();
+        (cred.euid(), cred.egid())
+    })
+}
+
 struct ProcessTaskDir {
     fs: Arc<SimpleFs>,
     process: Weak<Process>,
+    observer_ns: Option<Arc<PidNamespace>>,
 }
 
 impl SimpleDirOps for ProcessTaskDir {
@@ -68,23 +82,47 @@ impl SimpleDirOps for ProcessTaskDir {
         let Some(process) = self.process.upgrade() else {
             return Ok(KBox::new(iter::empty())?);
         };
-        Ok(KBox::new(
-            process
-                .threads()
-                .into_iter()
-                .map(|tid| tid.to_string().into()),
-        )?)
+        let names: Vec<Cow<'_, str>> = process
+            .threads()
+            .into_iter()
+            .filter_map(|tid| {
+                let task = procfs::thread_task(tid).ok()?;
+                let visible = self
+                    .observer_ns
+                    .as_ref()
+                    .and_then(|ns| task.as_thread().task_number().nr_in(ns))
+                    .unwrap_or(tid);
+                Some(visible.to_string().into())
+            })
+            .collect();
+        Ok(KBox::new(names.into_iter())?)
     }
 
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let process = self.process.upgrade().ok_or(VfsError::NotFound)?;
         let tid = crate::name::to_number(name).ok_or(VfsError::NotFound)?;
-        let task = procfs::thread_task(tid).map_err(|_| VfsError::NotFound)?;
+        let task = match self.observer_ns.as_ref() {
+            Some(ns) => process
+                .threads()
+                .into_iter()
+                .find_map(|root_tid| {
+                    let task = procfs::thread_task(root_tid).ok()?;
+                    (task.as_thread().task_number().nr_in(ns) == Some(tid)).then_some(task)
+                })
+                .ok_or(VfsError::NotFound)?,
+            None => procfs::thread_task(tid).map_err(|_| VfsError::NotFound)?,
+        };
         if task.as_thread().process().pid() != process.pid() {
             return Err(VfsError::NotFound);
         }
 
-        Ok(make_thread_dir(lookup, name, self.fs.clone(), &task))
+        Ok(make_thread_dir(
+            lookup,
+            name,
+            self.fs.clone(),
+            &task,
+            self.observer_ns.clone(),
+        ))
     }
 
     fn supports_dentry_cache(&self) -> bool {
@@ -96,6 +134,7 @@ impl SimpleDirOps for ProcessTaskDir {
 // the inode and iterator retain only a weak target, never a credential cache.
 struct StatusIter {
     task: WeakKtaskRef,
+    observer_ns: Option<Arc<PidNamespace>>,
 }
 
 impl SeqIterator for StatusIter {
@@ -117,7 +156,7 @@ impl SeqIterator for StatusIter {
 
     fn try_show(&self, _item: &Self::Item, buf: &mut String) -> VfsResult<()> {
         let task = upgrade_task(&self.task)?;
-        buf.push_str(&task_status(&task)?);
+        buf.push_str(&task_status(&task, self.observer_ns.as_ref())?);
         Ok(())
     }
 }
@@ -133,22 +172,35 @@ impl SeqIterator for StatusIter {
 struct TaskStatus {
     stat: TaskStat,
     tgid: u32,
+    reader_user_ns: Arc<kcred::UserNamespace>,
     cred: Arc<Cred>,
     shared_pending: u64,
     cpumask: KCpuMask,
 }
 
 impl TaskStatus {
-    fn capture(task: &KtaskRef) -> Self {
+    fn capture(task: &KtaskRef, observer_ns: Option<&Arc<PidNamespace>>) -> Self {
         let thread = task.as_thread();
-        let (stat, masks) = TaskStat::sample_thread(task);
-        let tgid = thread.process().pid();
+        let process = thread.process();
+        let (mut stat, masks) = TaskStat::sample_thread(task);
+        let tgid = if let Some(ns) = observer_ns {
+            stat.project_pid_namespace(process, ns);
+            if let Some(pid) = thread.task_number().nr_in(ns) {
+                stat.pid = pid;
+            }
+            process
+                .number_in_namespace(ns)
+                .unwrap_or_else(|| process.pid())
+        } else {
+            process.pid()
+        };
         let cred = thread.real_cred();
         let shared_pending = masks.shared_pending().bits();
         let cpumask = task.cpumask();
         Self {
             stat,
             tgid,
+            reader_user_ns: kprocess::current_cred().user_ns_arc().clone(),
             cred,
             shared_pending,
             cpumask,
@@ -156,8 +208,16 @@ impl TaskStatus {
     }
 }
 
-fn task_status(task: &KtaskRef) -> VfsResult<String> {
-    format_task_status(&TaskStatus::capture(task))
+fn task_status(task: &KtaskRef, observer_ns: Option<&Arc<PidNamespace>>) -> VfsResult<String> {
+    format_task_status(&TaskStatus::capture(task, observer_ns))
+}
+
+fn local_uid(status: &TaskStatus, uid: u32) -> u32 {
+    kvfs::Kuid::from_raw(uid).to_inside(&status.reader_user_ns)
+}
+
+fn local_gid(status: &TaskStatus, gid: u32) -> u32 {
+    kvfs::Kgid::from_raw(gid).to_inside(&status.reader_user_ns)
 }
 
 fn format_task_status(status: &TaskStatus) -> VfsResult<String> {
@@ -188,20 +248,20 @@ fn format_task_status(status: &TaskStatus) -> VfsResult<String> {
         &mut out,
         format_args!(
             "Uid:\t{}\t{}\t{}\t{}",
-            status.cred.ruid(),
-            status.cred.euid(),
-            status.cred.suid(),
-            status.cred.fsuid()
+            local_uid(status, status.cred.ruid()),
+            local_uid(status, status.cred.euid()),
+            local_uid(status, status.cred.suid()),
+            local_uid(status, status.cred.fsuid())
         ),
     );
     push_status_line(
         &mut out,
         format_args!(
             "Gid:\t{}\t{}\t{}\t{}",
-            status.cred.rgid(),
-            status.cred.egid(),
-            status.cred.sgid(),
-            status.cred.fsgid()
+            local_gid(status, status.cred.rgid()),
+            local_gid(status, status.cred.egid()),
+            local_gid(status, status.cred.sgid()),
+            local_gid(status, status.cred.fsgid())
         ),
     );
     // Linux's `proc_pid_status()` emits `VmSize` only when the task has an
@@ -337,10 +397,15 @@ fn parse_oom_score_adj_input(data: &[u8]) -> VfsResult<Option<i32>> {
         .ok_or(VfsError::InvalidInput)
 }
 
-fn proc_self_target() -> VfsResult<String> {
+fn proc_self_target(observer_ns: Option<&Arc<PidNamespace>>) -> VfsResult<String> {
     let task = current();
     let thread = task.try_as_thread().ok_or(VfsError::NotFound)?;
-    Ok(thread.process().pid().to_string())
+    let process = thread.process();
+    let pid = match observer_ns {
+        Some(ns) => process.number_in_namespace(ns).ok_or(VfsError::NotFound)?,
+        None => process.pid(),
+    };
+    Ok(pid.to_string())
 }
 
 fn maps_permissions(flags: MappingFlags) -> [u8; 4] {
@@ -1138,6 +1203,7 @@ fn render_fdinfo(file: &VfsFile, cloexec: bool) -> String {
 struct ThreadDir {
     fs: Arc<SimpleFs>,
     task: WeakKtaskRef,
+    observer_ns: Option<Arc<PidNamespace>>,
 }
 
 fn make_thread_dir(
@@ -1145,10 +1211,12 @@ fn make_thread_dir(
     name: &str,
     fs: Arc<SimpleFs>,
     task: &KtaskRef,
+    observer_ns: Option<Arc<PidNamespace>>,
 ) -> Dentry {
     let thread_dir = ThreadDir {
         fs: fs.clone(),
         task: KtaskRef::downgrade(task),
+        observer_ns,
     };
 
     #[cfg(feature = "tee")]
@@ -1265,7 +1333,7 @@ fn task_namespace_inode(kind: ProcNsKind, task: &KtaskRef) -> VfsResult<u64> {
         ProcNsKind::Ipc => process.ipc_ns()?.id().as_u64(),
         ProcNsKind::Uts => process.uts_ns()?.id().as_u64(),
         ProcNsKind::Cgroup => process.cgroup_ns()?.id().as_u64(),
-        ProcNsKind::User => kcred::initial_user_namespace().id().as_u64(),
+        ProcNsKind::User => task.as_thread().real_cred().user_ns().id().as_u64(),
     })
 }
 
@@ -1283,7 +1351,7 @@ fn task_namespace_fd(kind: ProcNsKind, task: &KtaskRef) -> VfsResult<kns::NsFd> 
         ProcNsKind::Ipc => kns::NsFd::Ipc(process.ipc_ns()?),
         ProcNsKind::Uts => kns::NsFd::Uts(process.uts_ns()?),
         ProcNsKind::Cgroup => kns::NsFd::Cgroup(process.cgroup_ns()?),
-        ProcNsKind::User => kns::NsFd::User(kcred::initial_user_namespace()),
+        ProcNsKind::User => kns::NsFd::User(task.as_thread().real_cred().user_ns_arc().clone()),
     })
 }
 
@@ -1451,11 +1519,14 @@ impl SimpleDirOps for ThreadDir {
                 "mountstats",
                 "cgroup",
                 "ns",
+                "uid_map",
+                "gid_map",
+                "setgroups",
+                "auxv",
                 "cmdline",
                 "comm",
                 "exe",
                 "root",
-                "auxv",
                 "fd",
                 "fdinfo",
             ]
@@ -1477,6 +1548,7 @@ impl SimpleDirOps for ThreadDir {
     fn lookup_child(&self, lookup: SimpleDirLookup<'_>, name: &str) -> VfsResult<Dentry> {
         let fs = self.fs.clone();
         let task_weak = self.task.clone();
+        let observer_ns = self.observer_ns.clone();
         match name {
             "stat" => lookup.file(
                 name,
@@ -1484,7 +1556,14 @@ impl SimpleDirOps for ThreadDir {
                     let task_weak = task_weak.clone();
                     move || {
                         let task = upgrade_task(&task_weak)?;
-                        Ok(format!("{}", TaskStat::from_thread(&task)).into_bytes())
+                        let mut stat = TaskStat::from_thread(&task);
+                        if let Some(ns) = observer_ns.as_ref() {
+                            stat.project_pid_namespace(task.as_thread().process(), ns);
+                            if let Some(pid) = task.as_thread().task_number().nr_in(ns) {
+                                stat.pid = pid;
+                            }
+                        }
+                        Ok(format!("{stat}").into_bytes())
                     }
                 }),
             ),
@@ -1495,6 +1574,7 @@ impl SimpleDirOps for ThreadDir {
                     move || {
                         Ok(StatusIter {
                             task: task_weak.clone(),
+                            observer_ns: observer_ns.clone(),
                         })
                     }
                 }),
@@ -1535,6 +1615,7 @@ impl SimpleDirOps for ThreadDir {
                         Arc::new(ProcessTaskDir {
                             fs: fs.clone(),
                             process: Arc::downgrade(task.as_thread().process()),
+                            observer_ns: observer_ns.clone(),
                         }),
                     ),
                 ))
@@ -1630,6 +1711,68 @@ impl SimpleDirOps for ThreadDir {
                     ),
                 ))
             }
+            "uid_map" => lookup.file(name, {
+                let (uid, gid) = procfs_inode_owner(&task_weak);
+                SimpleFile::new_regular_with_owner(
+                    fs.clone(),
+                    NodePermission::from_bits_truncate(0o666),
+                    uid,
+                    gid,
+                    super::userns::IdMapFile::new(task_weak.clone(), super::userns::IdMapKind::Uid),
+                )
+            }),
+            "gid_map" => lookup.file(name, {
+                let (uid, gid) = procfs_inode_owner(&task_weak);
+                SimpleFile::new_regular_with_owner(
+                    fs.clone(),
+                    NodePermission::from_bits_truncate(0o666),
+                    uid,
+                    gid,
+                    super::userns::IdMapFile::new(task_weak.clone(), super::userns::IdMapKind::Gid),
+                )
+            }),
+            "setgroups" => lookup.file(name, {
+                let (uid, gid) = procfs_inode_owner(&task_weak);
+                SimpleFile::new_regular_with_owner(
+                    fs.clone(),
+                    NodePermission::from_bits_truncate(0o644),
+                    uid,
+                    gid,
+                    super::userns::SetgroupsFile::new(task_weak.clone()),
+                )
+            }),
+            "auxv" => {
+                let (owner_uid, owner_gid) = procfs_inode_owner(&task_weak);
+                lookup.file(
+                    name,
+                    SimpleFile::new_snapshot_with_owner(
+                        fs.clone(),
+                        NodePermission::OWNER_READ,
+                        owner_uid,
+                        owner_gid,
+                        {
+                            let task_weak = task_weak.clone();
+                            move || {
+                                let task = upgrade_task(&task_weak)?;
+                                if let Some(caller) = ktask::current().try_as_thread() {
+                                    kprocess::ptrace::check_read_fs_creds_access(
+                                        caller,
+                                        task.as_thread(),
+                                    )
+                                    .map_err(|_| VfsError::PermissionDenied)?;
+                                }
+                                let words = task.as_thread().process().saved_aux();
+                                let mut bytes =
+                                    Vec::with_capacity(words.len() * core::mem::size_of::<u64>());
+                                for word in words.iter() {
+                                    bytes.extend_from_slice(&word.to_ne_bytes());
+                                }
+                                Ok(bytes)
+                            }
+                        },
+                    ),
+                )
+            }
             "cmdline" => lookup.file(
                 name,
                 SimpleFile::new_regular(fs.clone(), {
@@ -1682,39 +1825,6 @@ impl SimpleDirOps for ThreadDir {
                     }),
                 ),
             ),
-            "auxv" => {
-                let task = task_weak.upgrade().ok_or(VfsError::NotFound)?;
-                let owner = task.as_thread().real_cred();
-                lookup.file(
-                    name,
-                    SimpleFile::new_snapshot_with_owner(
-                        fs.clone(),
-                        NodePermission::OWNER_READ,
-                        owner.euid(),
-                        owner.egid(),
-                        {
-                            let task_weak = task_weak.clone();
-                            move || {
-                                let task = upgrade_task(&task_weak)?;
-                                // Linux exposes auxv only to a reader that may
-                                // inspect the target task and keeps the file
-                                // readable by the target's effective uid. The
-                                // snapshot captures this image generation when
-                                // the descriptor is opened.
-                                if let Some(caller) = ktask::current().try_as_thread() {
-                                    kprocess::ptrace::check_read_fs_creds_access(
-                                        caller,
-                                        task.as_thread(),
-                                    )
-                                    .map_err(|_| VfsError::PermissionDenied)?;
-                                }
-                                let auxv = task.as_thread().process().auxv()?;
-                                Ok((*auxv).clone())
-                            }
-                        },
-                    ),
-                )
-            }
             "exe" => proc_exe_link_child(lookup, name, ProcExeLink::new(fs.clone(), task_weak)),
             "root" => proc_root_link_child(lookup, name, ProcRootLink::new(fs.clone(), task_weak)),
             "fd" => {
@@ -1765,20 +1875,31 @@ impl SimpleDirOps for ThreadDir {
 
 pub(crate) struct ProcFsHandler {
     fs: Arc<SimpleFs>,
+    observer_ns: Option<alloc::sync::Arc<PidNamespace>>,
 }
 
 impl ProcFsHandler {
-    pub(crate) fn new(fs: Arc<SimpleFs>) -> Self {
-        Self { fs }
+    pub(crate) fn new(
+        fs: Arc<SimpleFs>,
+        observer_ns: Option<alloc::sync::Arc<PidNamespace>>,
+    ) -> Self {
+        Self { fs, observer_ns }
     }
 }
 
 impl SimpleDirOps for ProcFsHandler {
     fn child_names<'a>(&'a self) -> VfsResult<KBox<dyn Iterator<Item = Cow<'a, str>> + 'a>> {
         Ok(KBox::new(
-            procfs::visible_processes()
+            procfs::visible_processes_in_namespace(self.observer_ns.as_ref())
                 .into_iter()
-                .map(|process| Cow::Owned(process.pid().to_string()))
+                .map(|process| {
+                    let pid = self
+                        .observer_ns
+                        .as_ref()
+                        .and_then(|ns| process.number_in_namespace(ns))
+                        .unwrap_or_else(|| process.pid());
+                    Cow::Owned(pid.to_string())
+                })
                 .chain([Cow::Borrowed("self")]),
         )?)
     }
@@ -1787,13 +1908,23 @@ impl SimpleDirOps for ProcFsHandler {
         if name == "self" {
             return lookup.file(
                 name,
-                SimpleFile::new(self.fs.clone(), NodeType::Symlink, proc_self_target),
+                SimpleFile::new(self.fs.clone(), NodeType::Symlink, {
+                    let observer_ns = self.observer_ns.clone();
+                    move || proc_self_target(observer_ns.as_ref())
+                }),
             );
         }
 
         let pid = crate::name::to_number(name).ok_or(VfsError::NotFound)?;
-        let task = procfs::process_task(pid).map_err(|_| VfsError::NotFound)?;
-        Ok(make_thread_dir(lookup, name, self.fs.clone(), &task))
+        let task = procfs::process_task_in_namespace(pid, self.observer_ns.as_ref())
+            .map_err(|_| VfsError::NotFound)?;
+        Ok(make_thread_dir(
+            lookup,
+            name,
+            self.fs.clone(),
+            &task,
+            self.observer_ns.clone(),
+        ))
     }
 
     fn supports_dentry_cache(&self) -> bool {

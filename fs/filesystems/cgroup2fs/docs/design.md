@@ -93,7 +93,10 @@ or contexts holding a spinlock. The input has already been copied into the kerne
 
 ### Mounting
 
-An ordinary mount obtains the view root from the current process's `CgroupNamespace`. When `KFEAT_FS_CGROUP2=y`,
+An ordinary mount obtains the view root from the current process's `CgroupNamespace`.
+The type declares `FS_USERNS_MOUNT`, so a task in a non-initial user namespace may
+mount it when it holds `CAP_SYS_ADMIN` in the mount namespace owner; the superblock
+records that owner as `s_user_ns`. When `KFEAT_FS_CGROUP2=y`,
 `fs_boot` mounts the initial namespace hierarchy at `/sys/fs/cgroup` before any user process is created. Each
 superblock creates one `CgroupFsState` and first materializes the stable root inode.
 

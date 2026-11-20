@@ -552,6 +552,11 @@ pub struct SuperBlock {
     lifecycle: Mutex<SuperBlockLifecycle>,
     /// Excludes write admission during reconfiguration and final shutdown.
     umount_lock: RwLock<()>,
+    /// Owner user namespace corresponding to Linux `s_user_ns`: the user
+    /// namespace of the process that performed the mount. Permission checks
+    /// for inode ownership, `chown`, and identical-UID exemptions must
+    /// evaluate IDs against this namespace, not against the caller's.
+    user_ns: Once<alloc::sync::Arc<kcred::UserNamespace>>,
     /// Wakes `sget_dev` callers after nascent initialization or final shutdown.
     lifecycle_waiters: WaitQueue,
     dentry_cache: Mutex<HashMap<DentryKey, Dentry>>,
@@ -618,6 +623,35 @@ impl SuperBlock {
     /// Filesystem-wide error generations observed independently by syncfs callers.
     pub const fn writeback_errors(&self) -> &crate::WritebackErrors {
         &self.writeback_errors
+    }
+
+    /// Returns the owning user namespace (Linux `s_user_ns`).
+    ///
+    /// Falls back to the initial namespace for superblocks published before
+    /// the mount path installed the owner — an identity that matches the
+    /// historical behavior of every in-tree filesystem mount.
+    pub fn user_ns(&self) -> alloc::sync::Arc<kcred::UserNamespace> {
+        self.user_ns
+            .get()
+            .cloned()
+            .unwrap_or_else(kcred::initial_user_namespace)
+    }
+
+    /// Installs the owning user namespace exactly once, at mount time.
+    ///
+    /// Later mounts of an already-published superblock must not steal
+    /// ownership: Linux derives `s_user_ns` from the first mount that created
+    /// the superblock, and reconfiguration cannot change it.
+    pub fn init_user_ns(&self, user_ns: alloc::sync::Arc<kcred::UserNamespace>) {
+        self.user_ns.call_once(|| user_ns);
+    }
+
+    /// Returns whether any mount currently holds this superblock.
+    pub fn has_active_mounts(&self) -> bool {
+        matches!(
+            *self.lifecycle.lock(),
+            SuperBlockLifecycle::Available { active_mounts } if active_mounts > 0
+        )
     }
 
     /// Returns the filesystem type name.
@@ -942,6 +976,7 @@ impl SuperBlock {
             flags: AtomicSuperBlockFlags::new(flags),
             lifecycle: Mutex::new(SuperBlockLifecycle::Nascent),
             umount_lock: RwLock::default(),
+            user_ns: Once::new(),
             lifecycle_waiters: WaitQueue::new(),
             dentry_cache: Mutex::default(),
             block_size: Once::new(),

@@ -143,7 +143,12 @@ count can change immediately after observation and grants no admission guarantee
 - Writable controls include `comm`, `oom_score_adj`, trace event enables,
   `sys/kernel/printk`, `sys/kernel/log_filter`, the three
   `sys/fs/inotify/{max_queued_events,max_user_instances,max_user_watches}`
-  limits, and optional `sysrq-trigger`. `log_filter` accepts one filter spec
+  limits, optional `sysrq-trigger`, and the per-task `uid_map`, `gid_map`
+  (`0666`) and `setgroups` (`0644`) files. The map files accept at most
+  `ID_MAP_MAX_EXTENTS` decimal `inside outside count` lines and are write-once;
+  `IdMapFile::write` authorizes through `kcred::new_idmap_permitted`. The
+  `setgroups` file accepts `allow`/`deny` and is gated at open-for-write by
+  `CAP_SYS_ADMIN` in the target user namespace; `deny` is irreversible. `log_filter` accepts one filter spec
   (`[<level>] [<target>=<level>]...`, at most `MAX_FILTER_RULES` rules with
   `MAX_FILTER_TARGET`-byte targets); a write is privilege-gated and either
   replaces the whole spec or fails with `InvalidInput` and leaves the previous
@@ -157,8 +162,8 @@ count can change immediately after observation and grants no admission guarantee
   to `ktracing`; SysRq accepts the first non-whitespace byte only when it is
   `t`. `sys/kernel/hostname` and `sys/kernel/domainname` are also writable:
   both are `0644` and their write path requires `kprocess::current_cred()
-  .has_sys_admin()` (the `CAP_SYS_ADMIN` check `sethostname(2)` makes) and
-  fails with `OperationNotPermitted` otherwise. An accepted write replaces the
+  .has_root_euid()` (Linux `test_perm()`'s GLOBAL_ROOT_UID check, not a
+  capability) and fails with `OperationNotPermitted` otherwise. An accepted write replaces the
   caller's UTS namespace value following Linux `proc_dostring` strict
   semantics — it starts at the file position, stops at the first NUL or
   newline, truncates the stored value there, and silently accepts a write that

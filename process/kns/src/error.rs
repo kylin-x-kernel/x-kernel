@@ -13,11 +13,13 @@ pub enum CloneNsError {
     /// Mount namespace cloning was requested with a shared filesystem context
     /// (`CLONE_NEWNS` with `CLONE_FS`).
     InvalidFlagCombination,
-    /// A namespace flag was requested that has no implementation yet (e.g.
-    /// `CLONE_NEWNET`, `CLONE_NEWUSER`, `CLONE_NEWPID`, `CLONE_NEWTIME`).
-    Unimplemented,
+    /// Creating the requested namespace requires `CAP_SYS_ADMIN` in the
+    /// caller's user namespace.
+    NotPermitted,
     /// Mount namespace copy or filesystem-context retargeting failed.
     Mount(kvfs::VfsError),
+    /// A resource cap was reached (user-namespace nesting depth, ENOSPC).
+    NoSpace,
 }
 
 /// Errors that can occur when setting a UTS namespace name (nodename or

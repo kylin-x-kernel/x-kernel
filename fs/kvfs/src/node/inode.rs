@@ -2563,11 +2563,21 @@ impl VfsInode {
         let mut permission = mode.permission();
         // Linux `mode_strip_sgid()` reaches the credential check only for a
         // non-directory SGID+group-executable mode below an SGID directory.
+        let parent_ns = self
+            .super_block()
+            .map(|super_block| super_block.user_ns())
+            .unwrap_or_else(|_| kcred::initial_user_namespace());
+        let parent_metadata = self.metadata();
         let should_strip_set_gid = mode.node_type() != NodeType::Directory
             && permission.contains(NodePermission::SET_GID | NodePermission::GROUP_EXEC)
             && parent_permission.contains(NodePermission::SET_GID)
             && !cred.in_group(parent_gid)
-            && !cred.has_cap(kcred::CAP_FSETID);
+            && !crate::permission::capable_wrt_inode_uidgid(
+                cred,
+                &parent_ns,
+                &parent_metadata,
+                kcred::CAP_FSETID,
+            );
         if should_strip_set_gid {
             permission.remove(NodePermission::SET_GID);
         }

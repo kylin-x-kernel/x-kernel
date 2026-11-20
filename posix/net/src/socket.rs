@@ -90,7 +90,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
         }
         (AF_INET, SOCK_RAW) => {
             // SOCK_RAW requires CAP_NET_RAW, matching Linux semantics.
-            if !cred.has_cap(kcred::CAP_NET_RAW) {
+            if !crate::net_capable(&cred, kcred::CAP_NET_RAW) {
                 return Err(KError::from(LinuxError::EPERM));
             }
             let ip_proto = inet_raw_protocol(proto)?;
@@ -134,7 +134,7 @@ pub fn sys_socket(domain: u32, raw_ty: u32, proto: u32) -> KResult<isize> {
             knet::Socket::Netlink(KBox::new(NetlinkSocket::new(protocol, socket_type))?)
         }
         (AF_PACKET, SOCK_RAW) | (AF_PACKET, SOCK_DGRAM) => {
-            if !cred.has_cap(kcred::CAP_NET_RAW) {
+            if !crate::net_capable(&cred, kcred::CAP_NET_RAW) {
                 return Err(KError::from(LinuxError::EPERM));
             }
             if proto > u16::MAX as u32 {

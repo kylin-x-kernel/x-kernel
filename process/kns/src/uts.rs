@@ -4,9 +4,10 @@
 
 //! UTS namespace.
 
+use alloc::sync::Arc;
 use core::ffi::c_char;
 
-use kcred::NamespaceId;
+use kcred::{NamespaceId, UserNamespace};
 use ksync::RwLock;
 
 use crate::error::UtsError;
@@ -115,6 +116,7 @@ impl UtsInner {
 /// Other uname fields (sysname, release, version, machine) remain global kernel constants.
 pub struct UtsNamespace {
     id: NamespaceId,
+    owner: Arc<UserNamespace>,
     inner: RwLock<UtsInner>,
 }
 
@@ -125,19 +127,31 @@ impl Default for UtsNamespace {
 }
 
 impl UtsNamespace {
-    /// Creates a new UTS namespace with default hostname and domainname.
+    /// Creates a new UTS namespace owned by the initial user namespace.
     pub fn new() -> Self {
+        Self::new_in(kcred::initial_user_namespace())
+    }
+
+    /// Creates a new UTS namespace owned by `owner`.
+    pub fn new_in(owner: Arc<UserNamespace>) -> Self {
         Self {
             id: NamespaceId::new(),
+            owner,
             inner: RwLock::new(UtsInner::default()),
         }
     }
 
     /// Creates a new UTS namespace with the same hostname/domainname as the source.
     pub fn clone_from(source: &UtsNamespace) -> Self {
+        Self::clone_from_in(source, source.owner.clone())
+    }
+
+    /// Creates a new UTS namespace with `source`'s names and the given owner.
+    pub fn clone_from_in(source: &UtsNamespace, owner: Arc<UserNamespace>) -> Self {
         let inner = source.inner.read();
         Self {
             id: NamespaceId::new(),
+            owner,
             inner: RwLock::new(UtsInner {
                 nodename: inner.nodename,
                 domainname: inner.domainname,
@@ -148,6 +162,11 @@ impl UtsNamespace {
     /// Returns the namespace ID.
     pub fn id(&self) -> NamespaceId {
         self.id
+    }
+
+    /// Returns the user namespace that owns this UTS namespace.
+    pub fn owner(&self) -> &Arc<UserNamespace> {
+        &self.owner
     }
 
     /// Reads the current nodename.

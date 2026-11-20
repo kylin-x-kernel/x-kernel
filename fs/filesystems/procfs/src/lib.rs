@@ -33,8 +33,12 @@ fn get_tree(
     _lookup_root: &kvfs::Path,
     _lookup_pwd: &kvfs::Path,
 ) -> VfsResult<Arc<SuperBlock>> {
+    // A procfs instance shows the PID namespace of its mounting process, so a
+    // container mounting `/proc` gets its own view instead of the host's.
+    let observer_ns =
+        kprocess::try_current_user_process().map(|process| process.active_pid_namespace());
     get_tree_nodev(context, |file_system_type, flags| {
-        new_procfs_with_type(file_system_type, flags)
+        new_procfs_with_type_in(file_system_type, flags, observer_ns)
     })
 }
 
@@ -46,7 +50,7 @@ fn init_fs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
 }
 
 /// Registered proc filesystem type.
-pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("proc", init_fs_context);
+pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev_userns("proc", init_fs_context);
 
 #[macros::register_init]
 fn init_proc_fs() {
@@ -65,14 +69,17 @@ fn init_proc_fs() {
 /// callbacks. Returns `NoMemory` if private-owner allocation fails. Nested
 /// allocations retain their existing behavior.
 pub fn new_procfs(superblock_flags: SuperBlockFlags) -> VfsResult<Arc<SuperBlock>> {
-    new_procfs_with_type(&FILE_SYSTEM_TYPE, superblock_flags)
+    new_procfs_with_type_in(&FILE_SYSTEM_TYPE, superblock_flags, None)
 }
 
-fn new_procfs_with_type(
+fn new_procfs_with_type_in(
     file_system_type: &'static FileSystemType,
     superblock_flags: SuperBlockFlags,
+    observer_ns: Option<alloc::sync::Arc<kprocess::PidNamespace>>,
 ) -> VfsResult<Arc<SuperBlock>> {
-    SimpleFs::new_with_superblock_flags(file_system_type, 0x9fa0, superblock_flags, root::builder)
+    SimpleFs::new_with_superblock_flags(file_system_type, 0x9fa0, superblock_flags, move |fs| {
+        root::builder_for(observer_ns)(fs)
+    })
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/lib.rs");

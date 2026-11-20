@@ -3,11 +3,20 @@
 ## Purpose and background
 
 `kfd` maps process-local integer descriptors to `Arc<kvfs::VfsFile>` objects and
-converts kernel metadata to Linux `stat`/`statx`. `kresources` attaches the table
-to a process and orchestrates close outside locks. POSIX adapters validate ABI
-rules and authorization. File operations, offsets, private object state, and
+converts kernel metadata to Linux `stat`/`statx`, including user-namespace
+projection of `uid`/`gid`. `kresources` attaches the table to a process and
+orchestrates close outside locks. `kcred` supplies the `UserNamespace` used by
+`stat.rs::project_into_namespace`; `kfd` only reads IDs from a `Kstat` and never
+interprets credentials itself. POSIX adapters validate ABI rules and
+authorization. File operations, offsets, private object state, and
 I/O synchronization belong to `kvfs` and its `FileOperations` implementations.
 There is no local `FileLike` trait or file-like downcast layer.
+
+Interaction partners: `kresources` owns table attachment/lifetime, `kvfs`
+provides files and metadata, `kcred` provides the `UserNamespace` used for
+`uid`/`gid` projection in `stat`, and the POSIX adapters own ABI validation and
+authorization. Calls go from those owners into `kfd`; `kfd` does not call back
+into task, credential, or namespace state.
 
 ## Scope and architecture
 
@@ -16,7 +25,8 @@ There is no local `FileLike` trait or file-like downcast layer.
 - `src/fd_slots.rs`: `FileSlots`, the bitmap-backed slot storage and allocator.
 - `src/file_descriptor.rs`: `FileDescriptor` and `FdSnapshot` ownership.
 - `src/fd_table_owner.rs`: binding ownership and last-binding teardown.
-- `src/stat.rs`: `Kstat` and metadata/ABI conversions.
+- `src/stat.rs`: `Kstat`, metadata/ABI conversions, and `project_into_namespace`
+  for rendering `uid`/`gid` in the caller's user namespace.
 - `tests/fd-slots-host/`: standalone HOST/Miri fixture that compiles
   `src/fd_slots.rs` and pins the slot publish-order invariants.
 

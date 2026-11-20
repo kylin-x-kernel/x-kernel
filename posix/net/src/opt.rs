@@ -629,7 +629,7 @@ fn set_bind_to_ifindex(
     };
     let mut bound = 0i32;
     socket.get_option(GetSocketOption::BindToIfindex(&mut bound))?;
-    if bound != 0 && !kprocess::current_cred().has_cap(kcred::CAP_NET_RAW) {
+    if bound != 0 && !crate::net_capable(&kprocess::current_cred(), kcred::CAP_NET_RAW) {
         return Err(KError::OperationNotPermitted);
     }
     if ifindex < 0 {
@@ -682,7 +682,7 @@ fn set_group_membership(
 /// `ns_capable`'s failure is EPERM.
 fn check_group_membership_privilege(socket: &Arc<Socket>) -> KResult<()> {
     if !socket.allows_unprivileged_group_subscribe()
-        && !kprocess::current_cred().has_cap(kcred::CAP_NET_ADMIN)
+        && !crate::net_capable(&kprocess::current_cred(), kcred::CAP_NET_ADMIN)
     {
         return Err(KError::OperationNotPermitted);
     }
@@ -779,7 +779,7 @@ pub fn sys_setsockopt(
         // `sock_setsockopt` gates both force forms on `sockopt_capable(
         // CAP_NET_ADMIN)`: they bypass the `wmem_max`/`rmem_max` clamp, which is
         // exactly the privilege a non-root caller must not have.
-        if !kprocess::current_cred().has_cap(kcred::CAP_NET_ADMIN) {
+        if !crate::net_capable(&kprocess::current_cred(), kcred::CAP_NET_ADMIN) {
             // `sockopt_capable` returns `capable(cap)`, whose failure is EPERM.
             return Err(KError::OperationNotPermitted);
         }

@@ -254,14 +254,16 @@ fn push_socket_cmsg(
                     pid.number_in(&observer)
                 })
                 .unwrap_or(0);
-            push_credentials_cmsg(
-                builder,
-                &knet::options::UnixCredentials {
-                    pid,
-                    uid: credentials.uid,
-                    gid: credentials.gid,
-                },
-            )
+            // SenderCredentials stores initial-namespace ids; render them in
+            // the receiving task's user namespace (Linux from_kuid_munged).
+            let receiver_ns = kprocess::current_cred().user_ns_arc().clone();
+            let uid = receiver_ns
+                .map_uid_from_initial(credentials.uid)
+                .unwrap_or(65_534);
+            let gid = receiver_ns
+                .map_gid_from_initial(credentials.gid)
+                .unwrap_or(65_534);
+            push_credentials_cmsg(builder, &knet::options::UnixCredentials { pid, uid, gid })
         }
     }
 }

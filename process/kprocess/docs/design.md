@@ -161,10 +161,20 @@ retains init identity; orphan reparenting reserves an init relation slot.
   an exec leader takeover, or lost its tid to reuse therefore reports `-1`
   instead of a stale or recycled number. Process identities translate through
   their per-namespace projections (`0` when the observer has none). Thread
-  identities are allocated root-only, so the kernel names a thread by its root
-  tid (`gettid(2)`, the `clone3` return value); that number is reported to a
-  reader in the thread's namespace or an ancestor of it, while a reader below
-  or beside that branch gets `0`, matching `pid_nr_ns`.
+  identities are allocated in the process's active PID namespace, so they carry
+  the same namespace/ancestor projections as the leader; `gettid(2)` and the
+  `clone3` return value use the root number, while `/proc/<pid>/task/<tid>/stat`
+  renders the observer-namespace projection (or `0` when there is none),
+  matching `pid_nr_ns`.
+- `procfs` namespace view: `try_current_user_process` resolves the mounting user
+  process without panicking for kernel tasks; `visible_processes_in_namespace`
+  and `process_task_in_namespace` resolve `/proc` entries in an observer PID
+  namespace, and `Process::number_in_namespace`/`TaskStat::project_pid_namespace`
+  provide the per-namespace numbers for directory names and `status`/`stat`.
+  The provider is `kprocess`; consumers are the procfs mount/get_tree and
+  `/proc/<pid>` lookup paths. Namespaced PID lookup uses the publication table's
+  `(namespace id, local pid) -> root pid` index, falling back to a scan only on
+  an index miss.
 - `Process` runtime capabilities return filesystem/namespace/mm/resource/signal
   references and expose timer/exec/teardown operations. `LiveAddressSpace` owns
   an active mm-user handle; its mapping closure supplies both the locked space
@@ -576,6 +586,15 @@ owner slots once and drops objects outside their locks; repeated detach is safe
 while the runtime shell remains reachable. Zombies/pidfds retain stable identity
 without requiring attached files, filesystem paths or namespaces.
 
+The namespace owner (`nsproxy`) follows the opposite lifetime from files and
+MM: `release_zombie_namespaces` is called from `wait_reap` at the final reap
+points (`try_reap_zombie_process`, `scan_waitable_child`,
+`reap_exited_process`, `reap_detached_process_identity`), not from `do_exit`.
+An exited but unreaped process therefore keeps its `/proc/<pid>/ns/*` identity
+so container runtimes can pin the namespace through a bind mount; after reap the
+owner is released and further namespace lookups fail. Namespace teardown runs
+in sleepable reap context, outside IRQ/reclaim context.
+
 `ProcessRuntimeState` directly owns a `ProcessAddressSpace` under `SpinNoIrq`:
 active user, structural pin, MM identity, CPU residency, heap marker and existing
 AArch64 ASID context all belong to one binding. Private `ProcessAddressSpace::new`
@@ -706,7 +725,9 @@ not expose the retired leader.
 
 This retention scheme relies on the current runtime identity allocator, not on
 the probability of TID reuse. `Thread::prepare_thread_clone` calls
-`allocate_thread_task_number`, which delegates to `kidentity`'s root namespace.
+`allocate_thread_task_number(&process.active_pid_namespace())`, which delegates
+to `kidentity::PidHandle::allocate_in` for the active namespace and its
+ancestors.
 Its checked monotonic `fetch_update` returns `WouldBlock` at exhaustion; dropping
 a handle does not recycle a number and the counter never wraps. The fixed-number
 replacement fixture deliberately bypasses allocation to test stale Weak identity

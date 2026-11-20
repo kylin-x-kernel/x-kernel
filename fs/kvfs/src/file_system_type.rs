@@ -21,6 +21,9 @@ bitflags::bitflags! {
     pub struct FileSystemTypeFlags: u32 {
         /// Filesystem requires a backing block device.
         const REQUIRES_DEV = 1 << 0;
+        /// Filesystem may be mounted from a non-initial user namespace
+        /// (Linux `FS_USERNS_MOUNT`).
+        const USERNS_MOUNT = 1 << 3;
     }
 }
 
@@ -105,6 +108,16 @@ impl FileSystemType {
         }
     }
 
+    /// Describes a filesystem that may be mounted from a non-initial user
+    /// namespace (Linux `FS_USERNS_MOUNT`).
+    pub const fn nodev_userns(name: &'static str, init_fs_context: InitFsContextFn) -> Self {
+        Self {
+            name,
+            init_fs_context,
+            fs_flags: FileSystemTypeFlags::USERNS_MOUNT,
+        }
+    }
+
     /// Describes a filesystem that requires a backing device.
     pub const fn device_backed(name: &'static str, init_fs_context: InitFsContextFn) -> Self {
         Self {
@@ -122,6 +135,12 @@ impl FileSystemType {
     /// Returns whether this filesystem requires a backing device.
     pub const fn requires_device(&self) -> bool {
         self.fs_flags.contains(FileSystemTypeFlags::REQUIRES_DEV)
+    }
+
+    /// Returns whether a task in a non-initial user namespace may mount this
+    /// filesystem type.
+    pub const fn is_userns_mountable(&self) -> bool {
+        self.fs_flags.contains(FileSystemTypeFlags::USERNS_MOUNT)
     }
 
     pub(crate) fn init_context(&self, context: &mut FsContext<'_>) -> VfsResult<()> {

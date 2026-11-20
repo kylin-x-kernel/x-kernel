@@ -292,8 +292,8 @@ impl Process {
             }
         }
 
-        let new_session = Session::new(pid);
-        let new_group = ProcessGroup::new(pid, &new_session);
+        let new_session = Session::new(pid, self.leader_task_number.clone());
+        let new_group = ProcessGroup::new(pid, &new_session, self.leader_task_number.clone());
         if !process_publication().move_process_to_group(self, &new_group, true) {
             return None;
         }
@@ -321,7 +321,7 @@ impl Process {
             group.session.clone()
         };
 
-        let new_group = ProcessGroup::new(pid, &session);
+        let new_group = ProcessGroup::new(pid, &session, self.leader_task_number.clone());
         if !process_publication().move_process_to_group(self, &new_group, false) {
             return None;
         }

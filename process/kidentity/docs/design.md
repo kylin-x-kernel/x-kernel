@@ -4,7 +4,9 @@
 
 `kidentity` owns the process domain's PID/TID number-space model. `kns` re-exports
 its namespace type; task/process creation and cgroup membership consume stable
-`Arc<PidHandle>` identities. Lookup tables, process publication, scheduling,
+`Arc<PidHandle>` identities. PID namespaces also store a `kcred::UserNamespace`
+owner, so capability checks on PID-namespace resources can use the same
+namespace-scoped predicate as other namespace types. Lookup tables, process publication, scheduling,
 permissions, and complete PID-namespace syscall semantics belong to upper
 layers. Keeping number allocation separate lets those owners share identity
 without introducing a catch-all process crate dependency.
@@ -14,7 +16,8 @@ without introducing a catch-all process crate dependency.
 `src/lib.rs` contains all types and allocation functions; kernel unit tests live in `ut-tests/lib.rs` and are included via `unittest::path_mod_test!`.
 
 ```text
-PidNamespace { id: u64, parent: Option<Arc<_>>, level: u32, next_nr: AtomicU32 }
+PidNamespace { id: u64, parent: Option<Arc<_>>, level: u32,
+                next_nr: AtomicU32, owner: Arc<UserNamespace> }
        ^
        | Arc ownership
 PidHandle { numbers: Vec<Upid>, lifecycle: AtomicU8 }
@@ -23,6 +26,14 @@ PidHandle { numbers: Vec<Upid>, lifecycle: AtomicU8 }
 
 The namespace parent chain is immutable. Each root/child allocator starts at
 one. `root_pid_namespace` lazily publishes a shared root with `LazyInit`.
+`new_root()`/`new_root_in(owner)`, `new_child(parent)`, and
+`new_child_in(parent, owner)` are the construction entry points; the `*_in`
+forms take the owning user namespace from `kcred`, and `owner()` exposes the
+stored reference to consumers such as `kns` and capability checks. The
+`kns::NamespacePlan` builder is the main caller and passes the newly created
+`UserNamespace` (or the caller's existing one) when it constructs a PID
+namespace. `PidNamespace::owner()` is a read-only accessor; ownership is
+immutable for the namespace lifetime.
 `PidHandle` stores number projections from the active namespace to the root and
 a [`PidLifecycleState`] that gates observer visibility.
 
@@ -32,7 +43,10 @@ namespace's lifetime; procfs uses it as the `/proc/<pid>/ns/pid` inode so
 
 ## Execution context
 
-The crate has no current-task, scheduler, address-space, or CPU-local dependency.
+`kcred` is a direct dependency: `UserNamespace` is stored by `PidNamespace` and
+accepted by the `new_root_in`/`new_child_in` constructors. The crate does not
+depend on `kprocess` or `kns`; those layers consume its types. It has no
+current-task, scheduler, address-space, or CPU-local dependency.
 Allocation requires a working heap. It does not intentionally sleep, although
 lazy initialization may wait for another initializer and allocation follows the
 allocator's context contract. Pure accessors are usable wherever a valid handle
@@ -63,7 +77,10 @@ deepest common ancestor that holds a projection for the identity. An observer
 inside the identity's namespace hierarchy always sees a number (the root
 projection is the terminal fallback); an observer rooted in an unrelated
 namespace tree receives `None`. This mirrors Linux `struct pid`/`upid` lookup
-semantics without storing a raw PID integer in observers.
+semantics without storing a raw PID integer in observers. `projections()` is
+the bulk companion: it yields every `(namespace id, number)` pair so the
+process publication table can build its namespaced lookup index without
+walking the namespace chain per query.
 
 ## Lifecycle state machine
 

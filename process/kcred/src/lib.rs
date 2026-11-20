@@ -6,8 +6,9 @@
 //!
 //! Start with [`Cred`] to inspect user/group IDs or prepare a modified snapshot.
 //! [`initial_cred`] returns the shared root credential; it is not the current
-//! task's identity. [`NamespaceId`] and [`UserNamespace`] describe namespace
-//! identity separately: credentials currently contain no namespace membership.
+//! task's identity. A [`Cred`] records its [`UserNamespace`] membership and the
+//! five Linux capability sets; authorization goes through `has_cap_in` rather
+//! than numeric user IDs.
 //!
 //! The caller owns authorization of credential construction, supplementary-group
 //! replacement, and publication. `kprocess` supplies task lookup and commit;
@@ -57,7 +58,9 @@ mod namespace;
 /// used by their APIs.
 pub use credentials::*;
 /// Namespace identities, parentage, and access to the shared initial user namespace.
-pub use namespace::{NamespaceId, UserNamespace, initial_user_namespace};
+pub use namespace::{
+    ID_MAP_MAX_EXTENTS, IdMapExtent, NamespaceId, UserNamespace, initial_user_namespace,
+};
 
 static INITIAL_CRED: Once<Arc<Cred>> = Once::new();
 

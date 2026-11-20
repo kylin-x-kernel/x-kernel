@@ -18,7 +18,7 @@ fault isolation to `filemap`/`memspace`.
 | `sys_msgget` | User key and create/mode flags into manager | Queue limit → ENOSPC; missing key without create → ENOENT; create/exclusive collision → EEXIST (before permission); removed queue → EIDRM; existing-queue access → EACCES. |
 | `sys_msgsnd` | User type/payload into a queue | Fault-aware type-header copy precedes validation; size above `MSGMAX`, a negative queue ID or a nonpositive type → EINVAL before the payload copy; fault-aware payload copy precedes queue lookup; unknown ID → EINVAL; write permission failure → EACCES, then a removed queue → EIDRM; byte/message capacity → EAGAIN. |
 | `sys_msgrcv` | User selector/flags and output buffer | Invalid `MSG_COPY` combination/unknown ID → EINVAL; read permission failure → EACCES, then a removed queue → EIDRM; no match → ENOMSG; oversized message without truncation → E2BIG; copies propagate errors before removal. |
-| `sys_msgctl` | User command/metadata; metadata to user buffer | Unsupported command/index/ID → EINVAL; removed queue → EIDRM; failed read check → EACCES; copy failures propagate. `IPC_SET` copies the user `msqid_ds` immediately after command validation, before queue lookup or control checks, so a bad pointer yields EFAULT even for a missing, removed or foreign queue. `IPC_STAT` uses read permission. For an existing queue, `IPC_SET` first requires effective UID equal to the current owner or creator, or effective `CAP_SYS_ADMIN`, else EPERM; `CAP_IPC_OWNER` does not authorize control. It then requires `CAP_SYS_RESOURCE` when raising qbytes above `MSGMNB`, else EPERM, and finally rejects `INVALID_UID`/`INVALID_GID` in user-supplied permissions → EINVAL. All checks precede mutation. |
+| `sys_msgctl` | User command/metadata; metadata to user buffer | Unsupported command/index/ID → EINVAL; removed queue → EIDRM; failed read check → EACCES; copy failures propagate. `IPC_SET` copies the user `msqid_ds` immediately after command validation, before queue lookup or control checks, so a bad pointer yields EFAULT even for a missing, removed or foreign queue. `IPC_STAT` uses read permission. For an existing queue, `IPC_SET` first requires effective UID equal to the current owner or creator, or `CAP_SYS_ADMIN` in the queue's owning user namespace (or an ancestor), else EPERM; `CAP_IPC_OWNER` does not authorize control. It then requires `CAP_SYS_RESOURCE` when raising qbytes above `MSGMNB`, else EPERM, and finally rejects `INVALID_UID`/`INVALID_GID` in user-supplied permissions → EINVAL. All checks precede mutation. |
 | `sys_shmget` / `ShmInner::new` | Size/flags/key and explicit credential snapshot into file construction | Zero page count, missing keyed object or size/mode mismatch → InvalidInput; file create/unlink/open/truncate errors propagate. Size arithmetic is not comprehensively guarded here. |
 | `sys_shmat` | User ID/address/flags into MM | Unknown ID, unrounded unaligned address or SHM_REMAP with an address that is zero after rounding → InvalidInput; no free range → NoMemory; mapping errors propagate. Flags are truncated; segment lock is released before mapping. |
 | `sys_shmctl` | User command and `shmid_ds` buffer | Unknown ID/command → InvalidInput; fault-aware copies propagate. IPC_STAT with null buffer succeeds without copying. IPC_SET replaces the whole structure. |
@@ -29,11 +29,12 @@ owner UIDs select the owner class; both creator and current owner GIDs select th
 group class through `Cred::in_group`, which tests the filesystem GID and
 supplementary groups (not the effective GID). The requested bits are folded as
 `(flag >> 6) | (flag >> 3) | flag`, so a raw `msgget` mode such as `0666` requires
-both read and write. A denial is overridden only by effective `CAP_IPC_OWNER`;
-UID zero alone grants nothing.
+both read and write. A denial is overridden only by `CAP_IPC_OWNER` held in the
+queue's owning user namespace (or an ancestor); UID zero alone grants nothing.
 
 Queue control has a separate Linux check: effective UID must equal the current
-owner or creator, or the caller must hold effective `CAP_SYS_ADMIN`. In
+owner or creator, or the caller must hold `CAP_SYS_ADMIN` in the queue's owning
+user namespace (or an ancestor). In
 particular `CAP_IPC_OWNER` overrides read/write access but not `IPC_SET` or
 `IPC_RMID`. Linux's `ksys_msgctl()` copies an `IPC_SET` buffer before resolving
 the queue or running `ipcctl_obtain_check()`; this crate preserves that order, so

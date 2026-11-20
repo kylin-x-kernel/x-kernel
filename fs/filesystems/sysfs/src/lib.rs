@@ -515,7 +515,8 @@ fn init_fs_context(context: &mut FsContext<'_>) -> VfsResult<()> {
 }
 
 /// Registered sysfs filesystem type.
-pub static FILE_SYSTEM_TYPE: FileSystemType = FileSystemType::nodev("sysfs", init_fs_context);
+pub static FILE_SYSTEM_TYPE: FileSystemType =
+    FileSystemType::nodev_userns("sysfs", init_fs_context);
 
 #[macros::register_init]
 fn init_sysfs() {

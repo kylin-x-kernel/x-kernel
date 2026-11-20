@@ -194,8 +194,10 @@ pub fn sys_fsopen(fs_type: UserConstPtr<c_char>, flags: u32) -> KResult<isize> {
     }
     // Creating a filesystem context can lead to a new superblock and mount;
     // Linux gates fsopen(2) on CAP_SYS_ADMIN like mount(2).
-    require_mount_privilege(&kprocess::current_cred())?;
-    kvfs::get_filesystem_type(&fs_type).ok_or(KError::NoSuchDevice)?;
+    let cred = kprocess::current_cred();
+    require_mount_privilege(&cred)?;
+    let file_system_type = kvfs::get_filesystem_type(&fs_type).ok_or(KError::NoSuchDevice)?;
+    crate::mount::require_userns_mountable(&cred, file_system_type)?;
     let state = FsContextState {
         fs_type,
         source: None,
@@ -268,8 +270,9 @@ pub fn sys_fsconfig(
             }
             let data = state.options.join(",");
             let fs_type = kvfs::get_filesystem_type(&state.fs_type).ok_or(KError::NoSuchDevice)?;
-            let process = kprocess::current_user_process();
             let cred = kprocess::current_cred();
+            crate::mount::require_userns_mountable(&cred, fs_type)?;
+            let process = kprocess::current_user_process();
             let (root, pwd) = process.fs_context()?.lock().root_and_pwd();
             let mut context = FsContext::new(
                 fs_type,
@@ -278,7 +281,15 @@ pub fn sys_fsconfig(
                 state.sb_flags,
                 &cred,
             )?;
-            state.super_block = Some(context.get_tree(&root, &pwd)?);
+            let super_block = context.get_tree(&root, &pwd)?;
+            // Install `s_user_ns` only for a newly created superblock. A
+            // pre-existing singleton (sysfs/cgroup2) must keep the owner from
+            // its first mounter; otherwise an unprivileged child namespace
+            // could take over the host-shared superblock.
+            if !super_block.has_active_mounts() {
+                super_block.init_user_ns(cred.user_ns_arc().clone());
+            }
+            state.super_block = Some(super_block);
         }
         FSCONFIG_CMD_RECONFIGURE => {
             let super_block = state.super_block.as_ref().ok_or(KError::InvalidInput)?;

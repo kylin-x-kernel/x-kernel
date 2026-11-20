@@ -1379,27 +1379,27 @@ fn test_chown_setid_cleanup_matches_linux() {
 
     // chown_common() excludes directories from set-ID cleanup entirely.
     assert_eq!(
-        Path::chown_mode(directory(0o6666), 100, None, &owner).bits(),
+        Path::chown_mode(directory(0o6666), 1000, 100, None, &owner, owner.user_ns_arc()).bits(),
         0o6666
     );
 
     // Set-UID is always cleared for non-directories. Without a GID argument,
     // set-GID depends only on the old GID, group-execute, and CAP_FSETID.
     assert_eq!(
-        Path::chown_mode(regular(0o6666), 100, None, &owner).bits(),
+        Path::chown_mode(regular(0o6666), 1000, 100, None, &owner, owner.user_ns_arc()).bits(),
         0o2666
     );
     assert_eq!(
-        Path::chown_mode(regular(0o2666), 100, None, &owner).bits(),
+        Path::chown_mode(regular(0o2666), 1000, 100, None, &owner, owner.user_ns_arc()).bits(),
         0o2666
     );
     // A pre-chown non-member group or group-execute clears set-GID.
     assert_eq!(
-        Path::chown_mode(regular(0o2666), 200, None, &owner).bits(),
+        Path::chown_mode(regular(0o2666), 1000, 200, None, &owner, owner.user_ns_arc()).bits(),
         0o666
     );
     assert_eq!(
-        Path::chown_mode(regular(0o2670), 100, None, &owner).bits(),
+        Path::chown_mode(regular(0o2670), 1000, 100, None, &owner, owner.user_ns_arc()).bits(),
         0o670
     );
 
@@ -1411,7 +1411,7 @@ fn test_chown_setid_cleanup_matches_linux() {
         .set_capabilities(kcred::CapSets::new(set, set, kcred::CapSet::EMPTY))
         .unwrap();
     assert_eq!(
-        Path::chown_mode(regular(0o6666), 100, None, &fsetid).bits(),
+        Path::chown_mode(regular(0o6666), 1000, 100, None, &fsetid, fsetid.user_ns_arc()).bits(),
         0o2666
     );
 }
@@ -2026,5 +2026,38 @@ fn set_gid_without_group_execute_still_drops_for_a_writer_outside_the_group() {
             .mode
             .permission()
             .contains(NodePermission::SET_GID)
+    );
+}
+
+#[def_test]
+fn chown_validates_unmapped_ids_before_the_immutable_check() {
+    let init = crate::VfsInodeInit::new(
+        1,
+        0,
+        crate::Umode::new(
+            NodeType::RegularFile,
+            NodePermission::from_bits_truncate(0o755),
+        ),
+    )
+    .with_owner_links_and_rdev(0, 0, 1, Default::default());
+    let inode = VfsInode::new_file_with_flags(
+        Arc::new(MockDirOps::new(StatFsFlags::empty(), 1)),
+        crate::NodeFlags::IMMUTABLE,
+        init,
+    );
+    let root = Dentry::new_file_from_inode(inode, None, String::new());
+    let path = Mount::new_root(&mock_superblock(root, StatFsFlags::empty())).root_path();
+
+    let child = kcred::UserNamespace::new_child(
+        &kcred::initial_user_namespace(),
+        1000,
+        1000,
+        false,
+    )
+    .unwrap();
+    let cred = kcred::Cred::new(0, 0).with_user_namespace(child);
+    assert_eq!(
+        path.chown(Some(0), None, &cred),
+        Err(VfsError::from(kerrno::LinuxError::EINVAL))
     );
 }

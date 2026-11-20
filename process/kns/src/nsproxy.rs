@@ -7,14 +7,15 @@
 use alloc::sync::Arc;
 
 use fs_context::FsStruct;
-use kcgroup::CgroupNamespace;
+use kcgroup::{Cgroup, CgroupNamespace};
+use kcred::{Cred, UserNamespace};
 use kidentity::root_pid_namespace;
 use klazy::Once;
 use kvfs::MntNamespace;
 
 use crate::{
     error::CloneNsError, ipc::IpcNamespace, net::NetNamespace, nsfd::NsFd, pid::PidNamespace,
-    time::TimeNamespace, types::NamespaceFlags, uts::UtsNamespace,
+    plan::NamespacePlan, time::TimeNamespace, types::NamespaceFlags, uts::UtsNamespace,
 };
 
 static INIT_NSPROXY: Once<Arc<NsProxy>> = Once::new();
@@ -49,18 +50,27 @@ pub struct NsProxy {
 /// Errors reported by [`NsProxy::prepare_unshare`] and [`NsProxy::with_namespace`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnshareError {
-    /// A namespace creation flag was requested without the required
-    /// capability (`CAP_SYS_ADMIN` in the absence of user namespaces).
+    /// The caller lacks the capability required to create or enter the
+    /// requested namespace.
     NotPermitted,
     /// A Linux unshare rule rejected the flag combination (e.g. `NEWNS` while
     /// the `fs_struct` is shared with another task and `CLONE_FS` was not
     /// given) or the flag set is otherwise invalid.
     InvalidArgument,
-    /// The requested namespace kind is not implemented yet and must not fall
-    /// back to pseudo-isolation (`NEWNET`, `NEWUSER`, `NEWCGROUP`, `NEWTIME`).
-    Unsupported,
     /// Mount-namespace copy or filesystem-context retargeting failed.
     Mount(kvfs::VfsError),
+    /// A resource cap was reached (user-namespace nesting depth, ENOSPC).
+    NoSpace,
+}
+
+/// Translates the shared construction error into the clone-specific domain.
+fn map_clone_error(error: UnshareError) -> CloneNsError {
+    match error {
+        UnshareError::NotPermitted => CloneNsError::NotPermitted,
+        UnshareError::InvalidArgument => CloneNsError::InvalidFlagCombination,
+        UnshareError::Mount(error) => CloneNsError::Mount(error),
+        UnshareError::NoSpace => CloneNsError::NoSpace,
+    }
 }
 
 /// Permission and sharing facts the process layer supplies to [`unshare`].
@@ -70,10 +80,11 @@ pub enum UnshareError {
 /// [`NsProxy::prepare_unshare`].
 ///
 /// [`unshare`]: NsProxy::prepare_unshare
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct UnshareContext {
-    /// Whether the caller holds `CAP_SYS_ADMIN`.
-    pub privileged: bool,
+    /// Caller credential: authorization source and parent of a new user
+    /// namespace.
+    pub cred: Arc<Cred>,
     /// Whether the current `fs_struct` is shared with another task (a thread of
     /// the same process or another process forked with `CLONE_FS`).
     pub fs_shared_with_others: bool,
@@ -81,6 +92,9 @@ pub struct UnshareContext {
     pub unshare_fs: bool,
     /// Whether the caller also requested `CLONE_FILES`.
     pub unshare_files: bool,
+    /// Caller's current cgroup membership, resolved by the process layer for
+    /// `CLONE_NEWCGROUP`.
+    pub current_cgroup: Option<Arc<Cgroup>>,
 }
 
 /// Validated, ready-to-commit unshare result produced by
@@ -98,6 +112,8 @@ pub struct PreparedUnshare {
     pub(crate) new_fs: Option<FsStruct>,
     /// Whether the file-descriptor table must be unshared on commit.
     pub(crate) unshare_files: bool,
+    /// User namespace to install as the caller's credential namespace.
+    pub(crate) user_ns: Option<Arc<UserNamespace>>,
 }
 
 impl PreparedUnshare {
@@ -109,6 +125,11 @@ impl PreparedUnshare {
     /// Returns the private filesystem context to install, if one was prepared.
     pub fn new_fs(&self) -> Option<&FsStruct> {
         self.new_fs.as_ref()
+    }
+
+    /// Returns the user namespace to install in the caller's credential.
+    pub fn user_ns(&self) -> Option<&alloc::sync::Arc<UserNamespace>> {
+        self.user_ns.as_ref()
     }
 
     /// Returns whether the commit must also unshare the file-descriptor table.
@@ -192,7 +213,7 @@ impl NsProxy {
     /// Creates an initial `NsProxy` with an explicit mount namespace.
     pub fn new_initial_with_mnt_ns(mnt_ns: Arc<MntNamespace>) -> Arc<Self> {
         let root_pid_ns = root_pid_namespace().clone();
-        let time_ns = Arc::new(TimeNamespace::new());
+        let time_ns = Arc::new(TimeNamespace::initial());
         Arc::new(Self {
             mnt_ns,
             uts_ns: Arc::new(UtsNamespace::new()),
@@ -205,112 +226,48 @@ impl NsProxy {
         })
     }
 
-    /// Creates a child `NsProxy` based on clone flags.
+    /// Materializes the namespaces selected by `flags` for a child process.
     ///
-    /// - Without any `CLONE_NEW*` flags, namespace references are shared.
-    /// - With `CLONE_NEWNS`, a new mount namespace is cloned from the parent.
-    /// - With `CLONE_NEWUTS`, a new `UtsNamespace` is cloned from the parent.
-    /// - With `CLONE_NEWIPC`, a new empty `IpcNamespace` is created.
-    /// - With `CLONE_NEWPID`, a child PID namespace is created below the parent
-    ///   and installed as `pid_ns_for_children`; the child task identity is
-    ///   allocated in it by the process layer.
-    /// - Unimplemented flags (`CLONE_NEWCGROUP`, `CLONE_NEWNET`, etc.) return an
-    ///   error so the caller can translate it to the appropriate errno.
+    /// The child receives the same references as its parent unless the matching
+    /// `CLONE_NEW*` flag asks for a fresh object. User namespaces live in
+    /// credentials rather than [`NsProxy`], so `CLONE_NEWUSER` is reported to
+    /// the caller through [`NamespacePlan::user_ns`] and committed with the
+    /// child credential by the process layer.
+    ///
+    /// The `cred` argument authorizes namespace creation and becomes the
+    /// parent of a new user namespace. `CLONE_NEWUSER` alone needs no
+    /// capability; every other `CLONE_NEW*` flag requires `CAP_SYS_ADMIN` in
+    /// `cred`'s user namespace.
     ///
     /// # Errors
     ///
-    /// Returns `CloneNsError::Unimplemented` for NEWNET, NEWUSER, NEWCGROUP,
-    /// or NEWTIME — their backing tables are not isolated, so cloning the
-    /// reference would create pseudo-isolation. Returns
-    /// `CloneNsError::InvalidFlagCombination` for NEWNS with a shared
-    /// filesystem context. Mount cloning or root/pwd retarget errors are
-    /// wrapped in `CloneNsError::Mount`.
-    ///
-    /// # Panics
-    ///
-    /// With NEWNS, panics if the private context has no initialized root or pwd.
-    /// The caller must prepare a mounted private context before cloning.
-    ///
-    /// # Example
-    ///
-    /// After VFS boot initialization, clone the mount namespace using a private,
-    /// already-mounted filesystem context:
-    ///
-    /// ```no_run
-    /// extern crate alloc;
-    /// use fs_context::FsStruct;
-    /// use kns::{NamespaceFlags, NamespaceFsContext, NsProxy};
-    /// let parent = NsProxy::new_initial();
-    /// let mut fs = FsStruct::new(parent.mnt_ns().visible_root_path());
-    /// let child = parent
-    ///     .clone_for_child(NamespaceFlags::NEWNS, NamespaceFsContext::Private(&mut fs))
-    ///     .unwrap();
-    /// assert!(!alloc::sync::Arc::ptr_eq(parent.mnt_ns(), child.mnt_ns()));
-    /// ```
+    /// [`CloneNsError::NotPermitted`] when authorization fails,
+    /// [`CloneNsError::InvalidFlagCombination`] for `CLONE_NEWNS` with a
+    /// shared filesystem context, and [`CloneNsError::Mount`] when the mount
+    /// tree copy or retargeting fails.
     pub fn clone_for_child(
         &self,
         flags: NamespaceFlags,
-        fs_context: NamespaceFsContext<'_>,
-    ) -> Result<Arc<Self>, CloneNsError> {
-        // Reject unimplemented namespace flags. Their backing tables are not
-        // isolated, so cloning the reference would create pseudo-isolation.
-        // `NEWNET` is implemented: the child receives a fresh namespace
-        // identity whose stack is materialized on the clone path.
-        let unimplemented =
-            NamespaceFlags::NEWUSER | NamespaceFlags::NEWCGROUP | NamespaceFlags::NEWTIME;
-        if flags.intersects(unimplemented) {
-            return Err(CloneNsError::Unimplemented);
+        mut fs_context: NamespaceFsContext<'_>,
+        cred: &Arc<Cred>,
+        current_cgroup: Option<&Arc<Cgroup>>,
+    ) -> Result<(Arc<Self>, Option<Arc<UserNamespace>>), CloneNsError> {
+        let current_fs = match &fs_context {
+            NamespaceFsContext::Shared => None,
+            NamespaceFsContext::Private(fs) => Some(&**fs),
+        };
+        let plan = NamespacePlan::build(flags, self, cred, current_fs, current_cgroup)
+            .map_err(map_clone_error)?;
+
+        if let (NamespaceFsContext::Private(fs), Some(planned_fs)) =
+            (&mut fs_context, plan.new_fs.as_ref())
+        {
+            let (root, pwd) = planned_fs.root_and_pwd();
+            fs.replace_root_and_pwd(root, pwd)
+                .map_err(CloneNsError::Mount)?;
         }
 
-        let mnt_ns = match (flags.contains(NamespaceFlags::NEWNS), fs_context) {
-            (false, _) => self.mnt_ns.clone(),
-            (true, NamespaceFsContext::Shared) => {
-                return Err(CloneNsError::InvalidFlagCombination);
-            }
-            (true, NamespaceFsContext::Private(fs)) => {
-                let (root, pwd) = fs.root_and_pwd();
-                let cloned = self
-                    .mnt_ns
-                    .clone_with_root_and_pwd(&root, &pwd)
-                    .map_err(CloneNsError::Mount)?;
-                fs.replace_root_and_pwd(cloned.root, cloned.pwd)
-                    .map_err(CloneNsError::Mount)?;
-                cloned.namespace
-            }
-        };
-
-        let uts_ns = if flags.contains(NamespaceFlags::NEWUTS) {
-            Arc::new(UtsNamespace::clone_from(&self.uts_ns))
-        } else {
-            self.uts_ns.clone()
-        };
-
-        let ipc_ns = if flags.contains(NamespaceFlags::NEWIPC) {
-            Arc::new(IpcNamespace::new())
-        } else {
-            self.ipc_ns.clone()
-        };
-
-        let pid_ns_for_children = if flags.contains(NamespaceFlags::NEWPID) {
-            PidNamespace::new_child(&self.pid_ns_for_children)
-        } else {
-            self.pid_ns_for_children.clone()
-        };
-
-        Ok(Arc::new(Self {
-            mnt_ns,
-            uts_ns,
-            ipc_ns,
-            pid_ns_for_children,
-            net_ns: if flags.contains(NamespaceFlags::NEWNET) {
-                Arc::new(NetNamespace::new())
-            } else {
-                self.net_ns.clone()
-            },
-            cgroup_ns: self.cgroup_ns.clone(),
-            time_ns: self.time_ns.clone(),
-            time_ns_for_children: self.time_ns_for_children.clone(),
-        }))
+        Ok((self.instantiate(&plan, true), plan.user_ns))
     }
 
     /// Two-phase `unshare(2)` preparation: validates and builds the replacement
@@ -319,19 +276,16 @@ impl NsProxy {
     /// Every Linux rule that can fail is checked here so the commit phase only
     /// installs precomputed state:
     ///
-    /// - `NEWNET`, `NEWUSER`, `NEWCGROUP`, and `NEWTIME` are rejected with
-    ///   [`UnshareError::Unsupported`]: creating namespace objects that only
-    ///   change an ID without isolating the underlying tables would be
-    ///   pseudo-isolation. `knet` still resolves sockets through its global
-    ///   protocol stack, so a network namespace without a per-namespace data
-    ///   plane stays unsupported.
-    /// - Any `NEW*` flag requires [`UnshareContext::privileged`]
-    ///   (`CAP_SYS_ADMIN` in the absence of user namespaces).
+    /// - `NEWUSER` alone needs no capability; every other `NEW*` flag requires
+    ///   `CAP_SYS_ADMIN` in [`UnshareContext::cred`]'s user namespace.
     /// - `NEWNS` while the `fs_struct` is shared with another task and
     ///   `CLONE_FS` was not also requested is `EINVAL`, matching Linux
     ///   `check_fs_flag()`.
     /// - `NEWNS` clones the mount tree at the current root/pwd and builds a
     ///   private `FsStruct` retargeted into the clone.
+    /// - `NEWTIME` creates a zero-offset namespace that becomes
+    ///   `time_ns_for_children`; the caller keeps its active time namespace
+    ///   until it forks, matching Linux `unshare(CLONE_NEWTIME)`.
     ///
     /// `CLONE_FS` without `NEWNS` still detaches a private `FsStruct` copy;
     /// `CLONE_FILES` is recorded in [`PreparedUnshare::unshare_files`] and
@@ -339,10 +293,8 @@ impl NsProxy {
     ///
     /// # Errors
     ///
-    /// - [`UnshareError::Unsupported`] — any of `NEWNET`, `NEWUSER`,
-    ///   `NEWCGROUP`, or `NEWTIME` was requested.
-    /// - [`UnshareError::NotPermitted`] — a `NEW*` flag was requested while
-    ///   [`UnshareContext::privileged`] is false.
+    /// - [`UnshareError::NotPermitted`] — a namespace other than `NEWUSER` was
+    ///   requested without `CAP_SYS_ADMIN` in the caller's user namespace.
     /// - [`UnshareError::InvalidArgument`] — `NEWNS` was requested while
     ///   [`UnshareContext::fs_shared_with_others`] holds and `CLONE_FS`
     ///   (`unshare_fs`) was not also requested.
@@ -358,15 +310,17 @@ impl NsProxy {
     ///
     /// ```no_run
     /// use fs_context::FsStruct;
+    /// use kcred::Cred;
     /// use kns::{NamespaceFlags, NsProxy, UnshareContext};
     ///
     /// let proxy = NsProxy::new_initial();
     /// let fs = FsStruct::new(proxy.mnt_ns().visible_root_path());
     /// let context = UnshareContext {
-    ///     privileged: true,
+    ///     cred: alloc::sync::Arc::new(Cred::root()),
     ///     fs_shared_with_others: false,
     ///     unshare_fs: false,
     ///     unshare_files: true,
+    ///     current_cgroup: None,
     /// };
     /// let _prepared = proxy
     ///     .prepare_unshare(NamespaceFlags::NEWUTS, context, &fs)
@@ -378,16 +332,6 @@ impl NsProxy {
         context: UnshareContext,
         fs_context: &FsStruct,
     ) -> Result<PreparedUnshare, UnshareError> {
-        let unsupported =
-            NamespaceFlags::NEWUSER | NamespaceFlags::NEWCGROUP | NamespaceFlags::NEWTIME;
-        if flags.intersects(unsupported) {
-            return Err(UnshareError::Unsupported);
-        }
-
-        if !flags.is_empty() && !context.privileged {
-            return Err(UnshareError::NotPermitted);
-        }
-
         if flags.contains(NamespaceFlags::NEWNS)
             && context.fs_shared_with_others
             && !context.unshare_fs
@@ -395,66 +339,59 @@ impl NsProxy {
             return Err(UnshareError::InvalidArgument);
         }
 
-        let (mnt_ns, new_fs) = if flags.contains(NamespaceFlags::NEWNS) {
-            let (root, pwd) = fs_context.root_and_pwd();
-            let cloned = self
-                .mnt_ns
-                .clone_with_root_and_pwd(&root, &pwd)
-                .map_err(UnshareError::Mount)?;
-            let mut fs = fs_context.clone_for_process();
-            fs.replace_root_and_pwd(cloned.root, cloned.pwd)
-                .map_err(UnshareError::Mount)?;
-            (cloned.namespace, Some(fs))
-        } else {
-            (self.mnt_ns.clone(), None)
-        };
-
-        let uts_ns = if flags.contains(NamespaceFlags::NEWUTS) {
-            Arc::new(UtsNamespace::clone_from(&self.uts_ns))
-        } else {
-            self.uts_ns.clone()
-        };
-
-        let ipc_ns = if flags.contains(NamespaceFlags::NEWIPC) {
-            Arc::new(IpcNamespace::new())
-        } else {
-            self.ipc_ns.clone()
-        };
-
-        let pid_ns_for_children = if flags.contains(NamespaceFlags::NEWPID) {
-            PidNamespace::new_child(&self.pid_ns_for_children)
-        } else {
-            self.pid_ns_for_children.clone()
-        };
-
-        // `unshare(CLONE_NEWNET)` creates a fresh namespace identity; the
-        // protocol-stack instance backing it is materialized by
-        // `knet::netns::ensure_stack` on the syscall path. The new stack
-        // contains only a loopback device with 127.0.0.1/8, matching the
-        // Linux initial namespace state.
-        let net_ns = if flags.contains(NamespaceFlags::NEWNET) {
-            Arc::new(NetNamespace::new())
-        } else {
-            self.net_ns.clone()
-        };
-
-        let nsproxy = Arc::new(Self {
-            mnt_ns,
-            uts_ns,
-            ipc_ns,
-            pid_ns_for_children,
-            net_ns,
-            cgroup_ns: self.cgroup_ns.clone(),
-            time_ns: self.time_ns.clone(),
-            time_ns_for_children: self.time_ns_for_children.clone(),
-        });
-
-        let new_fs = new_fs.or_else(|| context.unshare_fs.then(|| fs_context.clone_for_process()));
+        let plan = NamespacePlan::build(
+            flags,
+            self,
+            &context.cred,
+            Some(fs_context),
+            context.current_cgroup.as_ref(),
+        )?;
+        let nsproxy = self.instantiate(&plan, false);
+        let new_fs = plan
+            .new_fs
+            .or_else(|| context.unshare_fs.then(|| fs_context.clone_for_process()));
 
         Ok(PreparedUnshare {
             nsproxy,
             new_fs,
             unshare_files: context.unshare_files,
+            user_ns: plan.user_ns,
+        })
+    }
+
+    /// Builds a proxy with `plan`'s new references swapped into their slots.
+    ///
+    /// `replace_active_time` distinguishes the two callers: a cloned child
+    /// enters the new time namespace immediately, while `unshare(CLONE_NEWTIME)`
+    /// only changes `time_ns_for_children` and leaves the caller's active time
+    /// namespace in place until it forks.
+    fn instantiate(&self, plan: &NamespacePlan, replace_active_time: bool) -> Arc<Self> {
+        let child_time_ns = plan.time_ns.clone();
+        Arc::new(Self {
+            mnt_ns: plan.mnt_ns.clone().unwrap_or_else(|| self.mnt_ns.clone()),
+            uts_ns: plan.uts_ns.clone().unwrap_or_else(|| self.uts_ns.clone()),
+            ipc_ns: plan.ipc_ns.clone().unwrap_or_else(|| self.ipc_ns.clone()),
+            pid_ns_for_children: plan
+                .pid_ns_for_children
+                .clone()
+                .unwrap_or_else(|| self.pid_ns_for_children.clone()),
+            net_ns: plan.net_ns.clone().unwrap_or_else(|| self.net_ns.clone()),
+            cgroup_ns: plan
+                .cgroup_ns
+                .clone()
+                .unwrap_or_else(|| self.cgroup_ns.clone()),
+            time_ns: if replace_active_time {
+                // A new child enters the time namespace selected for children,
+                // which differs from the caller's active namespace after
+                // unshare(CLONE_NEWTIME).
+                child_time_ns
+                    .clone()
+                    .unwrap_or_else(|| self.time_ns_for_children.clone())
+            } else {
+                self.time_ns.clone()
+            },
+            time_ns_for_children: child_time_ns
+                .unwrap_or_else(|| self.time_ns_for_children.clone()),
         })
     }
 
@@ -464,18 +401,16 @@ impl NsProxy {
     /// Only the namespace field whose type matches [`NsFd::ns_type`] is
     /// replaced; every other reference is shared with the current proxy.
     ///
-    /// # Errors
+    /// `Time` replaces both [`NsProxy::time_ns`] and
+    /// [`NsProxy::time_ns_for_children`], matching Linux `timens_install()`.
+    /// Unlike `unshare(CLONE_NEWTIME)`, `setns(CLONE_NEWTIME)` moves the caller
+    /// into the target namespace as well as selecting it for future children.
     ///
-    /// Returns [`UnshareError::Unsupported`] for `User` and `Cgroup`
-    /// namespaces, whose underlying tables are not isolated yet; switching
-    /// only the namespace reference would create pseudo-isolation. A `Net`
-    /// slot swaps in the target `NetNamespace`; the syscall path materializes
-    /// its protocol stack via `knet::netns::ensure_stack`.
+    /// The user namespace is owned by credentials rather than by this bundle,
+    /// so this method leaves every field here unchanged for it; the syscall
+    /// layer installs the matching credential transition together with this
+    /// proxy.
     pub fn with_namespace(&self, replacement: &NsFd) -> Result<Arc<Self>, UnshareError> {
-        if matches!(replacement, NsFd::User(_) | NsFd::Cgroup(_)) {
-            return Err(UnshareError::Unsupported);
-        }
-
         let mnt_ns = match replacement {
             NsFd::Mnt(ns) => ns.clone(),
             _ => self.mnt_ns.clone(),
@@ -496,6 +431,14 @@ impl NsProxy {
             NsFd::Net(ns) => ns.clone(),
             _ => self.net_ns.clone(),
         };
+        let cgroup_ns = match replacement {
+            NsFd::Cgroup(ns) => ns.clone(),
+            _ => self.cgroup_ns.clone(),
+        };
+        let (time_ns, time_ns_for_children) = match replacement {
+            NsFd::Time(ns) => (ns.clone(), ns.clone()),
+            _ => (self.time_ns.clone(), self.time_ns_for_children.clone()),
+        };
 
         Ok(Arc::new(Self {
             mnt_ns,
@@ -503,9 +446,9 @@ impl NsProxy {
             ipc_ns,
             pid_ns_for_children,
             net_ns,
-            cgroup_ns: self.cgroup_ns.clone(),
-            time_ns: self.time_ns.clone(),
-            time_ns_for_children: self.time_ns_for_children.clone(),
+            cgroup_ns,
+            time_ns,
+            time_ns_for_children,
         }))
     }
 }

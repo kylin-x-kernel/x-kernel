@@ -27,7 +27,7 @@ fn ip_forward_checks_current_capability_and_namespace_isolation() {
         .unwrap()
         .with_namespace(&kns::NsFd::Net(namespace.clone()))
         .unwrap();
-    process.apply_setns(proxy, None).unwrap();
+    process.apply_setns(proxy, None, None).unwrap();
     assert_eq!(knet::netns::ipv4_forwarding(&namespace).unwrap(), 0);
     let super_block = SimpleFs::new_with(&TEST_FILE_SYSTEM_TYPE, 0, |fs| {
         let mut root = DirMapping::new();
@@ -64,7 +64,7 @@ fn ip_forward_checks_current_capability_and_namespace_isolation() {
         .unwrap()
         .with_namespace(&kns::NsFd::Net(next_namespace.clone()))
         .unwrap();
-    process.apply_setns(proxy, None).unwrap();
+    process.apply_setns(proxy, None, None).unwrap();
     let next_file = open();
     assert_eq!(next_file.write_from(b"2\n", &mut 0), Ok(2));
     assert_eq!(file.read_from(&mut buf, &mut 0), Ok(2));

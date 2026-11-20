@@ -2,12 +2,12 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use alloc::{fmt, string::String};
+use alloc::{fmt, string::String, sync::Arc};
 
 use ksignal::api::SignalMasks;
 use ktask::{TaskInner, TaskState};
 
-use crate::AsThread;
+use crate::{AsThread, PidNamespace, Process};
 
 /// Number of nanoseconds in one second.
 const NSEC_PER_SEC: u64 = 1_000_000_000;
@@ -157,6 +157,36 @@ impl TaskStat {
     /// Panics when the task has no Thread runtime.
     pub fn from_thread(task: &TaskInner) -> Self {
         Self::sample_thread(task).0
+    }
+
+    /// Projects the process-wide PID fields into `observer_ns`.
+    ///
+    /// Linux renders `/proc/<pid>/stat` fields 1, 4, 5 and 6 with
+    /// `pid_nr_ns`/`task_ppid_nr_ns`/`task_pgrp_nr_ns`/`task_session_nr_ns`.
+    /// A PID without a projection is reported as zero, matching
+    /// `pid_nr_ns`; the thread-ID field is projected only for the group leader
+    /// because `self.pid` otherwise names a non-leader TID.
+    ///
+    /// The caller must pass the process that owns `self` and the observer
+    /// namespace captured by the procfs mount.
+    pub fn project_pid_namespace(
+        &mut self,
+        process: &Arc<Process>,
+        observer_ns: &Arc<PidNamespace>,
+    ) {
+        if self.pid == process.pid() {
+            self.pid = process.number_in_namespace(observer_ns).unwrap_or(0);
+        }
+        self.ppid = process
+            .parent()
+            .and_then(|parent| parent.number_in_namespace(observer_ns))
+            .unwrap_or(0);
+        let group = process.group();
+        self.pgrp = group.number_in_namespace(observer_ns).unwrap_or(0);
+        self.session = group
+            .session()
+            .number_in_namespace(observer_ns)
+            .unwrap_or(0);
     }
 
     /// Samples the stat view and the signal masks used to fill it.

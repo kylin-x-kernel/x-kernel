@@ -10,8 +10,9 @@ use unittest::def_test;
 use crate::{
     CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_KILL, CAP_LAST_CAP, CAP_NET_RAW, CAP_SETPCAP, CAP_SETUID,
     CAP_SYS_ADMIN, CAP_SYS_NICE, CAP_SYS_PTRACE, CapSet, CapSets, Cred, ExecIds, ExecSecurity,
-    FileCapabilities, INVALID_GID, INVALID_UID, PtraceAccessMode, VFS_CAP_REVISION_1,
-    VFS_CAP_REVISION_2, VFS_CAP_REVISION_3, initial_cred,
+    FileCapabilities, INVALID_GID, INVALID_UID, IdMapExtent, PtraceAccessMode, UserNamespace,
+    VFS_CAP_REVISION_1, VFS_CAP_REVISION_2, VFS_CAP_REVISION_3, initial_cred,
+    initial_user_namespace,
 };
 
 fn cap(capability: u32) -> CapSet {
@@ -91,6 +92,41 @@ fn root_euid_predicate_ignores_the_filesystem_uid() {
     credentials.set_fsuid(0);
     assert_eq!(credentials.fsuid(), 0);
     assert!(!credentials.has_root_euid());
+}
+
+#[def_test]
+fn root_euid_is_global_root_not_namespace_root() {
+    let parent = initial_user_namespace();
+    let child = UserNamespace::new_child(&parent, 1000, 1000, false).unwrap();
+    let writer = Cred::root();
+    child
+        .write_uid_map(
+            &writer,
+            &writer,
+            alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()],
+        )
+        .unwrap();
+    child
+        .write_gid_map(
+            &writer,
+            &writer,
+            alloc::vec![IdMapExtent::new(0, 1000, 1).unwrap()],
+        )
+        .unwrap();
+
+    // Linux `test_perm()` compares `GLOBAL_ROOT_UID`: a task that entered a
+    // child namespace keeps global euid 0 and still satisfies it.
+    assert!(
+        Cred::new(0, 0)
+            .with_user_namespace(child.clone())
+            .has_root_euid()
+    );
+    // The child's own root maps to global 1000 and is not global root.
+    assert!(
+        !Cred::new(1000, 1000)
+            .with_user_namespace(child)
+            .has_root_euid()
+    );
 }
 
 #[def_test]
@@ -1868,4 +1904,16 @@ fn shared_setuid_exec_resets_ids_without_permitted_growth() {
     assert_eq!(credentials.euid(), 1000);
     assert_eq!(credentials.egid(), 100);
     assert_eq!(credentials.capabilities().permitted(), CapSet::FULL);
+}
+
+#[def_test]
+fn scheduler_capability_is_scoped_to_the_target_user_namespace() {
+    let child = UserNamespace::new_child(&initial_user_namespace(), 1000, 1000, false).unwrap();
+    let mut caller = Cred::root().with_user_namespace(child.clone());
+    let sys_nice = CapSet::from_bits(1 << crate::CAP_SYS_NICE);
+    caller
+        .set_capabilities(CapSets::new(sys_nice, sys_nice, CapSet::EMPTY))
+        .unwrap();
+    let target = Cred::root().with_user_namespace(child);
+    assert!(caller.has_scheduler_capability_over(&target));
 }

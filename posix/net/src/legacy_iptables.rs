@@ -158,7 +158,7 @@ fn check_access(socket: &knet::Socket) -> KResult<()> {
     if socket.socket_family() != linux_raw_sys::net::AF_INET as i32 {
         return Err(LinuxError::ENOPROTOOPT.into());
     }
-    if !kprocess::current_cred().has_cap(kcred::CAP_NET_ADMIN) {
+    if !crate::net_capable(&kprocess::current_cred(), kcred::CAP_NET_ADMIN) {
         return Err(LinuxError::EPERM.into());
     }
     Ok(())

@@ -18,9 +18,10 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
+use kcred::{CAP_SYS_ADMIN, CAP_SYS_CHROOT, Cred, UserNamespace};
 use kerrno::{KError, KResult};
 use kns::{NamespaceFlags, NsFd, PidNamespace, UnshareContext, UnshareError};
-use kprocess::{PidFd, current_files, current_user_process};
+use kprocess::{AsThread, PidFd, current_files, current_user_process};
 use linux_raw_sys::general::{
     CLONE_FILES, CLONE_FS, CLONE_SIGHAND, CLONE_SYSVSEM, CLONE_THREAD, CLONE_VM,
 };
@@ -39,10 +40,10 @@ use linux_raw_sys::general::{
 /// no-op — the kernel implements no SysV-semaphore undo lists to detach, and
 /// Linux's gate admits the bit unconditionally.
 ///
-/// `NEWNET`, `NEWUSER`, `NEWCGROUP`, and `NEWTIME` pass this gate and are
-/// rejected inside [`NsProxy::prepare_unshare`] with `EOPNOTSUPP` (no
-/// pseudo-isolation); Linux's `CLONE_NEWUSER => CLONE_THREAD | CLONE_FS`
-/// implication is moot for the same reason.
+/// Every namespace bit supported by [`NamespaceFlags`] passes this gate.
+/// Linux's `CLONE_NEWUSER => CLONE_THREAD | CLONE_FS` implication is applied
+/// by [`kns::NamespacePlan::build`], which creates the user namespace first and
+/// derives the owners of every sibling namespace from it.
 fn unshare_flag_set(flags: u64, multithreaded: bool) -> KResult<(NamespaceFlags, bool, bool)> {
     let namespace_bits = NamespaceFlags::all().bits();
     let allowed = namespace_bits
@@ -61,6 +62,16 @@ fn unshare_flag_set(flags: u64, multithreaded: bool) -> KResult<(NamespaceFlags,
         return Err(KError::InvalidInput);
     }
     let namespaces = NamespaceFlags::from_bits_truncate(flags);
+    if namespaces.contains(NamespaceFlags::NEWUSER) {
+        // Linux implies CLONE_THREAD|CLONE_FS for NEWUSER and rejects the
+        // request from a multithreaded caller.
+        if multithreaded {
+            return Err(KError::InvalidInput);
+        }
+        let detach_fs = true;
+        let detach_files = flags & CLONE_FILES as u64 != 0;
+        return Ok((namespaces, detach_fs, detach_files));
+    }
     let detach_fs = flags & CLONE_FS as u64 != 0 || namespaces.contains(NamespaceFlags::NEWNS);
     let detach_files = flags & CLONE_FILES as u64 != 0;
     Ok((namespaces, detach_fs, detach_files))
@@ -70,8 +81,8 @@ fn map_unshare_error(err: UnshareError) -> KError {
     match err {
         UnshareError::NotPermitted => KError::OperationNotPermitted,
         UnshareError::InvalidArgument => KError::InvalidInput,
-        UnshareError::Unsupported => KError::OperationNotSupported,
         UnshareError::Mount(err) => err,
+        UnshareError::NoSpace => KError::from(kerrno::LinuxError::ENOSPC),
     }
 }
 
@@ -103,6 +114,95 @@ fn ensure_pid_ns_reachable(process: &kprocess::Process, target: &Arc<PidNamespac
     }
 }
 
+/// Applies Linux's per-type `setns(2)` install checks for one namespace.
+///
+/// Linux evaluates these checks against two credentials: the install functions
+/// test the target namespace's owner with the caller's *current* credential,
+/// while the caller-side capability tests use `nsset->cred`. The latter differs
+/// from the current credential when the same request first enters a user
+/// namespace, because that pending credential carries full capabilities in the
+/// new user namespace. There is deliberately no process-wide privileged proxy.
+/// The PID reachability rule and multithreaded time-namespace rejection live
+/// here because they are part of the same install predicate. Switches that are
+/// a successful no-op in Linux (re-entering the current cgroup namespace) pass
+/// this layer and are collapsed by the commit phase.
+fn authorize_setns(
+    process: &kprocess::Process,
+    target_cred: &Cred,
+    caller_cred: &Cred,
+    nsfd: &NsFd,
+    copy_fs: bool,
+) -> KResult<()> {
+    let require_target = |user_ns: &UserNamespace, capability: u32| {
+        if target_cred.has_cap_in(user_ns, capability) {
+            Ok(())
+        } else {
+            Err(KError::OperationNotPermitted)
+        }
+    };
+    let require_caller = |capability: u32| {
+        if caller_cred.has_cap_in(caller_cred.user_ns(), capability) {
+            Ok(())
+        } else {
+            Err(KError::OperationNotPermitted)
+        }
+    };
+    let require_both_admin = |target: &Arc<UserNamespace>| {
+        require_target(target, CAP_SYS_ADMIN)?;
+        require_caller(CAP_SYS_ADMIN)
+    };
+
+    match nsfd {
+        NsFd::User(target) => {
+            // Gaining capabilities by re-entering the namespace we already
+            // own is exactly what Linux forbids; shared credentials or an fs
+            // struct used by another task would make the switch non-atomic.
+            if Arc::ptr_eq(target, target_cred.user_ns_arc()) {
+                return Err(KError::InvalidInput);
+            }
+            if process.threads().len() > 1 || process.fs_is_shared() {
+                return Err(KError::InvalidInput);
+            }
+            require_target(target, CAP_SYS_ADMIN)
+        }
+        NsFd::Mnt(ns) => {
+            require_target(ns.user_ns(), CAP_SYS_ADMIN)?;
+            require_caller(CAP_SYS_CHROOT)?;
+            require_caller(CAP_SYS_ADMIN)?;
+            // Linux `prepare_nsset()` copies the fs_struct when NEWNS is
+            // combined with another namespace flag; only a lone CLONE_NEWNS
+            // request evaluates `fs->users != 1` on the caller's fs.
+            if process.fs_is_shared() && !copy_fs {
+                return Err(KError::InvalidInput);
+            }
+            Ok(())
+        }
+        NsFd::Pid(target) => {
+            require_both_admin(nsfd.owner())?;
+            ensure_pid_ns_reachable(process, target)
+        }
+        NsFd::Time(_) => {
+            if process.threads().len() > 1 {
+                return Err(KError::TooManyUsers);
+            }
+            require_both_admin(nsfd.owner())
+        }
+        NsFd::Cgroup(target) => {
+            // `cgroupns_install()` checks the target owner first, then accepts
+            // re-entering the active namespace as a successful no-op, and only
+            // then requires the pending credential to be administrative. The
+            // no-op must not demand a capability the caller does not need.
+            require_target(target.owner(), CAP_SYS_ADMIN)?;
+            require_caller(CAP_SYS_ADMIN)?;
+            if Arc::ptr_eq(target, &process.cgroup_ns()?) {
+                return Ok(());
+            }
+            Ok(())
+        }
+        NsFd::Uts(_) | NsFd::Ipc(_) | NsFd::Net(_) => require_both_admin(nsfd.owner()),
+    }
+}
+
 /// Disconnect the calling process from parts of its namespace/share state
 /// (`unshare(2)`).
 ///
@@ -129,10 +229,15 @@ fn sys_unshare_with_stack(
         .prepare_unshare(
             namespace_flags,
             UnshareContext {
-                privileged: kprocess::current_cred().has_sys_admin(),
+                cred: kprocess::current_cred(),
                 fs_shared_with_others: process.fs_is_shared(),
                 unshare_fs: detach_fs,
                 unshare_files: detach_files,
+                current_cgroup: if namespace_flags.contains(NamespaceFlags::NEWCGROUP) {
+                    kprocess::current_cgroup()
+                } else {
+                    None
+                },
             },
             &fs_context.lock(),
         )
@@ -158,15 +263,12 @@ fn sys_unshare_with_stack(
 ///
 /// The `NsFd` channel requires `nstype` to be zero or to match the fd's
 /// namespace type (`EINVAL` otherwise). The `PidFd` channel implements the
-/// Linux 5.8 semantics: `nstype` is an OR-combination mask, every requested
-/// slot is validated against the pidfd's target process, and the whole set is
-/// committed before the caller observes any change.
+/// Linux 5.8 semantics: `nstype` is an OR-combination mask naming namespaces
+/// of the target process, every requested slot is validated against one
+/// snapshot of the target, and the whole set is committed together.
 pub(crate) fn sys_setns(fd: usize, nstype: usize) -> KResult<isize> {
     let process = current_user_process();
     let file = current_files().get_file(fd as i32)?;
-    if !kprocess::current_cred().has_sys_admin() {
-        return Err(KError::OperationNotPermitted);
-    }
 
     if let Ok(nsfd) = NsFd::from_file(&file) {
         return sys_setns_nsfd(&process, nsfd, nstype as u64);
@@ -182,6 +284,8 @@ fn sys_setns_nsfd(process: &kprocess::Process, nsfd: Arc<NsFd>, nstype: u64) -> 
     if nstype != 0 && nstype != nsfd.namespace_flag().bits() {
         return Err(KError::InvalidInput);
     }
+    let cred = kprocess::current_cred();
+    authorize_setns(process, &cred, &cred, &nsfd, false)?;
 
     let target_mnt = match &*nsfd {
         NsFd::Mnt(ns) => Some(ns.clone()),
@@ -191,6 +295,10 @@ fn sys_setns_nsfd(process: &kprocess::Process, nsfd: Arc<NsFd>, nstype: u64) -> 
         }
         _ => None,
     };
+    let target_user_ns = match &*nsfd {
+        NsFd::User(ns) => Some(ns.clone()),
+        _ => None,
+    };
     let new_proxy = process
         .nsproxy()?
         .with_namespace(&nsfd)
@@ -198,7 +306,7 @@ fn sys_setns_nsfd(process: &kprocess::Process, nsfd: Arc<NsFd>, nstype: u64) -> 
     if let NsFd::Net(ns) = &*nsfd {
         knet::netns::ensure_stack(ns)?;
     }
-    process.apply_setns(new_proxy, target_mnt)?;
+    process.apply_setns(new_proxy, target_user_ns, target_mnt)?;
     Ok(0)
 }
 
@@ -212,47 +320,76 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
     if requested.is_empty() {
         return Err(KError::InvalidInput);
     }
-    let supported = NamespaceFlags::NEWNS
-        | NamespaceFlags::NEWUTS
-        | NamespaceFlags::NEWIPC
-        | NamespaceFlags::NEWPID
-        | NamespaceFlags::NEWNET;
-    if (requested & supported) != requested {
-        return Err(KError::OperationNotSupported);
-    }
-
     // Resolve every requested slot against ONE snapshot of the target's
     // namespace bundle, then commit the whole set: slots must not be pinned
     // from different generations of the target's bundle, and nothing is
     // installed before every resolution succeeded. The mount slot is read
     // once and shared between the proxy swap and the fs root/pwd retarget.
-    let target_bundle = pidfd.live_process()?.nsproxy()?;
+    let target = pidfd.live_process()?;
+    // Linux validates the whole namespace set with
+    // `ptrace_may_access(tsk, PTRACE_MODE_READ_REALCREDS)` before any install
+    // check, so an unreadable target reports `EPERM` even when its namespaces
+    // would otherwise be enterable.
+    let target_thread = kprocess::scheduler::representative_task(target)?;
+    kprocess::ptrace::check_read_real_creds_access(
+        &kprocess::current_user_thread(),
+        target_thread.as_thread(),
+    )?;
+    let target_bundle = target.nsproxy()?;
+    let target_user_ns = target.credentials_snapshot()?.user_ns_arc().clone();
     let mut swaps: Vec<NsFd> = Vec::new();
     let mut target_mnt: Option<Arc<kns::MntNamespace>> = None;
     for flag in [
+        NamespaceFlags::NEWUSER,
         NamespaceFlags::NEWNS,
         NamespaceFlags::NEWUTS,
         NamespaceFlags::NEWIPC,
         NamespaceFlags::NEWPID,
+        NamespaceFlags::NEWCGROUP,
         NamespaceFlags::NEWNET,
+        NamespaceFlags::NEWTIME,
     ] {
         if !requested.contains(flag) {
             continue;
         }
-        if flag == NamespaceFlags::NEWNS {
+        if flag == NamespaceFlags::NEWUSER {
+            swaps.push(NsFd::User(target_user_ns.clone()));
+        } else if flag == NamespaceFlags::NEWNS {
             let ns = target_bundle.mnt_ns().clone();
             target_mnt = Some(ns.clone());
             swaps.push(NsFd::Mnt(ns));
-        } else if flag == NamespaceFlags::NEWNET {
-            swaps.push(NsFd::Net(target_bundle.net_ns().clone()));
         } else if flag == NamespaceFlags::NEWUTS {
             swaps.push(NsFd::Uts(target_bundle.uts_ns().clone()));
         } else if flag == NamespaceFlags::NEWIPC {
             swaps.push(NsFd::Ipc(target_bundle.ipc_ns().clone()));
+        } else if flag == NamespaceFlags::NEWPID {
+            swaps.push(NsFd::Pid(target_bundle.pid_ns_for_children().clone()));
+        } else if flag == NamespaceFlags::NEWCGROUP {
+            swaps.push(NsFd::Cgroup(target_bundle.cgroup_ns().clone()));
+        } else if flag == NamespaceFlags::NEWNET {
+            swaps.push(NsFd::Net(target_bundle.net_ns().clone()));
         } else {
-            let ns = target_bundle.pid_ns_for_children();
-            ensure_pid_ns_reachable(process, ns)?;
-            swaps.push(NsFd::Pid(ns.clone()));
+            swaps.push(NsFd::Time(target_bundle.time_ns().clone()));
+        }
+    }
+
+    // Authorize the complete set before any namespace is installed, in
+    // Linux's install order. A requested user namespace contributes a pending
+    // credential with full capabilities in that namespace, exactly like the
+    // `nsset->cred` Linux builds before validation. This is also where a PID
+    // level escape and a multithreaded time-namespace switch are rejected.
+    let current_cred = kprocess::current_cred();
+    let caller_cred = if requested.contains(NamespaceFlags::NEWUSER) {
+        current_cred.with_user_namespace(target_user_ns.clone())
+    } else {
+        (*current_cred).clone()
+    };
+    for nsfd in &swaps {
+        authorize_setns(process, &current_cred, &caller_cred, nsfd, swaps.len() > 1)?;
+    }
+    for nsfd in &swaps {
+        if let NsFd::Net(ns) = nsfd {
+            knet::netns::ensure_stack(ns)?;
         }
     }
 
@@ -263,7 +400,10 @@ fn sys_setns_pidfd(process: &kprocess::Process, pidfd: Arc<PidFd>, nstype: u64) 
     if requested.contains(NamespaceFlags::NEWNET) {
         knet::netns::ensure_stack(proxy.net_ns())?;
     }
-    process.apply_setns(proxy, target_mnt)?;
+    let pending_user_ns = requested
+        .contains(NamespaceFlags::NEWUSER)
+        .then(|| target_user_ns.clone());
+    process.apply_setns(proxy, pending_user_ns, target_mnt)?;
     Ok(0)
 }
 

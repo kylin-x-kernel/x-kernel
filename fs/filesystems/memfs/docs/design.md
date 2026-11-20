@@ -87,7 +87,7 @@ page-cache storage, mapped views and MM shared object identity is the `AddressSp
 to establish the root; ordinary lookup/create/link enters the same table through the superblock of the current directory inode. The slab of `MemoryFs`
 itself only allocates inode numbers; directory entries and VFS operation objects directly hold the backing inode.
 
-`TMPFS_TYPE` describes only the canonical name and nodev superblock factory.
+`TMPFS_TYPE` describes only the canonical name and `nodev_userns` superblock factory (it is mountable from a non-initial user namespace).
 Boot and KVFS own filesystem-type registration and per-mount policy, so that
 policy is not stored in `MemoryFs` inode state. Each tmpfs mount creates an
 independent instance. Device discovery uses the separate `sysfs` crate rather

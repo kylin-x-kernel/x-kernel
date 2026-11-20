@@ -6,6 +6,7 @@
 use alloc::sync::{Arc, Weak};
 use core::{any::Any, fmt};
 
+use kidentity::{PidHandle, PidNamespace};
 use kspin::SpinNoIrq;
 use weak_map::WeakMap;
 
@@ -35,15 +36,17 @@ pub enum SetTerminalResult {
 /// A [`Session`] is a collection of [`ProcessGroup`]s.
 pub struct Session {
     sid: Pid,
+    leader_number: Arc<PidHandle>,
     pub(crate) process_groups: SpinNoIrq<WeakMap<Pid, Weak<ProcessGroup>>>,
     terminal: SpinNoIrq<Option<Arc<dyn ControllingTerminal>>>,
 }
 
 impl Session {
     /// Create a new [`Session`].
-    pub(crate) fn new(sid: Pid) -> Arc<Self> {
+    pub(crate) fn new(sid: Pid, leader_number: Arc<PidHandle>) -> Arc<Self> {
         Arc::new(Self {
             sid,
+            leader_number,
             process_groups: SpinNoIrq::new(WeakMap::new()),
             terminal: SpinNoIrq::new(None),
         })
@@ -54,6 +57,13 @@ impl Session {
     /// The [`Session`] ID.
     pub fn sid(&self) -> Pid {
         self.sid
+    }
+
+    /// Returns this session's leader number in `observer_ns`.
+    ///
+    /// Linux renders `/proc/<pid>/stat` field 6 with `task_session_nr_ns`.
+    pub fn number_in_namespace(&self, observer_ns: &Arc<PidNamespace>) -> Option<Pid> {
+        self.leader_number.nr_in(observer_ns)
     }
 
     /// Sets the terminal for this session.

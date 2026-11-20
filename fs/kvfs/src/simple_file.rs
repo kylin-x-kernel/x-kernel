@@ -33,6 +33,14 @@ pub trait SimpleFileOps: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Validates one open that requests write access.
+    ///
+    /// The default preserves existing helper users; `SetgroupsFile` uses it
+    /// for Linux's open-for-write capability check without denying read opens.
+    fn validate_open_for_write(&self) -> VfsResult<()> {
+        Ok(())
+    }
+
     /// Handles one scalar write; read-only files reject it by default.
     ///
     /// `CommandFile` invokes this callback after complete command copying and
@@ -229,6 +237,26 @@ impl SimpleFile {
         )
     }
 
+    /// Creates a regular file with explicit mode and global owner.
+    pub fn new_regular_with_owner(
+        fs: Arc<SimpleFs>,
+        permission: NodePermission,
+        uid: u32,
+        gid: u32,
+        ops: impl SimpleFileOps,
+    ) -> Arc<Self> {
+        let ops: Arc<dyn SimpleFileOps> = Arc::new(ops);
+        Self::new_with_options_owner(
+            fs,
+            NodeType::RegularFile,
+            permission,
+            uid,
+            gid,
+            ops.clone(),
+            Arc::new(GeneratedFileOperations(ops)),
+        )
+    }
+
     /// Creates a regular file with an explicit permission mode.
     pub fn new_regular_with_permission(
         fs: Arc<SimpleFs>,
@@ -316,6 +344,9 @@ impl crate::InodeSymlinkOperations for SimpleFile {
 impl FileOperations for SimpleFile {
     fn open(self: Arc<Self>, inode: &VfsInode, file: &mut crate::VfsFileBuilder) -> VfsResult<()> {
         self.ops.validate_open()?;
+        if file.mode().contains(crate::FMode::WRITE) {
+            self.ops.validate_open_for_write()?;
+        }
         self.file_operations.clone().open(inode, file)
     }
 

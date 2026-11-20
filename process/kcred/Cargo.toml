@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 bitflags.workspace = true
 kerrno.workspace = true
+kspin.workspace = true
 klazy.workspace = true
 unittest.workspace = true
 

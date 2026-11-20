@@ -28,7 +28,7 @@ pub use exit::{
 use intrusive_collections::LinkedList;
 use kidentity::{PidHandle, PidNamespace};
 use ksignal::Signo;
-use kspin::SpinNoIrq;
+use kspin::{SpinNoIrq, SpinNoPreempt};
 use ksync::{Mutex, MutexGuard};
 use lazyinit::LazyInit;
 pub use runtime_access::{LiveAddressSpace, ProcessExecUpdate};
@@ -65,6 +65,8 @@ pub struct Process {
     group_exit: SpinNoIrq<ThreadGroupExitState>,
     /// Process-wide `exec` serialization gate (Linux `cred_guard_mutex`).
     exec_gate: exec_gate::ExecGate,
+    /// Readiness source for a user namespace whose ID maps a process may be
+    /// waiting on before it first enters user space.
     lifecycle: ProcessLifecycleState,
     /// Signal delivered to the parent's `wait` when this process's parent dies
     /// first (`prctl(PR_SET_PDEATHSIG)`).
@@ -112,6 +114,13 @@ pub struct Process {
     group_membership: GroupMembership,
     /// Weak runtime handle. A process identity can outlive its live runtime.
     runtime_ref: SpinNoIrq<Option<Weak<ProcessRuntime>>>,
+    /// Strong namespace owner retained through the zombie window.
+    ///
+    /// The live runtime keeps the same `Arc`; copying it here lets an
+    /// unreaped zombie keep serving `/proc/<pid>/ns/*` after the last Thread
+    /// (and thus `ProcessRuntime`) is destroyed. `exit_namespaces` clears it
+    /// at reap.
+    retained_nsproxy: SpinNoPreempt<Option<Arc<kns::NsProxy>>>,
     /// Published PID slot, retained so exit/reap can retire visibility without
     /// taking the publication table lock inside `process_domain`.
     pid_publication_slot: SpinNoIrq<Option<Weak<PublishedProcessSlot>>>,
@@ -152,6 +161,12 @@ impl Process {
     /// return values).
     pub fn number_in_namespace(&self, observer_ns: &Arc<PidNamespace>) -> Option<Pid> {
         self.leader_task_number.number_in(observer_ns)
+    }
+
+    /// Iterates the leader handle's `(namespace id, number)` projections for
+    /// the publication index.
+    pub(crate) fn pid_projections(&self) -> impl Iterator<Item = (u64, Pid)> + '_ {
+        self.leader_task_number.projections()
     }
 
     /// Returns the parent's PID as seen in this process's active PID
@@ -409,8 +424,8 @@ impl Process {
         let pid = leader_task_number.root_nr();
         let group = parent.as_ref().map_or_else(
             || {
-                let session = Session::new(pid);
-                ProcessGroup::new(pid, &session)
+                let session = Session::new(pid, leader_task_number.clone());
+                ProcessGroup::new(pid, &session, leader_task_number.clone())
             },
             |p| p.group(),
         );
@@ -447,6 +462,7 @@ impl Process {
             visible_parent: AtomicU32::new(visible_parent),
             group_membership,
             runtime_ref: SpinNoIrq::new(None),
+            retained_nsproxy: SpinNoPreempt::new(None),
             pid_publication_slot: SpinNoIrq::new(None),
         })
     }

@@ -21,6 +21,43 @@ pub fn visible_processes() -> alloc::vec::Vec<Arc<Process>> {
         .collect()
 }
 
+/// Returns the processes visible from `observer_ns`, or every process when
+/// `None` (the initial-namespace view).
+///
+/// A process appears when its group leader holds a PID number in the
+/// observer's namespace — the same rule Linux applies when a pid-namespace-
+/// scoped procfs instance lists its directory.
+pub fn visible_processes_in_namespace(
+    observer_ns: Option<&Arc<crate::PidNamespace>>,
+) -> alloc::vec::Vec<Arc<Process>> {
+    let Some(observer_ns) = observer_ns else {
+        return visible_processes();
+    };
+    lookup::published_processes()
+        .into_iter()
+        .filter(|process| {
+            process.number_in_namespace(observer_ns).is_some() && has_representative_task(process)
+        })
+        .collect()
+}
+
+/// Resolves a `/proc/<pid>` target visible from `observer_ns`.
+///
+/// # Errors
+///
+/// Returns `kerrno::KError::NoSuchProcess` when the PID does not resolve in
+/// the observer namespace or has no live backing.
+pub fn process_task_in_namespace(
+    pid: Pid,
+    observer_ns: Option<&Arc<crate::PidNamespace>>,
+) -> KResult<KtaskRef> {
+    let Some(observer_ns) = observer_ns else {
+        return process_task(pid);
+    };
+    let process = lookup::published_process_in_namespace(pid, observer_ns)?;
+    lookup::representative_task_for_process(&process).map_err(|_| KError::NoSuchProcess)
+}
+
 /// Resolves the representative task used for a `/proc/<pid>` lookup.
 ///
 /// # Errors

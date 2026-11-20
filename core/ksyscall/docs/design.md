@@ -31,8 +31,10 @@ Existing fd-table detach ordering and other allocations are not changed.
 
 ## Clone Entry Preparation
 
-Clone prepares its user entry with KERNEL after flag, namespace capability and
-exit-signal validation, but before process or sibling-thread preparation. This
+Clone prepares its user entry with KERNEL after flag and exit-signal validation,
+but before process or sibling-thread preparation. Namespace capability
+authorization now happens during `prepare_process_fork` through
+`kns::NamespacePlan::build`, after the optional new user namespace exists. This
 is sleepable syscall task context with no cgroup transaction or reclaim-dependent
 lock held. The current-task/thread handles retain owners, not lock guards.
 NoMemory propagates before child identities and relationships are created.
@@ -191,15 +193,18 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
   platform error back to the caller when absent/refused).
 - `task/namespace.rs`: `unshare` and `setns`. `unshare` decodes the flag set
   (namespace bits plus `CLONE_FS`/`CLONE_FILES`), rejects unknown bits with
-  `EINVAL`, then runs `NsProxy::prepare_unshare` (privilege, shared-fs, and
-  unsupported-kind checks) and commits via `Process::apply_prepared_unshare`.
+  `EINVAL`, then runs `NsProxy::prepare_unshare` (flag-combination checks, the
+  `CLONE_NEWUSER`/`CAP_SYS_ADMIN` authorization in `NamespacePlan::build`, and
+  shared-fs rules) and commits via `Process::apply_prepared_unshare`.
   `setns` splits into the `NsFd` channel (nstype must be zero or match the
   fd type) and the `PidFd` channel (nstype is an OR mask resolved against one
-  snapshot of the target bundle, Linux 5.8+ semantics), and commits via
-  `Process::apply_setns`. User/Cgroup swaps are `EOPNOTSUPP` (no
-  pseudo-isolation); a Net swap is accepted and the syscall path materializes
-  the target namespace's protocol stack through `knet::netns::ensure_stack`.
-  Both channels sit behind the `has_sys_admin` gate.
+  snapshot of the target bundle after the ptrace read check, Linux 5.8+
+  semantics), and commits via `Process::apply_setns`. Authorization is per
+  namespace type against the target's owner user namespace: user swaps install
+  the credential transition, cgroup swaps enter/keep the namespace view, time
+  swaps reject multithreaded callers, and a Net swap materializes the target
+  namespace's protocol stack through `knet::netns::ensure_stack`. Mount swaps
+  additionally require `CAP_SYS_CHROOT`.
 - `arch/`: architecture-specific system-info/control adapters (`arch/mod.rs`
   organizes per-architecture submodules via `cfg`, `lib.rs` declares the
   top-level `mod arch;`, and `sys.rs` only re-exports `crate::arch::*`),
@@ -351,35 +356,36 @@ successful exec, ordinary preparation errors, and VM-sharing peer isolation.
 ## Container-related adapters
 
 `unshare`/`setns` implement the namespace system calls over `kns` two-phase
-validation and `kprocess` commit (see above). `clone`/`clone3` now accept
-`CLONE_NEWPID` (the child is allocated in a fresh child PID namespace) and
-`CLONE_NEWNS`/`CLONE_NEWUTS`/`CLONE_NEWIPC`/`CLONE_NEWNET` (a fresh network
-namespace whose protocol stack is materialized by `knet::netns::ensure_stack`),
-while `CLONE_NEWCGROUP`, `CLONE_NEWUSER`, and `CLONE_NEWTIME` still return
-`ENOSYS` from the namespace-flag validator instead of improvising namespace
-creation without isolation. A thread clone cannot switch namespaces — the namespace
-bundle hangs off the process — so `CLONE_THREAD` combined with any namespace
-flag is rejected with `EINVAL` (Linux `copy_process()`), and every namespace
-flag on any clone is gated on the caller's privilege before the thread or
-process branch is chosen. User namespaces are not implemented, so both syscalls
-require effective `CAP_SYS_ADMIN`: `unshare` through
-`UnshareContext::privileged`, and `setns` before either channel dispatches —
-joining any namespace without it is `EPERM`, standing in for Linux's per-type
-`ns_install` capability checks. The unshare flag gate follows
-`check_unshare_flags`: `CLONE_THREAD`/`CLONE_SIGHAND`/`CLONE_VM` are accepted
-as no-ops for a single-threaded caller and rejected with `EINVAL` only for a
-multithreaded one, and `CLONE_NEWNS` implies `CLONE_FS` as in
-`ksys_unshare`, so callers never need the explicit bit. The pidfd `setns`
-channel treats `nstype` as Linux's OR-combination mask: every requested slot
-is validated against the target process and committed together, unsupported
-kinds answer `EOPNOTSUPP`. `getpid`/`getppid` project the identity into the
-PID namespace the task was created in (`task_active_pid_ns` semantics, so a
-`CLONE_NEWPID` child reads 1 and its parent reads 0), `clone`/`fork` return
-the child's number in the forking process's namespace, and signal PID
-arguments (`kill`/`tgkill`/`sigqueue`) are translated through the caller's
-namespace with a root-number fallback for root-keyed sources such as
-/proc. Kernel-internal lookup stays root-keyed (see the known-limits note
-in `process/kns/docs/design.md`).
+validation and `kprocess` commit (see above). `clone`/`clone3` accept every namespace flag. `CLONE_NEWUSER` creates the
+`kcred::UserNamespace` first and needs no capability; `kns::NamespacePlan::build`
+then constructs the remaining namespaces with the new user namespace as owner.
+Without `CLONE_NEWUSER`, creating any other namespace is gated on
+`has_cap_in(caller_user_ns, CAP_SYS_ADMIN)`. Incomplete combinations return
+`EINVAL`, user-namespace depth exhaustion `ENOSPC`, and unsupported multi-thread
+time/user-namespace transitions `EUSERS`/`EINVAL`. A thread clone cannot switch
+namespaces — the namespace bundle hangs off the process — so `CLONE_THREAD`
+combined with any namespace flag is rejected with `EINVAL` (Linux
+`copy_process()`), and every namespace flag is authorized before the thread or
+process branch is chosen.
+
+`unshare` and both `setns` channels authorize per namespace type against the
+target namespace's owner user namespace: mount swaps require
+`CAP_SYS_CHROOT`+`CAP_SYS_ADMIN`, user-namespace entry additionally installs the
+matching credential transition, and repeated/current transitions follow Linux's
+`EINVAL`/`EUSERS` rules. The unshare flag gate follows `check_unshare_flags`:
+`CLONE_THREAD`/`CLONE_SIGHAND`/`CLONE_VM` are accepted as no-ops for a
+single-threaded caller and rejected with `EINVAL` only for a multithreaded one,
+and `CLONE_NEWNS` implies `CLONE_FS` as in `ksys_unshare`. The pidfd `setns`
+channel treats `nstype` as Linux's OR-combination mask, applies the ptrace
+`PTRACE_MODE_READ_REALCREDS` check, validates every requested slot against the
+target process, and commits the bundle atomically. `getpid`/`getppid` project the
+identity into the PID namespace the task was created in (`task_active_pid_ns`
+semantics, so a `CLONE_NEWPID` child reads 1 and its parent reads 0), and
+`clone`/`fork` return the child's number in the forking process's namespace.
+Signal PID arguments (`kill`/`tgkill`/`sigqueue`) are translated through the
+caller's namespace with a root-number fallback for root-keyed sources such as
+`/proc`. Kernel-internal lookup stays root-keyed (see the known-limits note in
+`process/kns/docs/design.md`).
 `PR_SET_NO_NEW_PRIVS`
 records the flag on the calling thread and `PR_GET_NO_NEW_PRIVS` reports it
 back; seccomp install consults it. Exec samples the executable's set-ID bits and

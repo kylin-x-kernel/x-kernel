@@ -30,7 +30,7 @@ use self::{
     posix_state::{ExecMetadata, ProcessPosixState},
     runtime_state::ProcessRuntimeState,
 };
-use crate::{LiveAddressSpace, Process, process_domain};
+use crate::{AsThread, LiveAddressSpace, Process, process_domain};
 
 /// Static configuration used to initialize a [`ProcessRuntime`].
 #[derive(Clone, Copy)]
@@ -178,9 +178,11 @@ impl FsBinding {
     }
 }
 
+#[derive(Clone)]
 struct ForkFsNamespaces {
     fs_context: Arc<Mutex<FsStruct>>,
     nsproxy: Arc<NsProxy>,
+    user_ns: Option<Arc<kcred::UserNamespace>>,
 }
 
 struct ForkAddressSpaceState {
@@ -445,6 +447,7 @@ impl ProcessRuntime {
     /// thread resolving `nsproxy()` would block behind it. `exit_namespaces`
     /// releases its bundle the same way.
     pub(crate) fn set_nsproxy(&self, nsproxy: Arc<NsProxy>) {
+        self.process.set_retained_nsproxy(Some(nsproxy.clone()));
         let previous = self.nsproxy.write().replace(nsproxy);
         drop(previous);
     }
@@ -465,11 +468,6 @@ impl ProcessRuntime {
             .expect("replacing the filesystem context must accept its new owner");
         let previous = self.fs_context.write().replace(binding);
         drop(previous);
-    }
-
-    /// Returns the UTS namespace while the namespace proxy remains attached.
-    pub(crate) fn uts_ns(&self) -> Option<Arc<kns::UtsNamespace>> {
-        self.nsproxy().map(|nsproxy| nsproxy.uts_ns().clone())
     }
 
     pub(crate) fn exit_fs(&self) {
@@ -617,9 +615,14 @@ impl Drop for ProcessRuntime {
 pub(crate) fn fork_process_runtime<R>(
     parent: &Arc<ProcessRuntime>,
     config: ProcessForkConfig,
-    finish_thread: impl FnOnce(Arc<ProcessRuntime>, Arc<kidentity::PidHandle>) -> KResult<R>,
+    parent_cred: Arc<kcred::Cred>,
+    finish_thread: impl FnOnce(
+        Arc<ProcessRuntime>,
+        Arc<kidentity::PidHandle>,
+        Option<Arc<kcred::UserNamespace>>,
+    ) -> KResult<R>,
 ) -> KResult<R> {
-    let fs_namespaces = prepare_fork_fs_and_namespaces(parent, &config)?;
+    let fs_namespaces = prepare_fork_fs_and_namespaces(parent, &config, &parent_cred)?;
     // Children take their numbers in the parent's `pid_ns_for_children` —
     // the namespace `setns(CLONE_NEWPID)` retargets and a plain fork
     // inherits, matching the setns(2) contract that only future children
@@ -662,11 +665,16 @@ pub(crate) fn fork_process_runtime<R>(
     let process_runtime = finish_fork_runtime(
         parent,
         attached_process.process().clone(),
-        fs_namespaces,
+        fs_namespaces.clone(),
         address_space,
         signal_manager,
     )?;
-    let prepared = finish_thread(process_runtime, leader_task_number)?;
+    let prepared = finish_thread(process_runtime, leader_task_number, fs_namespaces.user_ns)?;
+    // Linux `timens_on_fork()`: the first task to enter a time namespace makes
+    // its offsets permanent (`timens_commit()` freezes them). Freeze after the
+    // child is fully prepared but before it can run, so every successful fork
+    // leaves the active time namespace closed to further writes.
+    fs_namespaces.nsproxy.time_ns().freeze_offsets();
     attached_process.commit();
     Ok(prepared)
 }
@@ -674,6 +682,7 @@ pub(crate) fn fork_process_runtime<R>(
 fn prepare_fork_fs_and_namespaces(
     parent: &Arc<ProcessRuntime>,
     config: &ProcessForkConfig,
+    parent_cred: &Arc<kcred::Cred>,
 ) -> KResult<ForkFsNamespaces> {
     let parent_fs_context = parent.fs_context().ok_or(KError::NoSuchProcess)?;
     let fs_context = if matches!(config.fs, ForkFs::Shared) {
@@ -683,21 +692,68 @@ fn prepare_fork_fs_and_namespaces(
     };
 
     let parent_nsproxy = parent.nsproxy().ok_or(KError::NoSuchProcess)?;
+    // `CLONE_NEWCGROUP` roots the child's view at the cgroup the parent is
+    // leaving, not at `config.target_cgroup` (the `CLONE_INTO_CGROUP`
+    // destination the child is migrated to during publication).
+    let current_cgroup = if config
+        .namespace_flags
+        .contains(kns::NamespaceFlags::NEWCGROUP)
+    {
+        let task = crate::scheduler::representative_task(&parent.process)?;
+        Some(task.as_thread().cgroup().ok_or(KError::InvalidInput)?)
+    } else {
+        None
+    };
     let nsproxy_result = if matches!(config.fs, ForkFs::Shared) {
-        parent_nsproxy.clone_for_child(config.namespace_flags, NamespaceFsContext::Shared)
+        let fs = fs_context.lock();
+        // Linux `current_chrooted()`: a chrooted creator cannot obtain a new
+        // user namespace (and the capability reset that comes with it). Keep
+        // the fs guard across namespace construction so a concurrent chroot
+        // cannot invalidate the check.
+        if config
+            .namespace_flags
+            .contains(kns::NamespaceFlags::NEWUSER)
+            && !fs
+                .root()
+                .ptr_eq(&parent_nsproxy.mnt_ns().visible_root_path())
+        {
+            return Err(KError::OperationNotPermitted);
+        }
+        parent_nsproxy.clone_for_child(
+            config.namespace_flags,
+            NamespaceFsContext::Shared,
+            parent_cred,
+            current_cgroup.as_ref(),
+        )
     } else {
         let mut fs = fs_context.lock();
-        parent_nsproxy.clone_for_child(config.namespace_flags, NamespaceFsContext::Private(&mut fs))
+        if config
+            .namespace_flags
+            .contains(kns::NamespaceFlags::NEWUSER)
+            && !fs
+                .root()
+                .ptr_eq(&parent_nsproxy.mnt_ns().visible_root_path())
+        {
+            return Err(KError::OperationNotPermitted);
+        }
+        parent_nsproxy.clone_for_child(
+            config.namespace_flags,
+            NamespaceFsContext::Private(&mut fs),
+            parent_cred,
+            current_cgroup.as_ref(),
+        )
     };
-    let nsproxy = nsproxy_result.map_err(|err| match err {
+    let (nsproxy, user_ns) = nsproxy_result.map_err(|err| match err {
         kns::CloneNsError::InvalidFlagCombination => KError::InvalidInput,
-        kns::CloneNsError::Unimplemented => KError::Unsupported,
+        kns::CloneNsError::NotPermitted => KError::OperationNotPermitted,
         kns::CloneNsError::Mount(err) => err,
+        kns::CloneNsError::NoSpace => KError::from(kerrno::LinuxError::ENOSPC),
     })?;
 
     Ok(ForkFsNamespaces {
         fs_context,
         nsproxy,
+        user_ns,
     })
 }
 

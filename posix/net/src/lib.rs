@@ -24,6 +24,16 @@ mod net_ioctl;
 mod opt;
 mod socket;
 
+/// Checks a network capability in the current network namespace's owner.
+pub(crate) fn net_capable(cred: &kcred::Cred, cap: u32) -> bool {
+    kprocess::try_current_user_process()
+        .and_then(|process| process.net_ns().ok())
+        .map_or_else(
+            || cred.has_cap(cap),
+            |namespace| cred.has_cap_in(namespace.owner(), cap),
+        )
+}
+
 pub use self::{
     io::{sys_recvfrom, sys_recvmmsg, sys_recvmsg, sys_sendmmsg, sys_sendmsg, sys_sendto},
     name::{sys_getpeername, sys_getsockname},

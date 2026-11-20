@@ -17,9 +17,10 @@
 //! extern crate alloc;
 //! use alloc::sync::Arc;
 //!
+//! use kcred::initial_user_namespace;
 //! use kidentity::{PidHandle, PidNamespace};
-//! let root = Arc::new(PidNamespace::new_root());
-//! let child = PidNamespace::new_child(&root);
+//! let root = Arc::new(PidNamespace::new_root_in(initial_user_namespace()));
+//! let child = PidNamespace::new_child_in(&root, initial_user_namespace());
 //! let handle = PidHandle::allocate_in(&child).unwrap();
 //! assert!(!handle.is_lookup_visible());
 //! handle.mark_published();
@@ -37,16 +38,17 @@ extern crate alloc;
 use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
+use kcred::UserNamespace;
 use kerrno::{KError, KResult};
 use lazyinit::LazyInit;
 
 /// PID namespace identity.
-#[derive(Debug)]
 pub struct PidNamespace {
     id: u64,
     parent: Option<Arc<PidNamespace>>,
     level: u32,
     next_nr: AtomicU32,
+    owner: Arc<UserNamespace>,
 }
 
 /// Kernel-wide monotonic PID-namespace identity allocator.
@@ -60,30 +62,61 @@ fn allocate_pid_ns_id() -> u64 {
     NEXT_PID_NS_ID.fetch_add(1, Ordering::Relaxed) as u64
 }
 
+impl core::fmt::Debug for PidNamespace {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("PidNamespace")
+            .field("id", &self.id)
+            .field("level", &self.level)
+            .field("owner", &self.owner.id())
+            .finish()
+    }
+}
+
 impl PidNamespace {
-    /// Creates the root PID namespace.
+    /// Creates the root PID namespace owned by the initial user namespace.
     pub fn new_root() -> Self {
+        Self::new_root_in(kcred::initial_user_namespace())
+    }
+
+    /// Creates the root PID namespace owned by `owner`.
+    pub fn new_root_in(owner: Arc<UserNamespace>) -> Self {
         Self {
             id: allocate_pid_ns_id(),
             parent: None,
             level: 0,
             next_nr: AtomicU32::new(1),
+            owner,
         }
     }
 
     /// Creates a child PID namespace below `parent`.
+    ///
+    /// The child is owned by the parent's owner; use [`Self::new_child_in`] to
+    /// create a namespace whose owner is a new user namespace.
     pub fn new_child(parent: &Arc<Self>) -> Arc<Self> {
+        Self::new_child_in(parent, parent.owner.clone())
+    }
+
+    /// Creates a child PID namespace below `parent`, owned by `owner`.
+    pub fn new_child_in(parent: &Arc<Self>, owner: Arc<UserNamespace>) -> Arc<Self> {
         Arc::new(Self {
             id: allocate_pid_ns_id(),
             parent: Some(parent.clone()),
             level: parent.level + 1,
             next_nr: AtomicU32::new(1),
+            owner,
         })
     }
 
     /// Returns the stable namespace identity.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Returns the user namespace that owns this PID namespace.
+    pub fn owner(&self) -> &Arc<UserNamespace> {
+        &self.owner
     }
 
     /// Returns the parent namespace, if any.
@@ -323,6 +356,16 @@ impl PidHandle {
             .find(|upid| upid.ns.is_root())
             .expect("pid handle must always have a root-visible number")
             .nr
+    }
+
+    /// Iterates the `(namespace id, number)` projections carried by this
+    /// handle.
+    ///
+    /// The process publication table uses these to index namespaced PID
+    /// lookups without rescanning every process or translating through the
+    /// namespace chain on each lookup.
+    pub fn projections(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+        self.numbers.iter().map(|upid| (upid.ns.id(), upid.nr))
     }
 
     /// Returns the number visible in `ns`, if present.

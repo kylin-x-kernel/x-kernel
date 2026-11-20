@@ -157,3 +157,32 @@ fn slave_propagation_accepts_recursive_scope_only() {
         .is_err()
     );
 }
+
+fn init_test_context(_context: &mut kvfs::FsContext<'_>) -> kvfs::VfsResult<()> {
+    Ok(())
+}
+
+static TEST_DEVICE_TYPE: kvfs::FileSystemType =
+    kvfs::FileSystemType::device_backed("test-device", init_test_context);
+static TEST_USERNS_TYPE: kvfs::FileSystemType =
+    kvfs::FileSystemType::nodev_userns("test-userns", init_test_context);
+
+#[def_test]
+fn userns_mount_gate_requires_fs_userns_mount_for_child_namespaces() {
+    let child = kcred::UserNamespace::new_child(
+        &kcred::initial_user_namespace(),
+        1000,
+        1000,
+        false,
+    )
+    .unwrap();
+    let child_root = kcred::Cred::new(0, 0).with_user_namespace(child);
+
+    // A type without FS_USERNS_MOUNT is refused for a child-namespace root,
+    // while an explicitly userns-mountable type is allowed.
+    assert!(super::require_userns_mountable(&child_root, &TEST_DEVICE_TYPE).is_err());
+    assert!(super::require_userns_mountable(&child_root, &TEST_USERNS_TYPE).is_ok());
+
+    // Initial-namespace root can mount either type.
+    assert!(super::require_userns_mountable(&kcred::Cred::root(), &TEST_DEVICE_TYPE).is_ok());
+}

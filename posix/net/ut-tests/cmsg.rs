@@ -580,3 +580,43 @@ fn netlink_sendmsg_forwards_validated_explicit_credentials() {
 
     kprocess::current_files().close_file(fd).unwrap();
 }
+
+#[def_test]
+fn scm_credentials_translate_a_namespaced_claim_to_global_ids() {
+    use alloc::sync::Arc;
+
+    let initial = kcred::initial_user_namespace();
+    let child = kcred::UserNamespace::new_child(&initial, 1000, 1000, false).unwrap();
+    child
+        .write_uid_map(
+            &kcred::Cred::root(),
+            &kcred::Cred::root(),
+            alloc::vec![kcred::IdMapExtent::new(0, 1000, 1).unwrap()],
+        )
+        .unwrap();
+    child
+        .write_gid_map(
+            &kcred::Cred::root(),
+            &kcred::Cred::root(),
+            alloc::vec![kcred::IdMapExtent::new(0, 1000, 1).unwrap()],
+        )
+        .unwrap();
+
+    let pid = kprocess::init_proc().pid();
+    let sender = ScmSenderContext {
+        pid,
+        cred: Arc::new(kcred::Cred::new(1000, 1000).with_user_namespace(child)),
+        process: kprocess::init_proc(),
+    };
+    let mut control = Vec::new();
+    push_cmsg(
+        &mut control,
+        SOL_SOCKET,
+        SCM_CREDENTIALS,
+        &credentials_body(pid, 0, 0),
+    );
+    let (_, creds) = parse(&control, &sender).unwrap();
+    let creds = creds.unwrap();
+    assert_eq!(creds.uid, 1000);
+    assert_eq!(creds.gid, 1000);
+}

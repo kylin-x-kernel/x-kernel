@@ -121,7 +121,9 @@ impl SimpleFileOps for UtsNameFile {
     /// newline, truncates the value there, and a write that starts past the
     /// current value is a successful no-op.
     fn write(&self, _file: &VfsFile, data: &[u8], offset: u64) -> VfsResult<usize> {
-        if !kprocess::current_cred().has_sys_admin() {
+        // Linux `test_perm()` gates sysctl writes on GLOBAL_ROOT_UID, not on
+        // a capability in the UTS namespace owner.
+        if !kprocess::current_cred().has_root_euid() {
             return Err(VfsError::OperationNotPermitted);
         }
         let task = ktask::current();

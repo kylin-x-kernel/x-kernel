@@ -223,7 +223,15 @@ fn check_xattr_permission(
                 if matches!(access, XattrAccess::Write)
                     && metadata.mode.permission().contains(NodePermission::STICKY)
                     && cred.fsuid() != metadata.uid
-                    && !cred.has_cap(kcred::CAP_FOWNER)
+                    && !crate::permission::capable_wrt_inode_uidgid(
+                        cred,
+                        &inode
+                            .super_block()
+                            .map(|super_block| super_block.user_ns())
+                            .unwrap_or_else(|_| kcred::initial_user_namespace()),
+                        &metadata,
+                        kcred::CAP_FOWNER,
+                    )
                 {
                     return Err(VfsError::OperationNotPermitted);
                 }

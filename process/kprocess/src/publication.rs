@@ -7,6 +7,8 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
+#[cfg(unittest)]
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use kerrno::{KError, KResult};
 use kspin::SpinNoIrq;
@@ -14,9 +16,12 @@ use ksync::{RwLock, static_lock};
 use ktask::{KtaskRef, TaskInner, WeakKtaskRef, activate_task, current, prepare_task};
 
 use crate::{
-    AsThread, Pid, Process, ProcessGroup, ProcessGroupMemberSlot, Session, Tid,
+    AsThread, Pid, PidNamespace, Process, ProcessGroup, ProcessGroupMemberSlot, Session, Tid,
     current_user_process, process_domain,
 };
+
+#[cfg(unittest)]
+pub(crate) static NS_INDEX_HITS: AtomicUsize = AtomicUsize::new(0);
 
 /// A prepared user task that is not yet visible to process/task registry lookups.
 pub(crate) struct PreparedUserTask {
@@ -143,6 +148,12 @@ impl PublicationSlot<WeakKtaskRef> {
 struct PublicationTables {
     task_table: BTreeMap<Tid, Arc<PublicationSlot<WeakKtaskRef>>>,
     process_table: BTreeMap<Pid, Arc<PublicationSlot<Arc<Process>>>>,
+    /// Secondary index for `/proc/<pid>` lookups made from a non-initial PID
+    /// namespace: `(namespace id, namespace-local pid) -> root pid`.
+    ///
+    /// A hit is verified against `Process::number_in_namespace`, so a stale
+    /// entry can only cost a fallback scan, never return the wrong process.
+    process_ns_table: BTreeMap<(u64, Pid), Pid>,
     process_group_table: BTreeMap<Pid, Arc<PublicationSlot<Weak<ProcessGroup>>>>,
     session_table: BTreeMap<Pid, Arc<PublicationSlot<Weak<Session>>>>,
 }
@@ -259,6 +270,7 @@ static_lock! {
     static PROCESS_PUBLICATION_TABLES: RwLock<PublicationTables> = RwLock::new(PublicationTables {
         task_table: BTreeMap::new(),
         process_table: BTreeMap::new(),
+        process_ns_table: BTreeMap::new(),
         process_group_table: BTreeMap::new(),
         session_table: BTreeMap::new(),
     });
@@ -411,6 +423,15 @@ impl ProcessPublication {
                     .is_none_or(|weak_task| weak_task.upgrade().is_some())
         });
         tables.process_table.retain(|_, slot| !slot.can_cleanup());
+        let published: Vec<_> = tables
+            .process_table
+            .values()
+            .filter_map(|slot| slot.snapshot())
+            .collect();
+        tables.process_ns_table.clear();
+        for process in published {
+            Self::index_process_namespaces(&mut tables, &process);
+        }
         tables.process_group_table.retain(|_, slot| {
             !slot.can_cleanup()
                 && slot
@@ -464,6 +485,7 @@ impl ProcessPublication {
     }
 
     fn publish_process_identity_slots(
+        tables: &mut PublicationTables,
         domain: &process_domain::ProcessDomainWriteGuard<'_>,
         proc: &Arc<Process>,
         slots: &ProcessIdentitySlots,
@@ -472,6 +494,7 @@ impl ProcessPublication {
         if process_effect.inserted() {
             slots.process.publish(proc.clone());
             proc.install_pid_publication_slot_locked(domain, &slots.process);
+            Self::index_process_namespaces(tables, proc);
         }
 
         let pg = proc.group();
@@ -480,6 +503,28 @@ impl ProcessPublication {
 
         let session = pg.session();
         slots.session.publish(Arc::downgrade(&session));
+    }
+
+    /// Records every PID-namespace projection of `proc` in the secondary
+    /// lookup index.
+    fn index_process_namespaces(tables: &mut PublicationTables, proc: &Arc<Process>) {
+        let root_pid = proc.pid();
+        for (namespace_id, number) in proc.pid_projections() {
+            tables
+                .process_ns_table
+                .insert((namespace_id, number), root_pid);
+        }
+    }
+
+    /// Removes `proc`'s projections from the secondary lookup index.
+    fn unindex_process_namespaces(tables: &mut PublicationTables, proc: &Arc<Process>) {
+        let root_pid = proc.pid();
+        for (namespace_id, number) in proc.pid_projections() {
+            let key = (namespace_id, number);
+            if tables.process_ns_table.get(&key) == Some(&root_pid) {
+                tables.process_ns_table.remove(&key);
+            }
+        }
     }
 
     fn reserve_job_control_identity_locked(
@@ -543,7 +588,7 @@ impl ProcessPublication {
         let mut tables = self.tables.write();
         let (slots, process_effect) = Self::reserve_process_identity_locked(&mut tables, proc);
         let domain = process_domain::write_lock();
-        Self::publish_process_identity_slots(&domain, proc, &slots, process_effect);
+        Self::publish_process_identity_slots(&mut tables, &domain, proc, &slots, process_effect);
     }
 
     /// Publishes a process after forcing cleanup between reserve and commit.
@@ -554,8 +599,9 @@ impl ProcessPublication {
             Self::reserve_process_identity_locked(&mut tables, proc)
         };
         self.cleanup();
+        let mut tables = self.tables.write();
         let domain = process_domain::write_lock();
-        Self::publish_process_identity_slots(&domain, proc, &slots, process_effect);
+        Self::publish_process_identity_slots(&mut tables, &domain, proc, &slots, process_effect);
     }
 
     /// Publishes a task and its related process/group/session identities.
@@ -587,7 +633,7 @@ impl ProcessPublication {
             ThreadPublicationBinding::reserve(tid, task_slot, member_slot, thread.identity_token());
         let (slots, process_effect) = Self::reserve_process_identity_locked(&mut tables, proc);
         thread_binding.publish_task_slot(task);
-        Self::publish_process_identity_slots(&domain, proc, &slots, process_effect);
+        Self::publish_process_identity_slots(&mut tables, &domain, proc, &slots, process_effect);
         drop(domain);
         // Register the stable identity so token-indexed registries (cgroup
         // membership reads) can resolve a task without a numeric key.
@@ -635,6 +681,7 @@ impl ProcessPublication {
                 rollback.process.pid(),
                 &process_slot,
             );
+            Self::unindex_process_namespaces(&mut tables, &rollback.process);
         }
     }
 
@@ -773,6 +820,7 @@ impl ProcessPublication {
 
         let mut tables = self.tables.write();
         Self::remove_slot_if_retired(&mut tables.process_table, pid, &slot);
+        Self::unindex_process_namespaces(&mut tables, proc);
         true
     }
 
@@ -838,6 +886,50 @@ impl ProcessPublication {
             .ok_or(KError::NoSuchProcess)?;
         let _domain = process_domain::read_lock();
         slot.snapshot().ok_or(KError::NoSuchProcess)
+    }
+
+    /// Finds the published process whose number in `observer_ns` is `pid`.
+    ///
+    /// The common initial-namespace case stays a keyed `process_table` lookup.
+    /// For a child PID namespace the `(namespace id, local pid)` index avoids
+    /// cloning and scanning the whole process table; a miss falls back to a
+    /// scan so an index gap cannot hide a live process.
+    pub(crate) fn published_process_in_namespace(
+        &self,
+        pid: Pid,
+        observer_ns: &Arc<PidNamespace>,
+    ) -> KResult<Arc<Process>> {
+        if observer_ns.is_root() {
+            return self.published_process(pid);
+        }
+
+        let tables = self.tables.read();
+        if let Some(root_pid) = tables
+            .process_ns_table
+            .get(&(observer_ns.id(), pid))
+            .copied()
+            && let Some(slot) = tables.process_table.get(&root_pid)
+            && let Some(process) = slot.snapshot()
+        {
+            let _domain = process_domain::read_lock();
+            if process.number_in_namespace(observer_ns) == Some(pid) {
+                #[cfg(unittest)]
+                NS_INDEX_HITS.fetch_add(1, Ordering::Relaxed);
+                return Ok(process);
+            }
+        }
+
+        let found = tables.process_table.values().find_map(|slot| {
+            let process = slot.snapshot()?;
+            (process.number_in_namespace(observer_ns) == Some(pid)).then_some(process)
+        });
+        drop(tables);
+        if let Some(process) = found {
+            let mut tables = self.tables.write();
+            Self::index_process_namespaces(&mut tables, &process);
+            return Ok(process);
+        }
+        Err(KError::NoSuchProcess)
     }
 
     /// Finds the published process identity with the given PID and ensures it

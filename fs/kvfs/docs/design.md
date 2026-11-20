@@ -414,6 +414,35 @@ list. An expired captured source must not fall back to the default path.
 
 ## Cross-crate interface
 
+- `crate::kid::{Kuid, Kgid, OVERFLOW_ID}` (`src/kid.rs`): global filesystem
+  identity types. `Kuid::from_inside(u32, &UserNamespace)`/`Kgid::from_inside`
+  translate a caller-namespace ID to the stored initial-namespace value and
+  return `INVALID` when unmapped; `to_inside(&UserNamespace)` renders a stored
+  ID for a reader and yields `OVERFLOW_ID` (65534) when the reader has no
+  mapping. Provider: kvfs; consumers: `posix/fs` stat/fstatat/statx, kvfs
+  chown/chmod/xattr, and procfs inode-owner projection. Storage and internal
+  comparisons stay in initial-namespace coordinates; projection happens only at
+  syscall/procfs boundaries.
+- `MntNamespace::clone_with_root_and_pwd_in(..., owner: Arc<UserNamespace>)`
+  (`src/mount.rs`): clones a mount namespace and binds the supplied user
+  namespace as the owner of newly created superblocks. Provider: kvfs;
+  consumer: `kns::NamespacePlan::build` for `CLONE_NEWNS|CLONE_NEWUSER`.
+- `SuperBlock::init_user_ns`/`user_ns` and `Dentry::user_namespace`
+  (`src/super_block.rs`, `src/node/dentry.rs`): install and expose Linux
+  `s_user_ns` ownership. `posix/fs` installs the mounting task's user namespace
+  in `do_new_mount`/`fsconfig`; inode capability checks (`chown`, `chmod`,
+  sticky delete, xattr/fileattr, DAC) use `capable_wrt_inode_uidgid`: the
+  capability is checked in the caller's user namespace and requires the inode
+  IDs to be mapped there.
+- `SimpleFile::new_regular_with_owner`/`new_snapshot_with_owner` and
+  `SimpleFileOps::validate_open_for_write` (`src/simple_file.rs`): create a
+  simple file whose inode owner is a global `Kuid`/`Kgid`, and run an
+  open-for-write capability hook; procfs uses them for `/proc/<pid>/uid_map`,
+  `gid_map`, `setgroups`, and `auxv` visibility/authorization.
+- `FileSystemType::nodev_userns`/`is_userns_mountable`
+  (`src/file_system_type.rs`): declare that a superblock type may be mounted
+  from a non-initial user namespace (Linux `FS_USERNS_MOUNT`); `posix/fs`
+  enforces it in the mount/fsopen paths.
 - `Path::dentry_is_mount_root(&self) -> bool` (`src/mount.rs`): reports whether
   the path's dentry is its mount's root dentry (Linux `path_mounted`,
   `dentry == mnt_root`), independent of overmount visibility. Provider: kvfs;
@@ -425,6 +454,8 @@ list. An expired captured source must not fall back to the default path.
 
 ## Scope
 
+- `src/kid.rs`: kernel-side `Kuid`/`Kgid` global identity types and the
+  inside/initial namespace projection helpers.
 - `src/open_flags.rs`: normalization of raw `O_*` arguments and the open intent.
 - `src/namei.rs`: path traversal and the open flow.
 - `src/permission.rs`: owner/group/other DAC and the open access mapping.

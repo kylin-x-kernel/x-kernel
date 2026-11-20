@@ -7,7 +7,9 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::mem::size_of;
 
-use kcred::{CAP_SYS_RESOURCE, Cred, INVALID_GID, INVALID_UID};
+use kcred::{
+    CAP_SYS_RESOURCE, Cred, INVALID_GID, INVALID_UID, UserNamespace, initial_user_namespace,
+};
 use kerrno::{KError, KResult, LinuxError};
 use kprocess::{Pid, current_user_process};
 use ksync::{Mutex, static_lock};
@@ -17,9 +19,27 @@ use posix_types::{IpcPerm, UserConstPtr, UserPtr, msgbuf, msginfo, msqid_ds};
 
 use super::{
     IPC_CREAT, IPC_EXCL, IPC_INFO, IPC_PRIVATE, IPC_READ, IPC_RMID, IPC_SET, IPC_STAT, IPC_WRITE,
-    MSG_INFO, MSG_STAT, current_unix_seconds, has_ipc_control_permission, has_ipc_permission,
+    MSG_INFO, MSG_STAT, current_unix_seconds, has_ipc_control_permission_in, has_ipc_permission_in,
     next_ipc_id,
 };
+
+/// Returns the user namespace that owns the caller's IPC namespace.
+///
+/// Linux `ipcperms()` evaluates capabilities in `ipc_namespace->user_ns`, not
+/// in the creating task's credential namespace. A kernel/fixture task without
+/// an IPC namespace uses the initial namespace.
+///
+/// # Execution context
+///
+/// Requires a current user task or a kernel task with no IPC namespace; it is
+/// called from SysV IPC syscall entry in task context. It may take the process
+/// runtime lock but does not sleep, so it must not run in IRQ/softirq context
+/// or while holding a lock that the runtime/namespace owner can acquire.
+fn current_ipc_namespace_owner() -> Arc<UserNamespace> {
+    kprocess::try_current_user_process()
+        .and_then(|process| process.ipc_ns().ok())
+        .map_or_else(initial_user_namespace, |ns| ns.owner().clone())
+}
 
 /// Rejects IDs that `ipc_update_perm()` cannot represent.
 fn validate_set_perm(perm: &IpcPerm) -> KResult<()> {
@@ -34,7 +54,7 @@ fn validate_set_perm(perm: &IpcPerm) -> KResult<()> {
 /// Linux checks `ipcperms()` before the `ipc_valid_object()` race check, so a
 /// removed queue reports EACCES to a caller without access instead of EIDRM.
 fn check_queue_access(queue: &MessageQueue, cred: &Cred, flag: u32) -> KResult<()> {
-    if !has_ipc_permission(&queue.msqid_ds.msg_perm, cred, flag) {
+    if !has_ipc_permission_in(&queue.msqid_ds.msg_perm, cred, flag, queue.owner_ns()) {
         return Err(KError::from(LinuxError::EACCES));
     }
     if queue.mark_removed {
@@ -53,6 +73,8 @@ pub struct Message {
 
 /// Message storage and ABI accounting protected by its manager-provided mutex.
 pub struct MessageQueue {
+    /// User namespace that owns this queue for capability checks.
+    owner_ns: Arc<UserNamespace>,
     /// User-visible permissions, limits, counts and timestamps.
     pub msqid_ds: msqid_ds,
     /// Messages in enqueue order; update counters when mutating this vector.
@@ -65,8 +87,24 @@ pub struct MessageQueue {
 
 impl MessageQueue {
     /// Creates an empty queue with the given owner IDs and default byte limit.
+    ///
+    /// The initial user namespace owns the queue; use [`Self::new_in`] when the
+    /// caller is in a child namespace.
     pub fn new(key: i32, mode: __kernel_mode_t, pid: Pid, uid: u32, gid: u32) -> Self {
+        Self::new_in(key, mode, pid, uid, gid, initial_user_namespace())
+    }
+
+    /// Creates an empty queue owned by `owner_ns`.
+    pub fn new_in(
+        key: i32,
+        mode: __kernel_mode_t,
+        pid: Pid,
+        uid: u32,
+        gid: u32,
+        owner_ns: Arc<UserNamespace>,
+    ) -> Self {
         MessageQueue {
+            owner_ns,
             msqid_ds: msqid_ds {
                 msg_perm: IpcPerm {
                     key,
@@ -94,6 +132,11 @@ impl MessageQueue {
             total_bytes: 0,
             mark_removed: false,
         }
+    }
+
+    /// Returns the user namespace used for `CAP_IPC_OWNER`/`CAP_SYS_ADMIN`.
+    pub fn owner_ns(&self) -> &Arc<UserNamespace> {
+        &self.owner_ns
     }
 
     /// Appends a payload and updates byte/message accounting.
@@ -315,12 +358,13 @@ pub fn sys_msgget(key: i32, msgflg: i32) -> KResult<isize> {
 
     if key == IPC_PRIVATE {
         let msqid = next_ipc_id();
-        let msg_queue = Arc::new(Mutex::new(MessageQueue::new(
+        let msg_queue = Arc::new(Mutex::new(MessageQueue::new_in(
             key,
             (msgflg & 0o777) as _,
             current_pid,
             current_uid,
             current_gid,
+            current_ipc_namespace_owner(),
         )));
 
         msg_manager.insert_msqid_queues(msqid, msg_queue);
@@ -342,7 +386,12 @@ pub fn sys_msgget(key: i32, msgflg: i32) -> KResult<isize> {
             return Err(KError::from(LinuxError::EEXIST));
         }
 
-        if !has_ipc_permission(&msg_queue.msqid_ds.msg_perm, &cred, msgflg as u32) {
+        if !has_ipc_permission_in(
+            &msg_queue.msqid_ds.msg_perm,
+            &cred,
+            msgflg as u32,
+            msg_queue.owner_ns(),
+        ) {
             return Err(KError::from(LinuxError::EACCES));
         }
 
@@ -354,12 +403,13 @@ pub fn sys_msgget(key: i32, msgflg: i32) -> KResult<isize> {
     }
 
     let msqid = next_ipc_id();
-    let msg_queue = Arc::new(Mutex::new(MessageQueue::new(
+    let msg_queue = Arc::new(Mutex::new(MessageQueue::new_in(
         key,
         (msgflg & 0o777) as _,
         current_pid,
         current_uid,
         current_gid,
+        current_ipc_namespace_owner(),
     )));
 
     msg_manager.insert_key_msqid(key, msqid);
@@ -670,7 +720,12 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
             .and_then(|(actual_msqid, queue)| {
                 let guard = queue.lock();
 
-                if !has_ipc_permission(&guard.msqid_ds.msg_perm, &cred, IPC_READ) {
+                if !has_ipc_permission_in(
+                    &guard.msqid_ds.msg_perm,
+                    &cred,
+                    IPC_READ,
+                    guard.owner_ns(),
+                ) {
                     return Err(KError::from(LinuxError::EACCES));
                 }
 
@@ -694,7 +749,12 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
         return Err(KError::from(LinuxError::EIDRM));
     }
     if cmd == IPC_STAT {
-        if !has_ipc_permission(&msg_queue.msqid_ds.msg_perm, &cred, IPC_READ) {
+        if !has_ipc_permission_in(
+            &msg_queue.msqid_ds.msg_perm,
+            &cred,
+            IPC_READ,
+            msg_queue.owner_ns(),
+        ) {
             return Err(KError::from(LinuxError::EACCES));
         }
 
@@ -704,7 +764,7 @@ pub fn sys_msgctl(msqid: i32, cmd: i32, buf: UserPtr<u8>) -> KResult<isize> {
         return Ok(0);
     }
 
-    if !has_ipc_control_permission(&msg_queue.msqid_ds.msg_perm, &cred) {
+    if !has_ipc_control_permission_in(&msg_queue.msqid_ds.msg_perm, &cred, msg_queue.owner_ns()) {
         return Err(KError::from(LinuxError::EPERM));
     }
 

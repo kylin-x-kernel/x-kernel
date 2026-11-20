@@ -10,6 +10,7 @@ use alloc::{
 };
 use core::fmt;
 
+use kidentity::{PidHandle, PidNamespace};
 use kspin::SpinNoIrq;
 
 use crate::{Pid, Process, Session};
@@ -41,6 +42,7 @@ impl ProcessGroupMemberSlot {
 /// A [`ProcessGroup`] is a collection of [`Process`]es.
 pub struct ProcessGroup {
     pgid: Pid,
+    leader_number: Arc<PidHandle>,
     pub(crate) session: Arc<Session>,
     pub(crate) processes: SpinNoIrq<BTreeMap<Pid, Arc<ProcessGroupMemberSlot>>>,
 }
@@ -50,13 +52,19 @@ impl ProcessGroup {
     /// Neither identity is published, and no live process membership is changed.
     #[cfg(unittest)]
     pub fn new_isolated_for_test() -> Arc<Self> {
-        Self::new(0, &Session::new(0))
+        let leader_number = PidHandle::fixed_root(0);
+        Self::new(0, &Session::new(0, leader_number.clone()), leader_number)
     }
 
     /// Create a new [`ProcessGroup`] within a [`Session`].
-    pub(crate) fn new(pgid: Pid, session: &Arc<Session>) -> Arc<Self> {
+    pub(crate) fn new(
+        pgid: Pid,
+        session: &Arc<Session>,
+        leader_number: Arc<PidHandle>,
+    ) -> Arc<Self> {
         let group = Arc::new(Self {
             pgid,
+            leader_number,
             session: session.clone(),
             processes: SpinNoIrq::new(BTreeMap::new()),
         });
@@ -77,6 +85,15 @@ impl ProcessGroup {
     /// The [`ProcessGroup`] ID.
     pub fn pgid(&self) -> Pid {
         self.pgid
+    }
+
+    /// Returns this group's leader number in `observer_ns`.
+    ///
+    /// Linux renders `/proc/<pid>/stat` fields 5 and 6 with
+    /// `task_pgrp_nr_ns`/`task_session_nr_ns`; the leader handle keeps the
+    /// namespace projection available even after the leader exits.
+    pub fn number_in_namespace(&self, observer_ns: &Arc<PidNamespace>) -> Option<Pid> {
+        self.leader_number.nr_in(observer_ns)
     }
 
     /// The [`Session`] that the [`ProcessGroup`] belongs to.

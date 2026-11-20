@@ -8,7 +8,16 @@ use kvfs::{DirMaker, DirMapping, NodeType, SimpleDir, SimpleDirOps, SimpleFile, 
 
 use crate::{basic_nodes, device_nodes, irq_nodes, mem_nodes, task_nodes, trace_nodes};
 
-pub(crate) fn builder(fs: Arc<SimpleFs>) -> DirMaker {
+pub(crate) fn builder_for(
+    observer_ns: Option<alloc::sync::Arc<kprocess::PidNamespace>>,
+) -> impl FnOnce(Arc<SimpleFs>) -> DirMaker {
+    move |fs| builder_with(fs, observer_ns)
+}
+
+fn builder_with(
+    fs: Arc<SimpleFs>,
+    observer_ns: Option<alloc::sync::Arc<kprocess::PidNamespace>>,
+) -> DirMaker {
     let mut root = DirMapping::new();
 
     basic_nodes::root::add_root_entries(&mut root, fs.clone());
@@ -51,6 +60,6 @@ pub(crate) fn builder(fs: Arc<SimpleFs>) -> DirMaker {
         "config.gz",
         SimpleFile::new_regular(fs.clone(), || Ok(kbuild_config::CONFIG_GZIP.to_vec())),
     );
-    let dynamic_dirs = task_nodes::root::ProcFsHandler::new(fs.clone()).chain(root);
+    let dynamic_dirs = task_nodes::root::ProcFsHandler::new(fs.clone(), observer_ns).chain(root);
     SimpleDir::new_maker(fs, Arc::new(dynamic_dirs))
 }

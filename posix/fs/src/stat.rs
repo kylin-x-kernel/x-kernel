@@ -7,6 +7,7 @@
 use core::ffi::{c_char, c_int};
 
 use kerrno::{KError, KResult};
+use kfd::Kstat;
 use kprocess::current_user_process;
 use kvfs::{
     Filename, LookupFlags, LookupIntent, MountFlags, NodeType, Path, Permission, StatFsFlags,
@@ -57,7 +58,10 @@ pub fn sys_fstatat(
     debug!("sys_fstatat <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
     let loc = resolve_at(dirfd, path.as_deref(), flags)?;
-    statbuf.write_vm(loc.stat()?.into())?;
+    let mut value: Kstat = loc.stat()?;
+    let namespace = kprocess::current_cred().user_ns_arc().clone();
+    kfd::project_into_namespace(&mut value, &namespace);
+    statbuf.write_vm(value.into())?;
 
     Ok(0)
 }
@@ -91,7 +95,10 @@ pub fn sys_statx(
     debug!("sys_statx <= dirfd: {dirfd}, path: {path:?}, flags: {flags}");
 
     let location = resolve_at(dirfd, path.as_deref(), flags)?;
-    let mut metadata: statx = location.stat()?.into();
+    let mut kstat = location.stat()?;
+    let namespace = kprocess::current_cred().user_ns_arc().clone();
+    kfd::project_into_namespace(&mut kstat, &namespace);
+    let mut metadata: statx = kstat.into();
     let resolved = location.into_path()?;
     metadata.stx_mnt_id = resolved.mount().mount_id();
     // Mount IDs come from a monotonic counter that never reuses a value, so the

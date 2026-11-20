@@ -36,7 +36,10 @@ fn entry_allocation_failure_precedes_process_and_thread_preparation() {
     let children: alloc::vec::Vec<_> = process.children().iter().map(|child| child.pid()).collect();
     let threads = process.threads();
     let context = UserContext::new(0x1234, 0x8000usize.into(), 0x5678);
-    for flags in [CloneFlags::empty(), CloneFlags::THREAD | CloneFlags::VM | CloneFlags::SIGHAND] {
+    for flags in [
+        CloneFlags::empty(),
+        CloneFlags::THREAD | CloneFlags::VM | CloneFlags::SIGHAND,
+    ] {
         let called = core::cell::Cell::new(false);
         let mut request = CloneRequest::new();
         request.set_flags(flags);
@@ -46,7 +49,8 @@ fn entry_allocation_failure_precedes_process_and_thread_preparation() {
         });
         assert_eq!(result, Err(KError::NoMemory));
         assert!(called.get());
-        let after: alloc::vec::Vec<_> = process.children().iter().map(|child| child.pid()).collect();
+        let after: alloc::vec::Vec<_> =
+            process.children().iter().map(|child| child.pid()).collect();
         assert_eq!(after, children);
         assert_eq!(process.threads(), threads);
     }
@@ -102,17 +106,41 @@ fn test_validate_accepts_newpid() {
 }
 
 #[def_test]
-fn test_validate_rejects_unimplemented_namespaces_with_enosys() {
-    for flags in [CloneFlags::NEWUSER, CloneFlags::NEWCGROUP, CloneFlags::NEWTIME] {
+fn test_validate_accepts_every_namespace_flag() {
+    for flags in [
+        CloneFlags::NEWNS,
+        CloneFlags::NEWUTS,
+        CloneFlags::NEWIPC,
+        CloneFlags::NEWUSER,
+        CloneFlags::NEWPID,
+        CloneFlags::NEWNET,
+        CloneFlags::NEWCGROUP,
+        CloneFlags::NEWTIME,
+    ] {
         let mut req = CloneRequest::new();
         req.set_flags(flags);
-        let err = req.validate_namespace_flags().unwrap_err();
-        // ENOSYS is the expected errno for unimplemented namespaces.
-        assert_eq!(
-            LinuxError::from(err),
-            LinuxError::ENOSYS,
-            "expected ENOSYS for {flags:?}"
+        assert!(
+            req.validate_namespace_flags().is_ok(),
+            "{flags:?} is implemented and must pass flag validation"
         );
+        let expected = if flags.bits() == CloneFlags::NEWNS.bits() {
+            NamespaceFlags::NEWNS
+        } else if flags.bits() == CloneFlags::NEWUTS.bits() {
+            NamespaceFlags::NEWUTS
+        } else if flags.bits() == CloneFlags::NEWIPC.bits() {
+            NamespaceFlags::NEWIPC
+        } else if flags.bits() == CloneFlags::NEWUSER.bits() {
+            NamespaceFlags::NEWUSER
+        } else if flags.bits() == CloneFlags::NEWPID.bits() {
+            NamespaceFlags::NEWPID
+        } else if flags.bits() == CloneFlags::NEWNET.bits() {
+            NamespaceFlags::NEWNET
+        } else if flags.bits() == CloneFlags::NEWCGROUP.bits() {
+            NamespaceFlags::NEWCGROUP
+        } else {
+            NamespaceFlags::NEWTIME
+        };
+        assert_eq!(req.extract_namespace_flags(), expected);
     }
 }
 
@@ -123,7 +151,15 @@ fn test_validate_rejects_unimplemented_namespaces_with_enosys() {
 fn test_clone_rejects_namespace_flags_with_thread() {
     // NEWPID | THREAD already fails flag validation with EINVAL; the
     // thread-clone gate must cover the flags validation alone accepts.
-    for flags in [CloneFlags::NEWUTS, CloneFlags::NEWIPC, CloneFlags::NEWNS] {
+    for flags in [
+        CloneFlags::NEWUTS,
+        CloneFlags::NEWIPC,
+        CloneFlags::NEWNS,
+        CloneFlags::NEWUSER,
+        CloneFlags::NEWNET,
+        CloneFlags::NEWCGROUP,
+        CloneFlags::NEWTIME,
+    ] {
         let mut req = CloneRequest::new();
         req.set_flags(flags | CloneFlags::THREAD | CloneFlags::VM | CloneFlags::SIGHAND);
         assert!(
@@ -138,26 +174,6 @@ fn test_clone_rejects_namespace_flags_with_thread() {
             "CLONE_THREAD | {flags:?} must be EINVAL"
         );
     }
-}
-
-#[def_test]
-fn test_validate_rejects_newcgroup_without_capability_model() {
-    let mut req = CloneRequest::new();
-    req.set_flags(CloneFlags::NEWCGROUP);
-    let err = req.validate_namespace_flags().unwrap_err();
-    assert_eq!(LinuxError::from(err), LinuxError::ENOSYS);
-}
-
-#[def_test]
-fn test_validate_rejects_newtime_with_enosys() {
-    let mut req = CloneRequest::new();
-    req.set_flags(CloneFlags::NEWTIME);
-    let err = req.validate_namespace_flags().unwrap_err();
-    assert_eq!(
-        LinuxError::from(err),
-        LinuxError::ENOSYS,
-        "expected ENOSYS for NEWTIME"
-    );
 }
 
 #[def_test]
@@ -248,4 +264,14 @@ fn test_validate_accepts_plain_fork_and_plain_thread() {
     assert!(req.validate_clear_sighand_flag().is_ok());
     req.set_flags(CloneFlags::THREAD | CloneFlags::VM | CloneFlags::SIGHAND);
     assert!(req.validate_clear_sighand_flag().is_ok());
+}
+
+#[def_test]
+fn test_clone_rejects_newuser_with_shared_fs() {
+    let mut req = CloneRequest::new();
+    req.set_flags(CloneFlags::NEWUSER | CloneFlags::FS);
+    assert_eq!(
+        LinuxError::from(req.validate_namespace_flags().unwrap_err()),
+        LinuxError::EINVAL
+    );
 }

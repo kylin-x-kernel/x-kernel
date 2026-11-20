@@ -50,6 +50,7 @@ impl ThreadMembership {
     }
 
     fn exit_task(&mut self, task: &KtaskRef, leader_cred: Option<Arc<Cred>>) -> bool {
+        ktask::forget_bandwidth_member(task);
         let did_exit = self
             .members
             .get(&task.as_thread().identity_token())

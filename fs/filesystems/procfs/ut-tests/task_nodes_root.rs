@@ -23,6 +23,7 @@ fn task_directory_path(process: alloc::sync::Weak<kprocess::Process>) -> kvfs::P
         let ops = alloc::sync::Arc::new(super::ProcessTaskDir {
             fs: fs.clone(),
             process,
+            observer_ns: None,
         });
         kvfs::SimpleDir::new_maker(fs, ops)
     })
@@ -141,6 +142,7 @@ fn test_task_status_includes_process_name_and_snapshot_fields() {
             ..Default::default()
         },
         tgid: 12,
+        reader_user_ns: kcred::initial_user_namespace(),
         cred: Arc::new(kcred::Cred::root()),
         shared_pending: 0x2000,
         cpumask,
@@ -184,6 +186,7 @@ fn test_task_status_escapes_name_like_linux() {
             ..Default::default()
         },
         tgid: 12,
+        reader_user_ns: kcred::initial_user_namespace(),
         cred: Arc::new(kcred::Cred::root()),
         shared_pending: 0,
         cpumask: KCpuMask::new(),
@@ -203,6 +206,7 @@ fn test_task_status_omits_vm_size_without_address_space() {
             ..Default::default()
         },
         tgid: 12,
+        reader_user_ns: kcred::initial_user_namespace(),
         cred: Arc::new(kcred::Cred::root()),
         shared_pending: 0,
         cpumask: KCpuMask::new(),
@@ -225,6 +229,7 @@ fn test_task_status_uses_linux_subset_field_order() {
             ..Default::default()
         },
         tgid: 12,
+        reader_user_ns: kcred::initial_user_namespace(),
         cred: Arc::new(kcred::Cred::root()),
         shared_pending: 0,
         cpumask: KCpuMask::new(),
@@ -350,7 +355,7 @@ fn status_test_root() -> kvfs::Path {
     let fs = kvfs::SimpleFs::new_with(&STATUS_TEST_FS_TYPE, 0x9fa0, |fs| {
         kvfs::SimpleDir::new_maker(
             fs.clone(),
-            alloc::sync::Arc::new(super::ProcFsHandler::new(fs)),
+            alloc::sync::Arc::new(super::ProcFsHandler::new(fs, None)),
         )
     })
     .unwrap();
@@ -389,7 +394,7 @@ fn read_status(file: &kvfs::VfsFile) -> kvfs::VfsResult<alloc::string::String> {
 fn test_status_root_credential_columns_remain_zero() {
     let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
     let target = status_credential_target(kcred::Cred::root(), false).unwrap();
-    let status = super::task_status(target.task()).unwrap();
+    let status = super::task_status(target.task(), None).unwrap();
     assert_eq!(status_id_columns(&status, "Uid:"), Some([0; 4]));
     assert_eq!(status_id_columns(&status, "Gid:"), Some([0; 4]));
 }
@@ -406,7 +411,7 @@ fn test_status_nonzero_target_credentials_are_not_reader_credentials() {
     ));
     assert_eq!(kprocess::current_real_cred().ruid(), 71);
     assert_eq!(kprocess::current_real_cred().rgid(), 81);
-    let status = super::task_status(target.task()).unwrap();
+    let status = super::task_status(target.task(), None).unwrap();
     assert_eq!(status_id_columns(&status, "Uid:"), Some([1234; 4]));
     assert_eq!(status_id_columns(&status, "Gid:"), Some([4321; 4]));
 }
@@ -424,7 +429,7 @@ fn test_status_orders_real_effective_saved_filesystem_ids() {
         [cred.rgid(), cred.egid(), cred.sgid(), cred.fsgid()],
         [201, 202, 203, 204]
     );
-    let status = super::task_status(target.task()).unwrap();
+    let status = super::task_status(target.task(), None).unwrap();
     assert_eq!(status_id_columns(&status, "Uid:"), Some([101, 0, 103, 104]));
     assert_eq!(
         status_id_columns(&status, "Gid:"),
@@ -448,8 +453,8 @@ fn test_status_same_process_threads_keep_their_own_credentials() {
         owner
     ));
     assert!(first.task().as_thread().tid() != second.task().as_thread().tid());
-    let first_status = super::task_status(first.task()).unwrap();
-    let second_status = super::task_status(second.task()).unwrap();
+    let first_status = super::task_status(first.task(), None).unwrap();
+    let second_status = super::task_status(second.task(), None).unwrap();
     assert_eq!(status_id_columns(&first_status, "Uid:"), Some([1234; 4]));
     assert_eq!(status_id_columns(&first_status, "Gid:"), Some([4321; 4]));
     assert_eq!(status_id_columns(&second_status, "Uid:"), Some([2345; 4]));
@@ -460,17 +465,17 @@ fn test_status_same_process_threads_keep_their_own_credentials() {
 fn test_status_reader_credential_change_does_not_retarget_snapshot() {
     let _reader = ScopedStatusReaderCred::install(kcred::Cred::new(71, 81));
     let target = status_credential_target(kcred::Cred::new(1234, 4321), false).unwrap();
-    let before = super::task_status(target.task()).unwrap();
+    let before = super::task_status(target.task(), None).unwrap();
     {
         let _changed = ScopedStatusReaderCred::install(kcred::Cred::new(98, 89));
         assert_eq!(kprocess::current_real_cred().ruid(), 98);
-        let changed = super::task_status(target.task()).unwrap();
+        let changed = super::task_status(target.task(), None).unwrap();
         assert_eq!(status_id_columns(&changed, "Uid:"), Some([1234; 4]));
         assert_eq!(status_id_columns(&changed, "Gid:"), Some([4321; 4]));
     }
     assert_eq!(kprocess::current_real_cred().ruid(), 71);
     assert_eq!(kprocess::current_real_cred().rgid(), 81);
-    let after = super::task_status(target.task()).unwrap();
+    let after = super::task_status(target.task(), None).unwrap();
     assert_eq!(
         status_id_columns(&before, "Uid:"),
         status_id_columns(&after, "Uid:")
@@ -509,7 +514,7 @@ fn test_status_partial_reads_keep_one_record_and_rewind_refreshes_credentials() 
     let name = alloc::format!("/{pid}/status");
     let first = open_status(&root, name.clone()).unwrap();
     let not_yet_read = open_status(&root, name).unwrap();
-    let original = super::task_status(&target).unwrap();
+    let original = super::task_status(&target, None).unwrap();
     let split = original.find("Gid:").unwrap();
     let mut prefix = alloc::vec![0u8; split];
     assert_eq!(first.read(&mut prefix).unwrap(), split);
@@ -559,7 +564,7 @@ fn test_status_retained_target_preserves_credentials_after_abort() {
     let retained = target.task().clone();
     let weak = ktask::KtaskRef::downgrade(&retained);
     target.abort();
-    let status = super::task_status(&retained).unwrap();
+    let status = super::task_status(&retained, None).unwrap();
     assert_eq!(status_id_columns(&status, "Uid:"), Some([1234; 4]));
     assert_eq!(status_id_columns(&status, "Gid:"), Some([4321; 4]));
     drop(retained);

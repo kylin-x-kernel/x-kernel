@@ -104,14 +104,17 @@ admission.
 
 There is no direct FFI declaration or inline assembly in this crate. Architecture
 and userspace access contracts remain in their providers. The task's PID handle
-and installed `Thread` must agree before publication. Last-thread runtime owners
-must be detached before parent-visible completion so zombie identity cannot keep
-files, mounts or active mm ownership alive.
+and installed `Thread` must agree before publication. Last-thread mm, files and TEE
+runtime owners must be detached before parent-visible completion. Namespace
+release (including the mount namespace) is deliberately deferred to reap, so an
+unreaped zombie keeps its `/proc/<pid>/ns/*` identity usable.
 After robust-list and `clear_child_tid` access, `finish_thread_exit` atomically
 reserves the sole last-thread cleanup role and retires the TID. Only a successful
 final-member removal returns true; a repeat cannot run process cleanup again.
 The named `exit_tee` stage then runs after the exit mark and CPU accounting,
-outside the membership lock and before mm, TEE runtime, fs and namespace detach.
+outside the membership lock and before mm, TEE runtime and fs detach. Namespace
+detach is not part of `do_exit`; `wait_reap::release_zombie_namespaces` releases
+it after the parent-visible completion and reap.
 It may sleep while exchanging `ReleaseOwner`, using the current user runtime
 and filesystem context without global TID lookup, user memory or process file
 descriptors. Transport failure is logged, local TEE handles are cleared, and
