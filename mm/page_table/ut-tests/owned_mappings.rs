@@ -213,7 +213,7 @@ impl PagingHandler for GatherHandler {
         })
     }
 
-    fn alloc_frame() -> Option<PhysAddr> {
+    fn alloc_frame_raw() -> Option<PhysAddr> {
         let mut fail = false;
         with_active_trace(|trace| fail = trace.fail_next_allocation.swap(false, Ordering::Relaxed));
         if fail {
@@ -226,9 +226,9 @@ impl PagingHandler for GatherHandler {
         (!ptr.is_null()).then_some(PhysAddr::from(ptr as usize))
     }
 
-    fn dealloc_frame(address: PhysAddr) {
+    fn dealloc_frame_raw(address: PhysAddr) {
         let layout = Layout::from_size_align(PAGE_SIZE_4K, PAGE_SIZE_4K).unwrap();
-        // SAFETY: PageTable64 returns each table from alloc_frame once, after
+        // SAFETY: PageTable64 returns each table from alloc_frame_raw once, after
         // its last software use. These fixtures never activate hardware roots.
         unsafe { alloc::alloc::dealloc(address.as_usize() as *mut u8, layout) };
     }
@@ -895,12 +895,12 @@ fn guard_drop_does_not_release_a_hold_after_unconfirmed_invalidation() {
             Hold
         }
 
-        fn alloc_frame() -> Option<PhysAddr> {
-            GatherHandler::alloc_frame()
+        fn alloc_frame_raw() -> Option<PhysAddr> {
+            GatherHandler::alloc_frame_raw()
         }
 
-        fn dealloc_frame(address: PhysAddr) {
-            GatherHandler::dealloc_frame(address);
+        fn dealloc_frame_raw(address: PhysAddr) {
+            GatherHandler::dealloc_frame_raw(address);
         }
 
         fn p2v(address: PhysAddr) -> VirtAddr {
@@ -1255,109 +1255,6 @@ fn map_existing_raw_leaf_does_not_acquire_a_managed_hold() {
     edit.remap_raw(target, PhysAddr::from(0x8000_0000), PagingFlags::READ)
         .unwrap();
     assert_eq!(Arc::strong_count(&fixture.0), 1);
-}
-
-#[def_test(serial)]
-fn external_replacement_commits_raw_target_and_retires_only_source() {
-    let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
-    let mut table = Table::try_new_kernel().unwrap();
-    let mut edit = table.modify();
-    let address = VirtAddr::from(0);
-    edit.map(address, fixture.reference(0), PagingFlags::READ)
-        .unwrap();
-    edit.finish();
-    let expected = edit.query_entry(address).unwrap();
-    let target = PhysAddr::from(0x8000_0000);
-    // SAFETY: The synthetic raw target has no reclaiming owner or hardware
-    // users. It stays externally valid for the entire inactive fixture.
-    let result = unsafe {
-        edit.replace_managed_with_external_if_same(
-            address,
-            expected,
-            target,
-            PagingFlags::READ | PagingFlags::WRITE,
-        )
-    };
-    assert_eq!(result, Ok(expected));
-    assert_eq!(edit.query(address).unwrap().0, target);
-    fixture.0.assert_drops(0, 0);
-    fixture.0.fail_next_flush.store(true, Ordering::Relaxed);
-    assert!(edit.finish().had_pending());
-    fixture.0.assert_drops(0, 0);
-    assert_eq!(edit.query(address).unwrap().0, target);
-    edit.try_finish().unwrap();
-    fixture.0.assert_drops(0, 1);
-    // An address change is allowed now: the replacement is raw, not managed.
-    edit.remap_raw(address, PhysAddr::from(0xc000_0000), PagingFlags::READ)
-        .unwrap();
-    edit.unmap(address).unwrap();
-    edit.finish();
-    fixture.0.assert_drops(0, 1);
-}
-
-#[def_test(serial)]
-fn external_replacement_rejects_invalid_or_stale_inputs_without_mutation() {
-    use crate::PteReplaceError;
-    let fixture = Fixture::new([(0, PAGE_SIZE_4K)]);
-    let mut table = Table::try_new_kernel().unwrap();
-    let mut edit = table.modify();
-    let address = VirtAddr::from(0);
-    let target = PhysAddr::from(0x8000_0000);
-    edit.map(address, fixture.reference(0), PagingFlags::READ)
-        .unwrap();
-    edit.finish();
-    let stale = edit.query_entry(address).unwrap();
-    for (va, pa, flags, error) in [
-        (address, target, PagingFlags::USER, PtError::InvalidAddress),
-        (address, target + 1, PagingFlags::READ, PtError::NotAligned),
-        (
-            VirtAddr::from(1),
-            target,
-            PagingFlags::READ,
-            PtError::NotAligned,
-        ),
-    ] {
-        // SAFETY: the retained synthetic target is never accessed; invalid
-        // inputs must fail before publishing or consuming either owner.
-        let result = unsafe { edit.replace_managed_with_external_if_same(va, stale, pa, flags) };
-        assert_eq!(result, Err(PteReplaceError::PageTable(error)));
-        assert_eq!(edit.query_entry(address).unwrap(), stale);
-    }
-    edit.protect(address, PagingFlags::READ | PagingFlags::USER)
-        .unwrap();
-    let current = edit.query_entry(address).unwrap();
-    // SAFETY: the retained synthetic target stays valid; stale comparison
-    // cannot publish it or consume the live source transfer.
-    let result = unsafe {
-        edit.replace_managed_with_external_if_same(address, stale, target, PagingFlags::READ)
-    };
-    assert_eq!(
-        result,
-        Err(PteReplaceError::Changed {
-            current: Some(current)
-        })
-    );
-    assert_eq!(edit.query_entry(address).unwrap(), current);
-    fixture.0.assert_drops(0, 0);
-    edit.unmap(address).unwrap();
-    edit.finish();
-    // SAFETY: the retained synthetic target is not published for an absent leaf.
-    let result = unsafe {
-        edit.replace_managed_with_external_if_same(address, current, target, PagingFlags::READ)
-    };
-    assert_eq!(result, Err(PteReplaceError::Changed { current: None }));
-    edit.map_raw(address, target, PageSize::Size4K, PagingFlags::READ)
-        .unwrap();
-    let raw = edit.query_entry(address).unwrap();
-    // SAFETY: the retained synthetic target is never consumed; the raw source
-    // must be rejected without changing its external ownership.
-    let result = unsafe {
-        edit.replace_managed_with_external_if_same(address, raw, target, PagingFlags::READ)
-    };
-    assert_eq!(
-        result,
-        Err(PteReplaceError::PageTable(PtError::InvalidAddress))
-    );
 }
 
 #[def_test(serial)]

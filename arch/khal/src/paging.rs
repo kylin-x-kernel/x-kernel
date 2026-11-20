@@ -59,7 +59,7 @@ impl PagingHandler for PagingHandlerImpl {
             .map_err(|_| page_table::PtError::NoMemory)
     }
 
-    fn alloc_frame() -> Option<PhysAddr> {
+    fn alloc_frame_raw() -> Option<PhysAddr> {
         assert!(
             kalloc::is_page_allocator_ready(),
             "page-table allocation requested before page allocator initialization"
@@ -73,7 +73,7 @@ impl PagingHandler for PagingHandlerImpl {
             .ok()
     }
 
-    fn dealloc_frame(paddr: PhysAddr) {
+    fn dealloc_frame_raw(paddr: PhysAddr) {
         // SAFETY: page_table consumes exactly one frame allocated by this
         // handler with range length one, after its owner ended hardware use and translation
         // retirement. Borrowed root entries do not release their source frames.

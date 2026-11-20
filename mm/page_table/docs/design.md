@@ -97,7 +97,7 @@ The following responsibilities belong to other layers:
               │ + arch impl     │  │ H: PagingHandler    │
               └─────────────────┘  └─────────────────────┘
                  x86_64               flush_tlb()
-                 aarch64              alloc/dealloc_frame()
+                 aarch64              alloc/dealloc_frame_raw()
                  riscv                p2v()
                  loongarch64
 ```
@@ -323,7 +323,6 @@ The primary entry points consume references:
 | `map_sized(va, reference, size, flags)` | Consume one selected hold exactly matching an aligned supported 4 KiB, 2 MiB or 1 GiB leaf. |
 | `replace_if_same(va, snapshot, reference, flags)` | Conditionally replace one leaf with a new exact hold, preserving its size and returning the old snapshot on success. |
 | `map_existing(source, destination)` | Duplicate a live leaf, acquiring an independent exact hold for a managed source; raw backing stays externally owned. |
-| `unsafe replace_managed_with_external_if_same(va, snapshot, pa, flags)` | Conditionally publish an externally retained raw target and retire the old managed hold without consuming the caller target. |
 | `map_raw`, `map_region_raw`, `remap_raw`, `replace_if_same_raw` | Use caller-owned physical backing; raw installation transfers no mapping hold. |
 
 Exact and compound allocations both work because the provider reports the
@@ -535,21 +534,9 @@ reference-consuming commit primitive for transactional paths such as COW:
 `replace_if_same_raw(vaddr, expected, paddr, flags)` retains the PA-only
 compare-and-replace contract for externally owned backing. It cannot change a
 managed leaf's normalized PA, and same-PA updates preserve the category. A
-successful clear still retires an old managed transfer. Callers crossing to an
-externally owned target must use the explicit mixed transaction below rather
-than weakening this raw operation's ownership contract.
-
-`unsafe replace_managed_with_external_if_same` is the explicit bridge from a
-managed file source to an externally owned raw anonymous target. It requires an
-exact unchanged managed snapshot, identical aligned leaf geometry, valid complete
-address ranges and nonempty READ/WRITE/EXECUTE access. Every ordinary failure is
-prepublication. A stale comparison changes neither the source nor the caller's
-target. On success a fresh raw descriptor replaces the managed leaf, then its old
-hold enters normal retirement; the caller commits and retains its raw target's
-object ownership. Automatic drain failure can retain the old hold but cannot
-turn successful publication into an error that would authorize freeing the raw
-target as an unused candidate. Existing `replace_if_same_raw` keeps its original
-restriction. Completion remains the existing `finish`/`try_finish` contract.
+successful clear still retires an old managed transfer. File-private COW and
+anonymous COW both use `replace_if_same` with a typed mapping hold. No mixed
+managed-source/external-raw-target bridge is needed for those paths.
 
 The page table layer defines conditional PTE commit and mapping-hold retirement.
 Higher layers retain object-state commit/abort and retry policy for COW,

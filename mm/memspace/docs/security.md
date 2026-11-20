@@ -14,12 +14,15 @@ state, and failed preparation must drop its local `CommitCharge`. Releasing
 pages with `MADV_DONTNEED` preserves the VMA commitment. VMA unmap and clear
 release the corresponding charge exactly once, including fork failure cleanup.
 
-Private range release must run after PTE invalidation and TLB completion while
-the caller excludes new faults/fork on the mapping. The allocation-free
-`release_range_after_unmap` callback runs outside the anonymous object lock.
-A partial page-table unmap failure leaves object slots retained rather than
-freeing frames that may still be visible. Clearing an MM allocates no VMA or
-private-page snapshot lists, but this is not an end-to-end NOFAIL exit guarantee.
+Private range teardown excludes new faults/fork while removing PTEs and object
+association. Confirmed TLB completion permits `AnonPrivateObject::remove_range`
+to drop logical shares. Otherwise `retire_range` removes the same slots but
+transfers their guards outside the object lock for conservative retention. No
+raw-frame callback or temporary release array is needed. A partial page-table
+walk failure leaves original slots and their logical COW shares intact.
+Independent PTE references protect physical storage through retirement. Clearing
+an MM allocates no VMA or private-page snapshot lists, but this is not an
+end-to-end NOFAIL exit guarantee.
 
 ## Post-populate hook safety
 
@@ -85,7 +88,9 @@ The test migration does not change production visibility, unsafe preconditions, 
   - Relies on the physical address obtained from the page-table query being convertible to a valid kernel address through the direct map.
   - Relies on the caller guaranteeing that the target user address range has already passed the VMA/permission checks.
 
-`src/vma.rs` and `src/fault.rs` introduce no `unsafe`; `src/backend/mod.rs` (`alloc_frame` zero-fills frames via `write_bytes`) and `src/backend/private.rs` (`copy_private_page` via `copy_nonoverlapping`) contain `unsafe` blocks.
+`src/vma.rs`, `src/fault.rs` and `src/backend/mod.rs` introduce no `unsafe`.
+Typed allocation and zero-fill use kalloc; `src/backend/private.rs` copies a
+validated private range with `copy_nonoverlapping` under MM/COW exclusion.
 
 ## Memory Safety Invariants
 
@@ -103,11 +108,15 @@ The test migration does not change production visibility, unsafe preconditions, 
   anon lineage together.
 - Private-anon page state must be held by `AnonPrivateObject`, and the runtime must not own a separate
   private frame table.
-- PTE teardown and TLB finalization must precede object-slot and frame release.
+- Keep slots in the object during the sparse PTE walk. After PTE removal,
+  transfer logical guards out without allocating cleanup storage. Confirmed
+  access retirement permits drop; otherwise retain the affected guards without
+  keeping old contents associated with the object. Physical backing remains
+  under independent PageRef holds and returns only after the final hold ends.
 - A sparse range unmap of a private mapping skips only nonexistent page-table subtrees and non-present
   entries; the actual leaf size must match the runtime. When a page-table walk fails, backing ownership is kept,
-  object slots remain intact; the already cleared PTE prefix can be
-  re-established by later faults, and frames must not be released early on the failure path. The original address-space lock and
+  original object slots remain untouched; the already cleared PTE prefix can be
+  re-established by later faults, and logical shares must not end on the failure path. The original address-space lock and
   the TLB guard still cover the process and do not release intermediate page tables.
 - `mremap` move-style source retirement must not call ordinary runtime
   `unmap()` on the moved source range.
@@ -171,7 +180,9 @@ The test migration does not change production visibility, unsafe preconditions, 
    - Mitigation: the COW path compares both the object slot and the `PteSnapshot`, and returns retry if either changed.
 
 6. A stale TLB entry accesses a freed frame.
-   - Mitigation: `PageTableMut::finish()` is explicitly completed before a detached frame is freed.
+   - Mitigation: managed PTE references retire only after confirmed invalidation;
+     final physical release belongs to PageRef. COW logical shares end only after
+     old-owner access retirement.
 
 7. The current CPU is removed too early from the old mm's target set during a scheduler switch.
    - Mitigation: the switch path publishes the CPU to the new mm before activating its root; old-mm CPU bits are retained conservatively rather than cleared at each switch.
@@ -199,7 +210,7 @@ The test migration does not change production visibility, unsafe preconditions, 
 | COW conflict | The object slot or PTE changed | Return a retry-class outcome | Fault retry |
 | OOM | Frame or page-table allocation fails | Return `OutOfMemory` / `NoMemory` | The syscall or fault fails |
 | File backend fault | File page out of range, I/O failure or quota exhausted | `BusError` outcome | The upper layer delivers SIGBUS; ENOSPC for an ordinary write is unchanged |
-| `mremap` source teardown destroys moved private backing | Relocation is mistaken for an ordinary unmap | Metadata-only retirement | Avoids the moved mapping pointing at freed object pages |
+| `mremap` source teardown removes moved logical slots | Relocation is mistaken for an ordinary unmap | Metadata-only retirement | Preserves anonymous refault contents and COW sharing; PTE references alone cannot preserve object-slot semantics |
 | Stale mm user acquire | The last user release races with a new user acquire | Single atomic-state CAS; upgrade/acquire fails after teardown | Avoids reusing the cleared mappings after exit cleanup |
 
 ## Fault Management
@@ -228,7 +239,7 @@ The test migration does not change production visibility, unsafe preconditions, 
 - [ ] Do VMA split/trim/protect preserve the continuity of `page_offset` and the file offset?
 - [ ] Does the fault path perform the VMA permission check before calling the runtime?
 - [ ] Does the file-private path preserve both the file object and the anon object identity?
-- [ ] Does private-anon frame release happen after TLB finalization?
+- [ ] Do removed logical shares remain retained through access retirement, with physical pages protected independently until the last PageRef ends?
 - [ ] Do invalidate requests enter `MmSpace` through the `vmobj` object/view language?
 - [ ] Is only queue manipulation done inside the `InvalidateSink` spinlock?
 - [ ] Do unsupported Linux semantics explicitly return an error rather than silently degrading?
@@ -317,3 +328,36 @@ to be broken; the in-place path previously dropped the same failure inside
 device access is quiesced before `iounmap`, and the logged error is the only
 observable signal. This residual risk is accepted: the callers have no failure
 channel that can undo a published mapping.
+
+## Anonymous physical lifetime and COW sharing
+
+Private object identities own PageRef backing; each anonymous PTE holds an
+independent reference. Shared anonymous pages also own typed backing and clone
+holds into leaves. Address/metadata lookup cannot create ownership. The obsolete
+raw allocation/free helper pair is removed; `alloc_frame` returns PageRef.
+External linear fixtures retain typed owners while borrowing physical addresses.
+The page-table storage handler marks its raw PA transfers with the `_raw` suffix.
+
+COW logical shares are separate from physical references. The owning-MM mutex
+must exclude source fork reservation between an exclusivity check and writable
+publication; observer handles and PTE clones do not grant or remove logical
+shares. Old logical-slot guards survive until old-owner access retirement:
+`try_finish` success permits drop, while unconfirmed completion conservatively
+retains the committed single-page replacement guard. Range cleanup uses the
+same policy for the removed slots: no `WouldBlock` reaches the infallible exit
+caller, and a refault cannot restore the discarded association. Only affected
+guards are forgotten, not the whole object. Physical retention alone cannot
+prevent a sibling from writing contents still observable through an old private
+translation. Forgotten range/single-page guards retain memory and sharing
+indefinitely, without a global bound or recovery machinery. Software cleanup
+success on this error path does not prove remote permissions were revoked;
+that synchronous completion contract remains separate work.
+
+Candidate-consuming object transactions validate exact geometry and compare the
+slot before invoking the PTE commit. Clone/map/compare failure leaves the old
+slot unchanged and drops candidates. No fallible runtime work follows a
+successful PTE commit before slot insertion. The uncommitted fork child is not
+runnable during rollback. Logical slot and physical backing destruction require
+owning-MM teardown/exclusion; dropping a runtime is not proof of remote access
+retirement for arbitrary live aliases. Tests check actual allocation lifetime,
+logical-slot sharing, managed source conflict, and final cleanup separately.

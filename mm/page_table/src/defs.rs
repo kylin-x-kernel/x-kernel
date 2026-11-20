@@ -464,7 +464,7 @@ pub trait TlbFlushIf {
 ///
 /// # Safety
 ///
-/// - `alloc_frame()` must return 4K-aligned physical addresses.
+/// - `alloc_frame_raw()` must return 4K-aligned physical addresses.
 /// - `p2v()` must be an injective mapping: each physical address maps to
 ///   exactly one unique virtual address.
 /// - The virtual address returned by `p2v()` must point to a valid,
@@ -528,14 +528,14 @@ pub trait PagingHandler: Sized {
     /// # Returns
     ///
     /// `Some(paddr)` on success, `None` if no frames are available.
-    fn alloc_frame() -> Option<PhysAddr>;
+    fn alloc_frame_raw() -> Option<PhysAddr>;
 
-    /// Consumes one storage ownership previously returned by alloc_frame.
+    /// Consumes one storage ownership previously returned by alloc_frame_raw.
     ///
     /// The caller must have ended hardware use and required translation
     /// retirement before release. A copied/borrowed table entry does not own
     /// another allocation and must not release its source table's frame.
-    fn dealloc_frame(paddr: PhysAddr);
+    fn dealloc_frame_raw(paddr: PhysAddr);
 
     /// Converts a physical address to a virtual address via the direct mapping.
     ///

@@ -247,12 +247,12 @@ cache quota independently of outstanding physical references.
 
 COW rechecks EOF under the invalidation read lock, copies the complete retained
 page into a `MaybeUninit` destination, and uses `prepare` / `commit_after` to
-publish the existing anonymous object slot. The dedicated managed-to-external-raw
-conditional replacement validates the old snapshot, publishes the target held by
-the anonymous object, and retires the old file PTE reference. A failed compare
+publish the anonymous object slot. The reference-consuming `replace_if_same`
+validates the old snapshot and publishes an independent managed hold for the
+anonymous target, while retiring the old file PTE reference. A failed compare
 drops only the unpublished candidate. Success removes the old content token;
-the old file page never enters the anonymous raw-release path. Migrating the
-anonymous page's own allocation to `PageRef` remains separate work.
+the old file page never enters the anonymous backing owner. The anonymous
+object owns its PageRef independently of the target PTE.
 
 Fork gives each copied private file PTE an independent reference and content
 token. Shared mappings retain runtime cloning and fault reconstruction. Failed
@@ -308,3 +308,16 @@ new-map policy, so FUTURE_WRITE permits inherited writable VMAs while blocking
 new ones. Source offsets and view lengths follow the actual VMA range; expansion
 extends the existing reverse-mapping registration. The source adapter no longer
 keeps a duplicate immutable length. Write faults still check current inode policy.
+
+Anonymous file copies, partial/tail pages and private-file COW targets use
+`alloc_frame` and the anonymous object's typed `commit_after` transaction.
+The object and PTE each retain a physical hold. File-content copying, EOF and
+invalidate locking remain unchanged; file-to-anonymous COW uses the ordinary
+managed `replace_if_same` path. The former managed-to-external-raw compatibility
+bridge is removed once these targets no longer have external raw ownership.
+
+Private content-token cleanup walks only indexed tokens and drops missing-PTE
+tokens outside the token-map mutex. It needs neither a whole-range offset array
+nor a TLB completion call: the PTE retirement layer owns physical protection.
+Fork rollback still records newly installed child PTEs because restoring mapping
+state and parent permissions remains necessary under independent references.

@@ -86,7 +86,13 @@ impl PinnedFolio {
         {
             return Err(KError::InvalidInput);
         }
-        let reference = self.folio.lock()?.try_clone_mapping_ref()?;
+        // The pin retains initialized backing. Cloning physical lifetime does
+        // not access bytes and must not wait for the content lock.
+        let reference = self
+            .folio
+            .page
+            .try_clone_ref()
+            .map_err(|_| KError::NoMemory)?;
         let has_access =
             flags.intersects(MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE);
         page_table
@@ -155,7 +161,7 @@ pub struct MappedFolio {
 }
 
 impl MappedFolio {
-    /// Returns whether this mapping token owns the specified physical page.
+    /// Returns whether this retained content object backs the physical page.
     pub fn matches_paddr(&self, paddr: PhysAddr) -> bool {
         self.pin.matches_paddr(paddr)
     }
@@ -222,7 +228,7 @@ impl Folio {
         self.index
     }
 
-    /// Returns the physical allocation identity (existing raw consumers only).
+    /// Returns the physical allocation identity without granting content access.
     pub fn paddr(&self) -> PhysAddr {
         self.page.phys_addr()
     }
@@ -366,8 +372,8 @@ impl Drop for Folio {
                 self.index, dirty, writeback
             );
         }
-        // Cache quota follows the physical PageRef, not this cache identity:
-        // page tables may keep the page alive after this Folio is dropped.
+        // Cache quota ended when the index entry was detached. Physical backing
+        // follows PageRef; managed PTEs can retain it after this object drops.
     }
 }
 

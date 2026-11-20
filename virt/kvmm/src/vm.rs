@@ -80,6 +80,8 @@ pub struct VmShared<A: VmmArch> {
     stop_requested: AtomicBool,
 }
 
+// Field order releases the mapper before its guest-RAM reservation. vCPU-held
+// VM references retain both through the existing stop/teardown lifecycle.
 struct VmGuestMemory<A: VmmArch> {
     mapper: A::GuestMem,
     /// Serializes page-table mutations and software table walks. Entry-time

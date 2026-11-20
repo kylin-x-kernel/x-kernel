@@ -15,7 +15,7 @@ use memaddr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use memspace::{
     FaultContext, VmArea, VmRuntimeOps,
     backend::{
-        alloc_frame, dealloc_frame,
+        alloc_frame,
         private::{PrivateForkMaterialize, clone_private_object_pages_for_fork},
     },
 };
@@ -499,7 +499,7 @@ fn file_private_cow_rejects_a_pte_from_a_different_folio() {
         pgtbl.unmap(start).expect("replace file PTE for test");
         pgtbl.finish();
         pgtbl
-            .map_raw(start, wrong_frame, PageSize::Size4K, flags - MappingFlags::WRITE)
+            .map_sized(start, wrong_frame, PageSize::Size4K, flags - MappingFlags::WRITE)
             .expect("map unrelated frame");
 
         let write_fault = FaultContext::new(start, PageFaultFlags::WRITE);
@@ -511,7 +511,6 @@ fn file_private_cow_rejects_a_pte_from_a_different_folio() {
             .unmap_impl(range, &mut pgtbl)
             .expect("remove test mapping and release retained file pin");
     }
-    dealloc_frame(wrong_frame, PageSize::Size4K);
 }
 
 #[def_test]
@@ -561,7 +560,7 @@ fn file_private_fork_failure_does_not_commit_anonymous_child_references() {
         let blocked_addr = start + blocked_page * PAGE_SIZE_4K;
         {
             let mut new_pgtbl = child_pt.modify();
-            new_pgtbl.map_raw(blocked_addr, collision, PageSize::Size4K, flags)
+            new_pgtbl.map_sized(blocked_addr, collision, PageSize::Size4K, flags)
                 .expect("force a deterministic child mapping failure");
             let mut old_pgtbl = parent_pt.modify();
             assert!(runtime.clone_for_fork(
@@ -579,7 +578,6 @@ fn file_private_fork_failure_does_not_commit_anonymous_child_references() {
             new_pgtbl.unmap(blocked_addr).expect("remove collision");
             new_pgtbl.finish();
         }
-        dealloc_frame(collision, PageSize::Size4K);
     }
     runtime.unmap_impl(range, &mut parent_pt.modify()).expect("cleanup parent mapping");
 }
@@ -595,6 +593,7 @@ fn mapping_after_failed_relocation(
     let (runtime, mm, file) = mapped_readonly_cache_pages(name, 3);
     let target = runtime.start + 0x80_000;
     let collision = alloc_frame(true, PageSize::Size4K).expect("allocate destination collision");
+    let collision_pa = collision.phys_addr();
     {
         let mut guard = mm.lock();
         let anon_addr = runtime.start + 2 * PAGE_SIZE_4K;
@@ -627,7 +626,7 @@ fn mapping_after_failed_relocation(
         guard
             .page_table_mut()
             .modify()
-            .map_raw(target + PAGE_SIZE_4K, collision, PageSize::Size4K, flags)
+            .map_sized(target + PAGE_SIZE_4K, collision, PageSize::Size4K, flags)
             .expect("install test-only destination collision");
         assert!(
             guard
@@ -644,7 +643,7 @@ fn mapping_after_failed_relocation(
         );
         assert_eq!(
             guard.page_table().query(target + PAGE_SIZE_4K).unwrap().0,
-            collision,
+            collision_pa,
             "rollback must preserve a leaf it did not install"
         );
         for (page, expected) in source_entries.into_iter().enumerate() {
@@ -685,7 +684,6 @@ fn mapping_after_failed_relocation(
             .expect("remove destination collision");
         pgtbl.finish();
     }
-    dealloc_frame(collision, PageSize::Size4K);
     (runtime, mm)
 }
 
@@ -865,11 +863,12 @@ fn sparse_unmap_cleanup_releases_only_tokens_for_missing_ptes() {
     let second_pte = guard.page_table().query(second).expect("second file PTE");
     {
         let mut pgtbl = guard.page_table_mut().modify();
-        // Leave the first removal pending. Check that helper return leaves no
-        // pending invalidation and retains only the still-present leaf's token.
+        // Content-token cleanup must leave physical retirement to the PTE
+        // guard, while retaining the still-present leaf's source identity.
         pgtbl.unmap(runtime.start).expect("clear first file PTE");
         runtime.release_unmapped_file_pages(range, &mut pgtbl);
-        assert!(!pgtbl.finish().had_pending(), "cleanup must finish the pending invalidation");
+        assert!(pgtbl.try_finish().unwrap().had_pending(),
+            "content cleanup must not consume the PTE retirement boundary");
         assert!(matches!(
             pgtbl.query(runtime.start),
             Err(khal::paging::PagingError::NotMapped)

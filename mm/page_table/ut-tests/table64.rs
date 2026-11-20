@@ -202,7 +202,7 @@ struct FramePool(UnsafeCell<[TestFrame; TEST_FRAME_COUNT]>);
 
 // SAFETY: The unit-test frame allocator publishes frames by monotonically
 // advancing `NEXT_FRAME`; each successful allocation receives a distinct
-// slot and `dealloc_frame` never returns slots to the pool. Concurrent test
+// slot and `dealloc_frame_raw` never returns slots to the pool. Concurrent test
 // allocations can therefore race only on `NEXT_FRAME`, not on the same
 // `UnsafeCell` element.
 unsafe impl Sync for FramePool {}
@@ -238,7 +238,7 @@ impl PagingHandler for TestHandler {
         unreachable!("raw-only test handler has no transferred mapping holds")
     }
 
-    fn alloc_frame() -> Option<PhysAddr> {
+    fn alloc_frame_raw() -> Option<PhysAddr> {
         let index = NEXT_FRAME.fetch_add(1, Ordering::Relaxed);
         if index >= TEST_FRAME_COUNT {
             return None;
@@ -250,7 +250,7 @@ impl PagingHandler for TestHandler {
         Some(PhysAddr::from(ptr as usize))
     }
 
-    fn dealloc_frame(_paddr: PhysAddr) {}
+    fn dealloc_frame_raw(_paddr: PhysAddr) {}
 
     fn p2v(paddr: PhysAddr) -> VirtAddr {
         VirtAddr::from(paddr.as_usize())
@@ -284,12 +284,12 @@ impl PagingHandler for OffsetTestHandler {
         unreachable!("raw-only test handler has no transferred mapping holds")
     }
 
-    fn alloc_frame() -> Option<PhysAddr> {
-        TestHandler::alloc_frame()
+    fn alloc_frame_raw() -> Option<PhysAddr> {
+        TestHandler::alloc_frame_raw()
             .map(|frame| paddr(frame.as_usize() - FRAME_POOL.0.get() as usize + PAGE_SIZE_4K))
     }
 
-    fn dealloc_frame(frame: PhysAddr) {
+    fn dealloc_frame_raw(frame: PhysAddr) {
         assert!(
             (PAGE_SIZE_4K..=(TEST_FRAME_COUNT * PAGE_SIZE_4K)).contains(&frame.as_usize()),
             "must not deallocate a mapped data frame"
@@ -1096,16 +1096,16 @@ mod aarch64_drop {
             unreachable!("raw-only test handler has no transferred mapping holds")
         }
 
-        fn alloc_frame() -> Option<PhysAddr> {
-            TestHandler::alloc_frame()
+        fn alloc_frame_raw() -> Option<PhysAddr> {
+            TestHandler::alloc_frame_raw()
         }
 
-        fn dealloc_frame(paddr: PhysAddr) {
+        fn dealloc_frame_raw(paddr: PhysAddr) {
             if ASID_FLUSHES.load(Ordering::Relaxed) == 0 {
                 FREED_WITHOUT_ASID_FLUSH.fetch_add(1, Ordering::Relaxed);
             }
             FREED_FRAMES.fetch_add(1, Ordering::Relaxed);
-            TestHandler::dealloc_frame(paddr);
+            TestHandler::dealloc_frame_raw(paddr);
         }
 
         fn p2v(paddr: PhysAddr) -> VirtAddr {

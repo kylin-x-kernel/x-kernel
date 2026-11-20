@@ -319,3 +319,23 @@ fn readonly_no_access_publishes_neither_leaf_nor_content_token() {
     assert!(token.is_some());
     assert!(table.query(address).is_ok());
 }
+
+#[def_test]
+fn readonly_mapping_lifetime_does_not_require_the_content_lock() {
+    let cache = MappingPages::new();
+    let pin = cache.pin_folio_or_create(0, |read| read.complete(Ok(()))).unwrap();
+    let folio = cache.state.lock().entries.get(&0).unwrap().clone();
+    let mut table = PageTable::try_new().unwrap();
+    let mut edit = table.modify();
+    let address = VirtAddr::from(0x9000usize);
+    let content = folio.lock().unwrap();
+    // SAFETY: the fixture owns its file extent and isolated inactive page table.
+    // Publication only clones lifetime protection and never accesses page bytes.
+    let token = unsafe {
+        pin.map_readonly(&mut edit, address, MappingFlags::USER | MappingFlags::READ)
+    }.unwrap().unwrap();
+    assert!(token.matches_paddr(edit.query(address).unwrap().0));
+    edit.unmap(address).unwrap();
+    edit.try_finish().unwrap();
+    drop(content);
+}

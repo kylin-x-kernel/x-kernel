@@ -1098,10 +1098,10 @@ fn clear_removes_present_and_zapped_linear_mappings() {
         MmSpace::new_empty_user(start, PAGE_SIZE_4K * 3).expect("allocate test address space");
 
     aspace
-        .map_linear(start, frame, PAGE_SIZE_4K, flags)
+        .map_linear(start, frame.phys_addr(), PAGE_SIZE_4K, flags)
         .expect("map linear page");
     aspace
-        .map_linear(present, present_frame, PAGE_SIZE_4K, flags)
+        .map_linear(present, present_frame.phys_addr(), PAGE_SIZE_4K, flags)
         .expect("map second linear page");
     assert!(aspace.page_table().query(start).is_ok());
     aspace
@@ -1116,8 +1116,6 @@ fn clear_removes_present_and_zapped_linear_mappings() {
     assert!(aspace.find_vma(start).is_none());
     assert!(aspace.find_vma(present).is_none());
     assert_eq!(aspace.page_table().query(present), Err(PagingError::NotMapped));
-    crate::backend::dealloc_frame(frame, PageSize::Size4K);
-    crate::backend::dealloc_frame(present_frame, PageSize::Size4K);
 }
 
 #[def_test]
@@ -1571,4 +1569,44 @@ fn private_commitments_transfer_on_remap_and_rollback_on_destination_conflict() 
     assert_eq!(crate::committed_pages(), baseline + 2);
     space.clear();
     assert_eq!(crate::committed_pages(), baseline);
+}
+
+#[def_test(serial)]
+fn final_mm_user_release_clears_sparse_anonymous_pages_shared_with_a_child() {
+    let start = VirtAddr::from_usize(0x4000);
+    let bytes = 64 * PAGE_SIZE_4K;
+    let flags = MappingFlags::READ | MappingFlags::WRITE | MappingFlags::USER;
+    let initial = kalloc::global_allocator().usages().get(kalloc::UsageKind::VirtMem);
+    let aspace = Arc::new(Mutex::new(MmSpace::new_empty_user(start, bytes).unwrap()));
+    let user = MmSpace::acquire_user(aspace.clone()).unwrap();
+    let pin = user.pin();
+    let child = {
+        let mut mm = aspace.lock();
+        mm.map(start, bytes, flags, false,
+            VmRuntimeRef::new_anon_private(start, PageSize::Size4K)).unwrap();
+        for page in (0..64).step_by(2) {
+            let address = start + page * PAGE_SIZE_4K;
+            assert!(mm.handle_page_fault(address, PageFaultFlags::WRITE).is_resolved());
+            mm.write(address, &[page as u8]).unwrap();
+        }
+        mm.try_clone().unwrap()
+    };
+    assert!(user.release_and_clear_if_last());
+    assert!(!pin.is_user_alive());
+    assert_eq!(aspace.lock().vmas().count(), 0);
+    assert_eq!(kalloc::global_allocator().usages().get(kalloc::UsageKind::VirtMem),
+        initial + 32 * PAGE_SIZE_4K);
+    {
+        let mut mm = child.lock();
+        for page in (0..64).step_by(2) {
+            let mut byte = [0];
+            mm.read(start + page * PAGE_SIZE_4K, &mut byte).unwrap();
+            assert_eq!(byte, [page as u8]);
+            let address = start + page * PAGE_SIZE_4K;
+            assert!(mm.handle_page_fault(address, PageFaultFlags::WRITE).is_resolved());
+            mm.write(address, &[0x7a]).unwrap();
+        }
+        mm.clear();
+    }
+    assert_eq!(kalloc::global_allocator().usages().get(kalloc::UsageKind::VirtMem), initial);
 }

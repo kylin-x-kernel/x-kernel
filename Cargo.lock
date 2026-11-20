@@ -159,10 +159,13 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 name = "anon"
 version = "0.3.0-dev"
 dependencies = [
+ "kalloc",
  "kerrno",
  "khal",
  "kspin",
  "ksync",
+ "memaddr",
+ "page-meta",
  "unittest",
  "vmobj",
 ]
@@ -1593,6 +1596,7 @@ name = "filemap"
 version = "0.3.0-dev"
 dependencies = [
  "anon",
+ "kalloc",
  "karch",
  "kcred",
  "kerrno",
@@ -4060,7 +4064,6 @@ dependencies = [
  "ksync",
  "lazyinit",
  "log",
- "memacct",
  "memaddr",
  "page_table",
  "unittest",

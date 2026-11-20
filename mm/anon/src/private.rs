@@ -5,10 +5,12 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::fmt;
 
+use kalloc::PageRef;
 use kerrno::{KError, KResult};
 use khal::{mem::PhysAddr, paging::PageSize};
 use kspin::SpinNoIrq;
 use ksync::Mutex;
+use memaddr::PAGE_SIZE_4K;
 use vmobj::{
     AnonObjectId, MappingView, MappingViewId, MappingViewNotifier, MappingViewRange,
     MappingViewSpec, ObjectInvalidateWork, VmObjectId, next_mapping_view_id,
@@ -22,57 +24,61 @@ struct RegisteredView {
 }
 
 struct AnonPrivatePageState {
-    pa: PhysAddr,
-    size: PageSize,
-    refs: u32,
+    page: PageRef,
+    logical_shares: SpinNoIrq<u32>,
 }
 
-/// One object-owned private page shared across one fork/COW family.
+/// Observation/source handle for one immutable private-page identity.
+///
+/// Cloning this handle retains physical backing without reserving a logical
+/// COW share. Content access still needs the owning runtime's synchronization.
 #[derive(Clone)]
 pub struct AnonPrivatePageHandle {
-    inner: Arc<SpinNoIrq<AnonPrivatePageState>>,
+    inner: Arc<AnonPrivatePageState>,
 }
 
 impl AnonPrivatePageHandle {
-    fn new(pa: PhysAddr, size: PageSize) -> Self {
-        Self {
-            inner: Arc::new(SpinNoIrq::new(AnonPrivatePageState { pa, size, refs: 1 })),
-        }
-    }
-
-    fn retain(&self) -> KResult {
-        let mut state = self.inner.lock();
-        state.refs = state.refs.checked_add(1).ok_or(KError::NoMemory)?;
-        Ok(())
-    }
-
-    fn release(&self) -> Option<AnonPrivateReleasedPage> {
-        let mut state = self.inner.lock();
-        assert!(state.refs > 0, "dropping unreferenced private page");
-        state.refs -= 1;
-        if state.refs == 0 {
-            Some(AnonPrivateReleasedPage {
-                pa: state.pa,
-                size: state.size,
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Returns the backing frame address.
+    /// Returns the backing frame address without granting content access.
     pub fn phys_addr(&self) -> PhysAddr {
-        self.inner.lock().pa
+        self.inner.page.phys_addr()
     }
 
-    /// Returns the page size of this private page slot.
+    /// Returns the leaf size validated from this hold's selected page count.
+    ///
+    /// Compound backing may be larger; it does not change this selected extent.
     pub fn page_size(&self) -> PageSize {
-        self.inner.lock().size
+        // Slot construction accepts only a complete supported leaf, and the
+        // stored PageRef never changes its selected bounds afterward.
+        match self.inner.page.page_count() {
+            1 => PageSize::Size4K,
+            512 => PageSize::Size2M,
+            262_144 => PageSize::Size1G,
+            _ => unreachable!("private page extent was validated at construction"),
+        }
     }
 
-    /// Returns `true` when this page is exclusively owned by one object slot.
+    /// Returns a snapshot of whether exactly one logical slot owns this page.
+    ///
+    /// This is not authority to publish writable access later. The owning-MM
+    /// mutex must exclude source fork/share reservation from this check through
+    /// in-place reuse and writable publication. Split/moved views stay in that
+    /// MM; fork creates a distinct child object whose shares are counted here.
     pub fn is_exclusive(&self) -> bool {
-        self.inner.lock().refs == 1
+        *self.inner.logical_shares.lock() == 1
+    }
+
+    /// Acquires independent physical lifetime protection for a managed PTE.
+    ///
+    /// This does not reserve a logical COW share or grant content access. The
+    /// caller retains the returned hold until mapping retirement completes.
+    ///
+    /// # Errors
+    /// Returns `NoMemory` on physical-reference overflow.
+    pub fn try_clone_mapping_ref(&self) -> KResult<PageRef> {
+        self.inner
+            .page
+            .try_clone_ref()
+            .map_err(|_| KError::NoMemory)
     }
 
     fn is_same_slot(&self, other: &Self) -> bool {
@@ -80,71 +86,67 @@ impl AnonPrivatePageHandle {
     }
 }
 
-/// One released private page whose last object reference just disappeared.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AnonPrivateReleasedPage {
-    pa: PhysAddr,
-    size: PageSize,
+struct AnonPrivatePageSlot {
+    handle: AnonPrivatePageHandle,
 }
 
-impl AnonPrivateReleasedPage {
-    /// Returns the released frame address.
-    pub const fn phys_addr(self) -> PhysAddr {
-        self.pa
+impl AnonPrivatePageSlot {
+    fn new(page: PageRef, size: PageSize) -> KResult<Self> {
+        if page.page_count().checked_mul(PAGE_SIZE_4K) != Some(size as usize)
+            || !page.phys_addr().as_usize().is_multiple_of(size as usize)
+        {
+            return Err(KError::InvalidInput);
+        }
+        Ok(Self {
+            handle: AnonPrivatePageHandle {
+                inner: Arc::new(AnonPrivatePageState {
+                    page,
+                    logical_shares: SpinNoIrq::new(1),
+                }),
+            },
+        })
     }
 
-    /// Returns the released page size.
-    pub const fn page_size(self) -> PageSize {
-        self.size
-    }
-}
-
-/// One detached private page slot whose final release is deferred until the
-/// owning runtime has torn down its visible mappings.
-pub struct DetachedAnonPrivatePages {
-    object: Arc<AnonPrivateObject>,
-    slots: Vec<(u64, AnonPrivatePageHandle)>,
-    finalized: bool,
-}
-
-impl DetachedAnonPrivatePages {
-    /// Returns `true` when no private page slots were detached.
-    pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
-
-    /// Finalizes the detached slots and returns frames whose last object
-    /// reference disappeared after the caller finished unmapping PTEs.
-    pub fn finalize_release(mut self) -> Vec<AnonPrivateReleasedPage> {
-        self.finalized = true;
-        self.slots
-            .drain(..)
-            .filter_map(|(_, slot)| slot.release())
-            .collect()
+    fn try_clone_slot(&self) -> KResult<Self> {
+        let mut shares = self.handle.inner.logical_shares.lock();
+        *shares = shares.checked_add(1).ok_or(KError::NoMemory)?;
+        Ok(Self {
+            handle: self.handle.clone(),
+        })
     }
 }
 
-impl Drop for DetachedAnonPrivatePages {
+impl Drop for AnonPrivatePageSlot {
     fn drop(&mut self) {
-        if self.finalized || self.slots.is_empty() {
-            return;
-        }
-        let mut pages = self.object.pages.lock();
-        for (object_start, slot) in self.slots.drain(..) {
-            let previous = pages.insert(object_start, slot);
-            assert!(
-                previous.is_none(),
-                "rolling back detached private page collided with live slot"
-            );
-        }
+        let mut shares = self.handle.inner.logical_shares.lock();
+        assert!(*shares > 0, "dropping unreferenced private page slot");
+        *shares -= 1;
+        // Release the count lock before the handle can drop physical backing.
     }
 }
 
-/// One page slot copied into a fork child object.
-#[derive(Clone)]
+/// Removed logical COW share retained until old-owner accesses have ended.
+///
+/// Ordinary Drop ends this share and can expose a sibling as exclusive. The
+/// runtime must retain it through confirmed old-PTE retirement, or prove old
+/// accesses excluded. Unconfirmed completion must conservatively retain this
+/// guard, even if separate PTE holds still prevent physical reclamation.
+#[must_use = "retain the old logical share until access retirement completes"]
+pub struct RetiredAnonPrivatePage {
+    slot: AnonPrivatePageSlot,
+}
+
+impl RetiredAnonPrivatePage {
+    /// Returns an observer of the retired identity without adding a COW share.
+    pub fn handle(&self) -> &AnonPrivatePageHandle {
+        &self.slot.handle
+    }
+}
+
+/// One owned logical share reserved for a fork child object.
 pub struct AnonPrivateForkPage {
     object_start: u64,
-    handle: AnonPrivatePageHandle,
+    slot: AnonPrivatePageSlot,
 }
 
 impl AnonPrivateForkPage {
@@ -153,29 +155,36 @@ impl AnonPrivateForkPage {
         self.object_start
     }
 
-    /// Returns the shared page slot.
+    /// Returns an observer of this reserved page.
     pub fn handle(&self) -> &AnonPrivatePageHandle {
-        &self.handle
+        &self.slot.handle
     }
 }
 
-/// Prepared fork sharing state that only commits into the child object after
-/// the caller finishes page-table installation.
+/// Prepared fork shares committed only after page-table installation completes.
+///
+/// Dropping uncommitted preparation releases its shares. The caller must first
+/// exclude access to any unpublished child PTEs and restore parent permissions.
+#[must_use]
 pub struct PreparedAnonPrivateFork {
     child: Arc<AnonPrivateObject>,
     pages: Vec<AnonPrivateForkPage>,
-    committed: bool,
 }
 
 impl PreparedAnonPrivateFork {
-    /// Returns the prepared shared page slots that should be installed into
-    /// the child page table.
+    /// Returns owned reservations whose mappings should be installed in the child.
     pub fn pages(&self) -> &[AnonPrivateForkPage] {
         &self.pages
     }
 
-    /// Commits the prepared slots into the child object after all page-table
-    /// updates succeeded.
+    /// Moves reserved logical slots into the unpublished child object.
+    ///
+    /// Parent write protection, child PTE installation and mapping completion
+    /// must precede commit. Error cleanup must exclude child access before this
+    /// preparation's shares end. No caller may mutate the child during commit.
+    ///
+    /// # Errors
+    /// Returns `AlreadyExists` without publishing any slots on a child collision.
     pub fn commit(mut self) -> KResult {
         let mut child_pages = self.child.pages.lock();
         for page in &self.pages {
@@ -183,31 +192,18 @@ impl PreparedAnonPrivateFork {
                 return Err(KError::AlreadyExists);
             }
         }
-        for page in &self.pages {
-            let previous = child_pages.insert(page.object_start, page.handle.clone());
+        for page in self.pages.drain(..) {
+            let previous = child_pages.insert(page.object_start, page.slot);
             assert!(
                 previous.is_none(),
                 "prepared child page collided during commit"
             );
         }
-        self.committed = true;
         Ok(())
     }
 }
 
-impl Drop for PreparedAnonPrivateFork {
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-        for page in self.pages.drain(..) {
-            let _ = page.handle.release();
-        }
-    }
-}
-
-/// Prepared first-touch page state that publishes into the anonymous object
-/// only after the caller successfully installs the page-table entry.
+/// Prepared absent slot, published only after a successful runtime PTE update.
 #[must_use]
 pub struct PreparedAnonPrivatePage {
     object: Arc<AnonPrivateObject>,
@@ -215,49 +211,65 @@ pub struct PreparedAnonPrivatePage {
 }
 
 impl PreparedAnonPrivatePage {
-    /// Commits the newly materialized page into the owning anonymous object.
+    /// Consumes typed backing and publishes one absent logical slot.
     ///
-    /// The caller owns the physical frame until this method succeeds. If this
-    /// method returns an error, the caller must tear down any visible PTE and
-    /// release the frame itself.
-    pub fn commit(self, pa: PhysAddr, size: PageSize) -> KResult<AnonPrivatePageHandle> {
+    /// The caller must have excluded access to any separate mapping while this
+    /// fallible publication is pending. Runtime mapping uses `commit_after`.
+    /// Rejected backing drops automatically; no raw release is required.
+    ///
+    /// # Errors
+    /// Returns `InvalidInput` for mismatched physical geometry, or `AlreadyExists`
+    /// if another slot was installed after preparation.
+    pub fn commit(self, page: PageRef, size: PageSize) -> KResult<AnonPrivatePageHandle> {
+        let slot = AnonPrivatePageSlot::new(page, size)?;
         let mut pages = self.object.pages.lock();
         if pages.contains_key(&self.object_start) {
             return Err(KError::AlreadyExists);
         }
-        let handle = AnonPrivatePageHandle::new(pa, size);
-        pages.insert(self.object_start, handle.clone());
+        let handle = slot.handle.clone();
+        pages.insert(self.object_start, slot);
         Ok(handle)
     }
 
-    /// Publishes one owned anonymous page after an atomic runtime update.
+    /// Consumes typed backing and publishes it after an atomic PTE update.
     ///
-    /// The object slot remains locked and absent while `commit` runs. The
-    /// callback must either install the matching PTE successfully or return an
-    /// error without changing the PTE. On error the caller still owns `pa`.
+    /// The object slot remains locked and absent while `commit` receives an
+    /// observer of the candidate. Clone mapping holds before PTE mutation. The
+    /// callback must leave the PTE unchanged on error and must not reenter the
+    /// object map. Success is the publication boundary: no fallible work may
+    /// remain between PTE publication and this slot insertion. A rejected
+    /// candidate drops after releasing the map lock.
+    ///
+    /// # Errors
+    /// Returns `InvalidPage` for mismatched geometry, `Changed` for a populated
+    /// slot, or `Commit` for a callback failure. None publishes an object slot.
     pub fn commit_after<E>(
         self,
-        pa: PhysAddr,
+        page: PageRef,
         size: PageSize,
-        commit: impl FnOnce() -> Result<(), E>,
+        commit: impl FnOnce(&AnonPrivatePageHandle) -> Result<(), E>,
     ) -> Result<AnonPrivatePageHandle, AnonPrivatePageCommitError<E>> {
+        let slot = AnonPrivatePageSlot::new(page, size)
+            .map_err(|_| AnonPrivatePageCommitError::InvalidPage)?;
         let mut pages = self.object.pages.lock();
         if pages.contains_key(&self.object_start) {
             return Err(AnonPrivatePageCommitError::Changed);
         }
-        let handle = AnonPrivatePageHandle::new(pa, size);
-        commit().map_err(AnonPrivatePageCommitError::Commit)?;
-        pages.insert(self.object_start, handle.clone());
+        commit(&slot.handle).map_err(AnonPrivatePageCommitError::Commit)?;
+        let handle = slot.handle.clone();
+        pages.insert(self.object_start, slot);
         Ok(handle)
     }
 }
 
-/// Error returned while committing a private page slot replacement.
+/// Error returned while committing a private page publication or replacement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AnonPrivatePageCommitError<E> {
     /// The object slot no longer has the expected absent or matching-page state.
     Changed,
-    /// The caller-provided runtime commit step failed.
+    /// The backing range size or physical alignment does not match `PageSize`.
+    InvalidPage,
+    /// The caller-provided runtime commit step failed without PTE publication.
     Commit(E),
 }
 
@@ -285,12 +297,18 @@ impl Drop for AnonPrivateViewRegistration {
     }
 }
 
-/// Private anonymous object owner.
+/// Private anonymous identity, views, and logical page-slot owner.
+///
+/// Runtime slot operations require task context and the owning-MM mutex. It
+/// serializes source fork/share reservation with exclusive check-and-reuse;
+/// split/moved views must remain within that MM. Fork children use distinct
+/// objects. Object-map callbacks must not reenter this object. Destruction must
+/// follow owning-MM unmap/access exclusion, before its logical shares can end.
 pub struct AnonPrivateObject {
     id: AnonObjectId,
     lineage: AnonLineageId,
     views: Mutex<BTreeMap<MappingViewId, RegisteredView>>,
-    pages: Mutex<BTreeMap<u64, AnonPrivatePageHandle>>,
+    pages: Mutex<BTreeMap<u64, AnonPrivatePageSlot>>,
 }
 
 impl fmt::Debug for AnonPrivateObject {
@@ -417,14 +435,21 @@ impl AnonPrivateObject {
 
     /// Returns one materialized private page slot for the given object offset.
     pub fn page_at(&self, object_start: u64) -> Option<AnonPrivatePageHandle> {
-        self.pages.lock().get(&object_start).cloned()
+        self.pages
+            .lock()
+            .get(&object_start)
+            .map(|slot| slot.handle.clone())
     }
 
     /// Prepares a first-touch private page publication.
     ///
     /// Preparation validates that the target object offset is currently empty
-    /// but does not publish page ownership. Runtime code must install the PTE
-    /// first and then call `PreparedAnonPrivatePage::commit()`.
+    /// but does not publish page ownership. Runtime code uses `commit_after`
+    /// to validate typed backing, install the PTE and publish the slot under
+    /// one object-map lock. The owning-MM mutex remains the outer exclusion.
+    ///
+    /// # Errors
+    /// Returns `AlreadyExists` when the offset already has a materialized slot.
     pub fn prepare_first_touch_page(
         self: &Arc<Self>,
         object_start: u64,
@@ -441,184 +466,132 @@ impl AnonPrivateObject {
     /// Installs one newly materialized private page into this object.
     #[cfg(unittest)]
     fn install_page(
-        &self,
+        self: &Arc<Self>,
         object_start: u64,
-        pa: PhysAddr,
+        page: PageRef,
         size: PageSize,
     ) -> KResult<AnonPrivatePageHandle> {
-        let mut pages = self.pages.lock();
-        if pages.contains_key(&object_start) {
-            return Err(KError::AlreadyExists);
-        }
-        let handle = AnonPrivatePageHandle::new(pa, size);
-        pages.insert(object_start, handle.clone());
-        Ok(handle)
+        self.prepare_first_touch_page(object_start)?
+            .commit(page, size)
     }
 
-    /// Replaces one existing private page with a newly materialized COW page.
-    #[cfg(unittest)]
-    fn replace_page(
-        &self,
-        object_start: u64,
-        pa: PhysAddr,
-        size: PageSize,
-    ) -> KResult<Option<AnonPrivateReleasedPage>> {
-        let mut pages = self.pages.lock();
-        let new_handle = AnonPrivatePageHandle::new(pa, size);
-        let old = pages.insert(object_start, new_handle);
-        Ok(old.and_then(|slot| slot.release()))
-    }
-
-    /// Replaces one private page slot only if it still matches `expected`.
+    /// Replaces one logical slot after comparing its identity and committing a PTE.
     ///
-    /// `commit` is executed while the object slot is locked and still matches
-    /// the expected page. Runtime code uses this to perform the page-table
-    /// compare/replace step without letting the object slot change between the
-    /// object check and object publication.
+    /// The expected slot stays locked through `commit`. The callback receives
+    /// the validated candidate and must acquire mapping holds before mutation,
+    /// leave the PTE unchanged on error, and not reenter this map. Success leaves
+    /// no fallible work before slot publication. Old-owner content access must
+    /// end before the returned retired logical share drops; a physical PTE hold
+    /// alone does not prevent premature in-place reuse by a COW sibling.
+    ///
+    /// # Errors
+    /// Returns `InvalidPage` for mismatched geometry, `Changed` if `expected` is
+    /// stale, or `Commit` for callback failure. Errors drop the new candidate
+    /// outside the map lock and preserve the original slot.
     pub fn replace_page_if_same_after<E>(
         &self,
         object_start: u64,
         expected: &AnonPrivatePageHandle,
-        pa: PhysAddr,
+        page: PageRef,
         size: PageSize,
-        commit: impl FnOnce() -> Result<(), E>,
-    ) -> Result<Option<AnonPrivateReleasedPage>, AnonPrivatePageCommitError<E>> {
-        let mut pages = self.pages.lock();
-        let Some(current) = pages.get(&object_start) else {
-            return Err(AnonPrivatePageCommitError::Changed);
+        commit: impl FnOnce(&AnonPrivatePageHandle) -> Result<(), E>,
+    ) -> Result<RetiredAnonPrivatePage, AnonPrivatePageCommitError<E>> {
+        let slot = AnonPrivatePageSlot::new(page, size)
+            .map_err(|_| AnonPrivatePageCommitError::InvalidPage)?;
+        let old = {
+            let mut pages = self.pages.lock();
+            let Some(current) = pages.get_mut(&object_start) else {
+                return Err(AnonPrivatePageCommitError::Changed);
+            };
+            if !current.handle.is_same_slot(expected) {
+                return Err(AnonPrivatePageCommitError::Changed);
+            }
+            commit(&slot.handle).map_err(AnonPrivatePageCommitError::Commit)?;
+            core::mem::replace(current, slot)
         };
-        if !current.is_same_slot(expected) {
-            return Err(AnonPrivatePageCommitError::Changed);
-        }
-        let new_handle = AnonPrivatePageHandle::new(pa, size);
-        commit().map_err(AnonPrivatePageCommitError::Commit)?;
-        #[expect(
-            clippy::expect_used,
-            reason = "CG-021-no-panic-on-reachable-failure: The same exclusively held page map \
-                      was checked for this key before replacement"
-        )]
-        let old = pages
-            .insert(object_start, new_handle)
-            .expect("validated private page slot must exist");
-        Ok(old.release())
+        Ok(RetiredAnonPrivatePage { slot: old })
     }
 
-    /// Releases a range of private slots after all corresponding PTEs and
-    /// stale TLB entries have been removed.
+    /// Removes logical slots after the owning MM has ended their old accesses.
     ///
-    /// The caller serializes the mapping lifecycle against faults and fork.
-    /// Each last-reference frame is passed to `release` outside the object
-    /// lock. This path allocates no temporary page list, allowing exit during
-    /// physical-memory exhaustion.
-    pub fn release_range_after_unmap(
+    /// The caller must hold owning-MM exclusion and complete mapping retirement
+    /// or otherwise exclude old-owner access before calling. A failed page-table
+    /// walk leaves original slots in place. Removal allocates no temporary
+    /// storage and drops each slot outside the map lock.
+    /// Physical backing remains protected by every independent `PageRef` hold.
+    pub fn remove_range(&self, object_start: u64, object_len: usize) {
+        self.retire_range(object_start, object_len, drop);
+    }
+
+    /// Removes slots and transfers their logical shares one at a time.
+    ///
+    /// Hold owning-MM exclusion throughout removal. Each callback runs outside
+    /// the map lock and must not repopulate the range. Retain each returned
+    /// guard until old-owner accesses end; a physical mapping hold alone cannot
+    /// preserve COW isolation. If retirement is unconfirmed, the runtime may
+    /// conservatively retain the guard without keeping the object slot visible.
+    /// No temporary list, physical release callback or completion state is owned
+    /// by this operation.
+    pub fn retire_range(
         &self,
         object_start: u64,
         object_len: usize,
-        mut release: impl FnMut(AnonPrivateReleasedPage),
+        mut retire_fn: impl FnMut(RetiredAnonPrivatePage),
     ) {
         let object_end = object_start.saturating_add(object_len as u64);
         loop {
-            let page = {
+            let removed = {
                 let mut pages = self.pages.lock();
-                let Some((&offset, _)) = pages.range(object_start..object_end).next() else {
+                let Some((&start, _)) = pages.range(object_start..object_end).next() else {
                     break;
                 };
-                pages.remove(&offset)
+                pages.remove(&start)
             };
-            if let Some(released) = page.and_then(|page| page.release()) {
-                release(released);
+            if let Some(slot) = removed {
+                retire_fn(RetiredAnonPrivatePage { slot });
             }
         }
     }
 
-    /// Detaches one range of private page slots from this object.
+    /// Reserves logical shares for an unpublished fork child without publication.
     ///
-    /// The caller must first tear down any still-visible PTEs and only then
-    /// finalize the detached slots to release frames whose last object
-    /// reference disappeared.
-    pub fn detach_range(
-        self: &Arc<Self>,
-        object_start: u64,
-        object_len: usize,
-    ) -> DetachedAnonPrivatePages {
-        if object_len == 0 {
-            return DetachedAnonPrivatePages {
-                object: self.clone(),
-                slots: Vec::new(),
-                finalized: true,
-            };
-        }
-        let object_end = object_start.saturating_add(object_len as u64);
-        let keys = {
-            let pages = self.pages.lock();
-            pages
-                .range(object_start..object_end)
-                .map(|(&key, _)| key)
-                .collect::<Vec<_>>()
-        };
-        let removed = {
-            let mut pages = self.pages.lock();
-            keys.iter()
-                .copied()
-                .filter_map(|key| pages.remove(&key))
-                .collect::<Vec<_>>()
-        };
-        DetachedAnonPrivatePages {
-            object: self.clone(),
-            slots: keys.into_iter().zip(removed).collect(),
-            finalized: false,
-        }
-    }
-
-    /// Prepares to share one object range into a fork child while preserving
-    /// lineage, but does not commit child object state until the caller
-    /// finishes page-table installation.
+    /// Hold the source owning-MM mutex through source write protection and child
+    /// mapping/commit. The child must not be runnable. Rollback must exclude any
+    /// child PTE accesses before dropping this preparation. Prepared shares are
+    /// owned guards; observers/PTE references never change their count.
+    ///
+    /// # Errors
+    /// Returns `NoMemory` on logical-share overflow, or `AlreadyExists` on a child
+    /// slot collision. All reserved guards release outside the object-map locks.
     pub fn prepare_fork_child_pages(
         self: &Arc<Self>,
         object_start: u64,
         object_len: usize,
         child: &Arc<Self>,
     ) -> KResult<PreparedAnonPrivateFork> {
-        if object_len == 0 {
-            return Ok(PreparedAnonPrivateFork {
-                child: child.clone(),
-                pages: Vec::new(),
-                committed: true,
-            });
-        }
         let object_end = object_start.saturating_add(object_len as u64);
-        let slots = {
+        let mut copied = Vec::new();
+        {
             let pages = self.pages.lock();
-            pages
-                .range(object_start..object_end)
-                .map(|(&start, handle)| (start, handle.clone()))
-                .collect::<Vec<_>>()
-        };
+            for (&start, slot) in pages.range(object_start..object_end) {
+                copied.push(AnonPrivateForkPage {
+                    object_start: start,
+                    slot: slot.try_clone_slot()?,
+                });
+            }
+        }
         {
             let child_pages = child.pages.lock();
-            for (start, _) in &slots {
-                if child_pages.contains_key(start) {
-                    return Err(KError::AlreadyExists);
-                }
+            if copied
+                .iter()
+                .any(|page| child_pages.contains_key(&page.object_start))
+            {
+                return Err(KError::AlreadyExists);
             }
-        }
-        let mut copied: Vec<AnonPrivateForkPage> = Vec::with_capacity(slots.len());
-        for (start, handle) in slots {
-            if let Err(err) = handle.retain() {
-                for page in copied.drain(..) {
-                    let _ = page.handle.release();
-                }
-                return Err(err);
-            }
-            copied.push(AnonPrivateForkPage {
-                object_start: start,
-                handle,
-            });
         }
         Ok(PreparedAnonPrivateFork {
             child: child.clone(),
             pages: copied,
-            committed: false,
         })
     }
 }

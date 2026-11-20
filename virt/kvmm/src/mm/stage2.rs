@@ -51,6 +51,7 @@ const VTTBR_VMID_SHIFT: u64 = 48;
 ///
 /// Owns the root L1 page. On drop, walks L1 entries to free L2 pages,
 /// then the L1 page itself is freed by `PageRef::drop`.
+/// A failed constructor drops the linked prefix under the same ownership rule.
 pub struct Stage2 {
     l1_page: kalloc::PageRef,
     mem_base: u64,
@@ -62,6 +63,81 @@ pub struct Stage2 {
 impl Stage2 {
     fn root_pa(&self) -> u64 {
         self.l1_page.phys_addr().as_usize() as u64
+    }
+
+    /// The private allocator supplies fresh zeroed exact backing of the requested
+    /// page count and alignment. No candidate or partial mapper is published.
+    fn new_with_allocator(
+        mem_base: u64,
+        mem_size: u64,
+        hpa_base: u64,
+        vmid: u32,
+        allocate: &mut impl FnMut(usize, usize) -> Option<kalloc::PageRef>,
+    ) -> Option<Self> {
+        let mem_end = mem_base.checked_add(mem_size)?;
+
+        // The zero root owns every linked prefix before further allocation.
+        let tables = Self {
+            l1_page: allocate(1, super::PAGE_SIZE_4K)?,
+            mem_base,
+            mem_size,
+            hpa_base,
+            vmid,
+        };
+        let l1_pa = tables.root_pa();
+        let l1_va = kaddr_layout::p2v(l1_pa as usize) as *mut u64;
+
+        // Fill L2 block entries. Only guest RAM is mapped (Normal, RW).
+        // Everything else — device MMIO (GIC, UART, ...) and unbacked IPA — is
+        // left INVALID so the guest faults to EL2 and the VMM emulates it. The
+        // guest must never reach real host devices; the only exception is added
+        // later via `map_region` (GICC → hardware GICV).
+        for i1 in 0..L1_ENTRIES {
+            let page = allocate(1, super::PAGE_SIZE_4K)?;
+            let l2_pa = page.phys_addr().as_usize() as u64;
+            let l2_va = kaddr_layout::p2v(l2_pa as usize) as *mut u64;
+            for i2 in 0..L2_ENTRIES {
+                let ipa = ((i1 as u64) << 30) | ((i2 as u64) << 21);
+                let is_ram = ipa >= mem_base && ipa < mem_end;
+                let entry = if is_ram {
+                    let hpa = hpa_base + (ipa - mem_base);
+                    hpa | LPAE_AF | LPAE_SH_IS | LPAE_MATTR_NORM | LPAE_S2AP_RW | LPAE_VALID
+                } else {
+                    0 // invalid → Stage-2 fault → trap to VMM MMIO emulation
+                };
+                // SAFETY: i2 < L2_ENTRIES, so the offset stays inside this L2 page.
+                let entry_ptr = unsafe { l2_va.add(i2) };
+                // SAFETY: entry_ptr is aligned in an unpublished L2 page we own.
+                unsafe { entry_ptr.write(entry) };
+            }
+            flush_pt_page(l2_va as *const u8);
+            // SAFETY: i1 < L1_ENTRIES; this is the owned unpublished root.
+            let slot = unsafe { l1_va.add(i1) };
+            // SAFETY: page is initialized and flushed; slot is aligned and
+            // unpublished. The following transfer commits it to tables.
+            unsafe { slot.write(l2_pa | LPAE_VALID | LPAE_TABLE) };
+            let _ = page.into_raw();
+        }
+        flush_pt_page(l1_va as *const u8);
+
+        let vtcr = vtcr_t0sz(32)
+            | vtcr_sl0(1)
+            | VTCR_TG0_4K
+            | VTCR_SH0_IS
+            | VTCR_IRGN0_WBWA
+            | VTCR_ORGN0_WBWA
+            | VTCR_PS_36BITS;
+
+        log::info!(
+            "[stage2] init mem={:#x}+{:#x} hpa={:#x} l1_pa={:#x} vtcr={:#x}",
+            mem_base,
+            mem_size,
+            hpa_base,
+            l1_pa,
+            vtcr,
+        );
+
+        Some(tables)
     }
 
     fn destroy(&mut self) {
@@ -83,12 +159,15 @@ impl Stage2 {
                     let l2_entry = unsafe { l2_entry_ptr.read() };
                     if l2_entry & LPAE_VALID != 0 && l2_entry & LPAE_TABLE != 0 {
                         let l3_pa = l2_entry & LPAE_ADDR_MASK;
-                        // SAFETY: l3_pa was allocated by ensure_l3_table.
+                        // SAFETY: this link owns the sole length-one transfer
+                        // from ensure_l3_table. Teardown has ended its use;
+                        // constructor rollback never publishes the root.
                         unsafe { free_pt_page(l3_pa) };
                     }
                 }
 
-                // SAFETY: l2_pa was allocated by us in new().
+                // SAFETY: this link owns the sole length-one L2 transfer.
+                // The mapper is unpublished or its teardown has ended use.
                 unsafe { free_pt_page(l2_pa) };
             }
         }
@@ -97,9 +176,21 @@ impl Stage2 {
     /// Ensure the L2 slot `(l1_idx, l2_idx)` is an L3 table, returning its VA.
     ///
     /// If the slot is already a table, reuses it. If it is a 2 MiB block,
-    /// splits it into 512 identity 4 KiB pages. If it is invalid, allocates a
-    /// zeroed (all-invalid) L3 table. Returns null on allocation failure.
+    /// splits it into 512 4 KiB pages preserving its translation and attributes.
+    /// If it is invalid, allocates a zeroed (all-invalid) L3 table.
+    /// Returns null on allocation failure.
     fn ensure_l3_table(&self, l1_idx: usize, l2_idx: usize) -> *mut u64 {
+        self.ensure_l3_table_with_allocator(l1_idx, l2_idx, &mut super::alloc_table_pages)
+    }
+
+    /// Uses the same fresh zeroed exact allocation contract as the constructor.
+    /// Callers retain the existing mapping lock and valid-index obligations.
+    fn ensure_l3_table_with_allocator(
+        &self,
+        l1_idx: usize,
+        l2_idx: usize,
+        allocate: &mut impl FnMut(usize, usize) -> Option<kalloc::PageRef>,
+    ) -> *mut u64 {
         let l1_va = kaddr_layout::p2v(self.l1_page.phys_addr().as_usize()) as *const u64;
         // SAFETY: the caller checked l1_idx < L1_ENTRIES, so the offset stays
         // inside the owned L1 page.
@@ -123,15 +214,14 @@ impl Stage2 {
             return kaddr_layout::p2v(l3_pa as usize) as *mut u64;
         }
 
-        let l3_page = match kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global) {
-            Ok(p) => p,
-            Err(_) => return core::ptr::null_mut(),
+        let Some(l3_page) = allocate(1, super::PAGE_SIZE_4K) else {
+            return core::ptr::null_mut();
         };
         let l3_va = kaddr_layout::p2v(l3_page.phys_addr().as_usize()) as *mut u64;
-        let l3_pa = l3_page.into_raw().0.as_usize() as u64;
+        let l3_pa = l3_page.phys_addr().as_usize() as u64;
 
         if l2_entry & LPAE_VALID != 0 {
-            // 2 MiB block → populate the L3 with 512 identity 4 KiB pages so
+            // 2 MiB block → populate the L3 with 512 matching 4 KiB pages so
             // the existing mapping is preserved before we overwrite one page.
             let block_pa = l2_entry & LPAE_ADDR_MASK;
             let block_attr = l2_entry & !LPAE_ADDR_MASK & !0x3u64;
@@ -152,6 +242,8 @@ impl Stage2 {
         let l2_slot = unsafe { l2_va.add(l2_idx) };
         // SAFETY: install the L3 table into the aligned L2 slot after it is flushed.
         unsafe { l2_slot.write(l3_pa | LPAE_VALID | LPAE_TABLE) };
+        // The linked table now owns this exact length-one hold.
+        let _ = l3_page.into_raw();
         // SAFETY: cleaning the cache line of a mapped page-table entry at EL2
         // has no memory-safety effect beyond making the write visible.
         unsafe { core::arch::asm!("dc civac, {}", in(reg) l2_slot) };
@@ -255,81 +347,13 @@ impl Drop for Stage2 {
 
 impl GuestMem for Stage2 {
     fn new(mem_base: u64, mem_size: u64, hpa_base: u64, vmid: u32) -> Option<Self> {
-        let mem_end = mem_base.checked_add(mem_size)?;
-
-        // Allocate L1 page (4 entries, but we need a full 4KB page)
-        let l1_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
-        let l1_va = kaddr_layout::p2v(l1_page.phys_addr().as_usize()) as *mut u64;
-        let l1_pa = l1_page.phys_addr().as_usize() as u64;
-
-        // Allocate 4 L2 pages (one per L1 entry)
-        let mut l2_pas = [0u64; L1_ENTRIES];
-        for l2_pa in &mut l2_pas {
-            let page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
-            *l2_pa = page.into_raw().0.as_usize() as u64;
-        }
-
-        // Fill L1 → L2 table entries
-        for (i, &l2_pa) in l2_pas.iter().enumerate() {
-            // SAFETY: i < L1_ENTRIES, so the offset stays inside the owned L1 page.
-            let entry_ptr = unsafe { l1_va.add(i) };
-            // SAFETY: entry_ptr is aligned in the unpublished L1 page we own.
-            unsafe { entry_ptr.write(l2_pa | LPAE_VALID | LPAE_TABLE) };
-        }
-
-        // Fill L2 block entries. Only guest RAM is mapped (Normal, RW).
-        // Everything else — device MMIO (GIC, UART, ...) and unbacked IPA — is
-        // left INVALID so the guest faults to EL2 and the VMM emulates it. The
-        // guest must never reach real host devices; the only exception is added
-        // later via `map_region` (GICC → hardware GICV).
-        for (i1, &l2_pa) in l2_pas.iter().enumerate() {
-            let l2_va = kaddr_layout::p2v(l2_pa as usize) as *mut u64;
-            for i2 in 0..L2_ENTRIES {
-                let ipa = ((i1 as u64) << 30) | ((i2 as u64) << 21);
-                let is_ram = ipa >= mem_base && ipa < mem_end;
-                let entry = if is_ram {
-                    let hpa = hpa_base + (ipa - mem_base);
-                    hpa | LPAE_AF | LPAE_SH_IS | LPAE_MATTR_NORM | LPAE_S2AP_RW | LPAE_VALID
-                } else {
-                    0 // invalid → Stage-2 fault → trap to VMM MMIO emulation
-                };
-                // SAFETY: i2 < L2_ENTRIES, so the offset stays inside this L2 page.
-                let entry_ptr = unsafe { l2_va.add(i2) };
-                // SAFETY: entry_ptr is aligned in an unpublished L2 page we own.
-                unsafe { entry_ptr.write(entry) };
-            }
-        }
-
-        // Flush page table pages from data cache
-        flush_pt_page(l1_va as *const u8);
-        for pa in &l2_pas {
-            flush_pt_page(kaddr_layout::p2v(*pa as usize) as *const u8);
-        }
-
-        let vtcr = vtcr_t0sz(32)
-            | vtcr_sl0(1)
-            | VTCR_TG0_4K
-            | VTCR_SH0_IS
-            | VTCR_IRGN0_WBWA
-            | VTCR_ORGN0_WBWA
-            | VTCR_PS_36BITS;
-
-        log::info!(
-            "[stage2] init mem={:#x}+{:#x} hpa={:#x} l1_pa={:#x} vtcr={:#x}",
-            mem_base,
-            mem_size,
-            hpa_base,
-            l1_pa,
-            vtcr,
-        );
-
-        Some(Self {
-            l1_page,
+        Self::new_with_allocator(
             mem_base,
             mem_size,
             hpa_base,
             vmid,
-        })
+            &mut super::alloc_table_pages,
+        )
     }
 
     fn map_region(&self, gpa: u64, hpa: u64, size: u64, perm: GuestPerm) -> bool {
@@ -514,3 +538,5 @@ fn flush_stage2_tlb() {
         core::arch::asm!("tlbi vmalls12e1is", "dsb ish", "isb",);
     }
 }
+
+unittest::path_mod_test!(allocation_tests, "../../ut-tests/guest_table_allocation.rs");

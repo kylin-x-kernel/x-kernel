@@ -7,7 +7,7 @@
 use alloc::{sync::Arc, vec::Vec};
 
 use anon::{
-    AnonPrivateObject, AnonPrivatePageCommitError, AnonPrivateReleasedPage, AnonPrivateViewGuard,
+    AnonPrivateObject, AnonPrivatePageCommitError, AnonPrivateViewGuard, RetiredAnonPrivatePage,
 };
 use kerrno::{KError, KResult};
 use khal::{
@@ -22,7 +22,7 @@ use vmobj::{
     ObjectViewHit,
 };
 
-use super::{alloc_frame, dealloc_frame, map_paging_err};
+use super::{alloc_frame, map_paging_err};
 use crate::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmBackingKind,
     backend::{BackendOps, FaultCompletion, FaultCompletionResult},
@@ -105,20 +105,21 @@ impl PrivateBackend {
         let object_start = self.object_offset_for(va)?;
         let prepared = self.object.prepare_first_touch_page(object_start)?;
         let frame = alloc_frame(true, self.size)?;
-        if let Err(err) = pgtbl.map_raw(va, frame, self.size, flags) {
-            dealloc_frame(frame, self.size);
-            return Err(map_paging_err(err));
-        }
-        if let Err(err) = prepared.commit(frame, self.size) {
-            if let Ok((_frame, _flags, page_size)) = pgtbl.unmap(va) {
-                assert_eq!(page_size, self.size);
-                pgtbl.finish();
-            }
-            dealloc_frame(frame, self.size);
-            return Err(err);
-        }
+        let paddr = frame.phys_addr();
+        prepared
+            .commit_after(frame, self.size, |candidate| {
+                let reference = candidate
+                    .try_clone_mapping_ref()
+                    .map_err(|_| PagingError::NoMemory)?;
+                pgtbl.map_sized(va, reference, self.size, flags)
+            })
+            .map_err(|error| match error {
+                AnonPrivatePageCommitError::Changed => KError::AlreadyExists,
+                AnonPrivatePageCommitError::InvalidPage => KError::InvalidInput,
+                AnonPrivatePageCommitError::Commit(error) => map_paging_err(error),
+            })?;
         if flags.contains(MappingFlags::EXECUTE) {
-            karch::flush_icache_range(p2v(frame), self.size.into());
+            karch::flush_icache_range(p2v(paddr), self.size.into());
         }
         Ok(())
     }
@@ -355,14 +356,6 @@ impl VmRuntimeOps for PrivateBackend {
     }
 }
 
-/// Releases detached private-anon frames after the caller finished tearing
-/// down every visible PTE that referenced them.
-pub fn release_private_object_pages(pages: Vec<AnonPrivateReleasedPage>) {
-    for page in pages {
-        dealloc_frame(page.phys_addr(), page.page_size());
-    }
-}
-
 pub enum PrivateCowResult {
     Resolved,
     Retry,
@@ -409,28 +402,36 @@ pub fn cow_private_object_page(
         return Ok(PrivateCowResult::Retry);
     }
     let new_frame = alloc_frame(false, size)?;
-    copy_private_page(&page, new_frame, size);
-    let released =
-        match object.replace_page_if_same_after(object_start, &page, new_frame, size, || {
+    let new_paddr = new_frame.phys_addr();
+    copy_private_page(&page, new_paddr, size);
+    let retired =
+        match object.replace_page_if_same_after(object_start, &page, new_frame, size, |candidate| {
+            let reference = candidate
+                .try_clone_mapping_ref()
+                .map_err(|_| PteReplaceError::PageTable(PagingError::NoMemory))?;
             pgtbl
-                .replace_if_same_raw(addr, expected, new_frame, flags)
+                .replace_if_same(addr, expected, reference, flags)
                 .map(|_| ())
         }) {
-            Ok(released) => released,
+            Ok(retired) => retired,
             Err(AnonPrivatePageCommitError::Changed)
             | Err(AnonPrivatePageCommitError::Commit(PteReplaceError::Changed { .. })) => {
-                dealloc_frame(new_frame, size);
                 return Ok(PrivateCowResult::Retry);
             }
+            Err(AnonPrivatePageCommitError::InvalidPage) => return Err(KError::InvalidInput),
             Err(AnonPrivatePageCommitError::Commit(PteReplaceError::PageTable(err))) => {
-                dealloc_frame(new_frame, size);
                 return Err(super::map_paging_err(err));
             }
         };
-    pgtbl.finish();
-    release_private_object_pages(released.into_iter().collect());
+    // Logical sharing must remain conservative while an old private mapping
+    // can still observe this page, even though its physical hold is independent.
+    if pgtbl.try_finish().is_ok() {
+        drop(retired);
+    } else {
+        core::mem::forget(retired);
+    }
     if flags.contains(MappingFlags::EXECUTE) {
-        karch::flush_icache_range(p2v(new_frame), size.into());
+        karch::flush_icache_range(p2v(new_paddr), size.into());
     }
     Ok(PrivateCowResult::Resolved)
 }
@@ -463,26 +464,30 @@ fn cow_unmapped_private_object_page(
     pgtbl: &mut PageTableMut,
 ) -> KResult<PrivateCowResult> {
     let new_frame = alloc_frame(false, size)?;
-    copy_private_page(page, new_frame, size);
-    let released =
-        match object.replace_page_if_same_after(object_start, page, new_frame, size, || {
-            pgtbl.map_raw(addr, new_frame, size, flags)
+    let new_paddr = new_frame.phys_addr();
+    copy_private_page(page, new_paddr, size);
+    let retired =
+        match object.replace_page_if_same_after(object_start, page, new_frame, size, |candidate| {
+            let reference = candidate
+                .try_clone_mapping_ref()
+                .map_err(|_| PagingError::NoMemory)?;
+            pgtbl.map_sized(addr, reference, size, flags)
         }) {
-            Ok(released) => released,
+            Ok(retired) => retired,
             Err(AnonPrivatePageCommitError::Changed)
             | Err(AnonPrivatePageCommitError::Commit(PagingError::AlreadyMapped)) => {
-                dealloc_frame(new_frame, size);
                 return Ok(PrivateCowResult::Retry);
             }
+            Err(AnonPrivatePageCommitError::InvalidPage) => return Err(KError::InvalidInput),
             Err(AnonPrivatePageCommitError::Commit(err)) => {
-                dealloc_frame(new_frame, size);
                 return Err(super::map_paging_err(err));
             }
         };
+    // No old PTE existed at this address; this object's old access is excluded.
+    drop(retired);
     pgtbl.finish();
-    release_private_object_pages(released.into_iter().collect());
     if flags.contains(MappingFlags::EXECUTE) {
-        karch::flush_icache_range(p2v(new_frame), size.into());
+        karch::flush_icache_range(p2v(new_paddr), size.into());
     }
     Ok(PrivateCowResult::Resolved)
 }
@@ -522,14 +527,22 @@ pub fn map_existing_private_object_page(
             install_flags - MappingFlags::WRITE
         };
         pgtbl
-            .map_raw(addr, page.phys_addr(), size, page_flags)
+            .map_sized(addr, page.try_clone_mapping_ref()?, size, page_flags)
             .map_err(super::map_paging_err)?;
     }
     Ok(ExistingPrivatePageResult::Resolved)
 }
 
-/// Tears down a private-anon PTE range, finishes TLB invalidation, then
-/// releases object slots and last-reference frames without a temporary list.
+/// Unmaps a private range and removes its object slots without a release list.
+///
+/// Confirmed retirement drops old logical shares. Unconfirmed retirement keeps
+/// those shares permanently, as for single-page COW, but still removes their
+/// object slots so a new fault cannot restore discarded contents. This reports
+/// software cleanup, not proof of remote revocation on a completion error.
+///
+/// # Errors
+/// Returns a sparse-unmap error with original object slots intact. Completion
+/// errors do not become a new error in the MM's infallible teardown path.
 pub fn unmap_private_object_range(
     object: &Arc<AnonPrivateObject>,
     object_start: u64,
@@ -537,20 +550,47 @@ pub fn unmap_private_object_range(
     size: PageSize,
     pgtbl: &mut PageTableMut,
 ) -> KResult {
+    unmap_private_object_range_with_retirement(
+        object,
+        object_start,
+        range,
+        size,
+        pgtbl,
+        |pgtbl| pgtbl.try_finish().map(|_| ()),
+        core::mem::forget,
+    )
+}
+
+// Private callbacks allow deterministic completion-failure tests without global
+// TLB hooks or leaking fixture pages. Production retains failed shares forever.
+fn unmap_private_object_range_with_retirement(
+    object: &Arc<AnonPrivateObject>,
+    object_start: u64,
+    range: VirtAddrRange,
+    size: PageSize,
+    pgtbl: &mut PageTableMut,
+    finish_fn: impl FnOnce(&mut PageTableMut) -> page_table::TlbFlushResult,
+    retain_fn: impl FnMut(RetiredAnonPrivatePage),
+) -> KResult {
     pgtbl
         .unmap_sparse_region(range.start, range.size(), size)
         .map_err(super::map_paging_err)?;
-    pgtbl.finish();
-    object.release_range_after_unmap(object_start, range.size(), |page| {
-        dealloc_frame(page.phys_addr(), page.page_size());
-    });
+    if finish_fn(pgtbl).is_ok() {
+        object.remove_range(object_start, range.size());
+    } else {
+        // Forget only the affected old shares, not the whole object or its
+        // unaffected slots. PTE retirement retains its own physical holds.
+        object.retire_range(object_start, range.size(), retain_fn);
+    }
     Ok(())
 }
 
 /// Discards one private-anon object range for `MADV_DONTNEED`.
 ///
-/// Object slots and last-reference frames are released after the page table
-/// flush. The final object-side invalidation keeps registered aliases consistent.
+/// Successful PTE removal ends the range's object association. Unconfirmed
+/// old-access retirement retains its removed logical shares conservatively.
+/// Object-side invalidation keeps registered aliases consistent; physical
+/// references retire independently in the page-table/allocator layer.
 pub fn discard_private_object_range(
     object: &Arc<AnonPrivateObject>,
     object_start: u64,
@@ -644,12 +684,14 @@ pub fn clone_private_object_pages_for_fork(
                     )?;
                     return Err(super::map_paging_err(err));
                 }
-                if let Err(err) = new_pgtbl.map_raw(
-                    vaddr,
-                    shared.handle().phys_addr(),
-                    ctx.page_size,
-                    ctx.cow_flags,
-                ) {
+                let mapping = shared
+                    .handle()
+                    .try_clone_mapping_ref()
+                    .map_err(|_| PagingError::NoMemory)
+                    .and_then(|reference| {
+                        new_pgtbl.map_sized(vaddr, reference, ctx.page_size, ctx.cow_flags)
+                    });
+                if let Err(err) = mapping {
                     rollback_private_fork_pages(
                         &mapped,
                         Some((vaddr, parent_flags)),

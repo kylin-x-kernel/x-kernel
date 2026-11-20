@@ -226,9 +226,9 @@ and separate software deadline arbitration. No production PM caller is added.
 
 ## Page-table storage lifetime references
 
-`PagingHandlerImpl::alloc_frame` obtains kalloc's single-page `PageRef` range from the global
+`PagingHandlerImpl::alloc_frame_raw` obtains kalloc's single-page `PageRef` range from the global
 single-page allocation API and transfers one hold to `page_table` as a PA.
-`dealloc_frame` restores and consumes that exact transfer with
+`dealloc_frame_raw` restores and consumes that exact transfer with
 `PageRef::from_raw(pa, 1)`. The allocation adapter drops the length-one component
 of the generic (PA, page-count) raw pair; this table-storage interface remains
 PA-only and is separate from the data-reference `(PA, bytes)` provider.
@@ -357,9 +357,9 @@ invalidation and alias synchronization remain caller obligations.
 
 PA-only callers mechanically use `map_raw`, `map_region_raw`, `remap_raw` and
 `replace_if_same_raw` for externally owned backing. File Folios and file PTEs now
-hold PageRef independently; mremap and file fork acquire managed aliases. Existing
-anonymous COW targets keep their object-owned raw protocol; anonymous, VMM and
-device migration remain separate work. A nearby PageRef does not register a
+hold PageRef independently; mremap and file fork acquire managed aliases. Anonymous
+COW targets and shared/private anonymous PTEs now own independent PageRef holds;
+VMM and device consumers retain their separately documented contracts. A nearby PageRef does not register a
 guard-owned hold for a raw leaf, which retains MP-03's external release
 obligation. No huge split/merge or content-access protocol is added.
 

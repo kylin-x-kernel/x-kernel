@@ -7,16 +7,17 @@ use alloc::{sync::Arc, vec::Vec};
 use core::ops::Deref;
 
 use anon::{AnonSharedObject, AnonSharedViewGuard};
+use kalloc::PageRef;
 use kerrno::{KError, KResult};
 use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
 use ksync::Mutex;
-use memaddr::{MemoryAddr, PhysAddr, VirtAddr, VirtAddrRange};
+use memaddr::{MemoryAddr, VirtAddr, VirtAddrRange};
 use vmobj::{
     MappingViewId, MappingViewKind, MappingViewNotifier, MappingViewSpec, ObjectInvalidateWork,
     ObjectViewHit,
 };
 
-use super::{alloc_frame, dealloc_frame};
+use super::alloc_frame;
 use crate::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmSpace, VmArea, VmBackingInfo, VmBackingKind,
     backend::{
@@ -27,7 +28,7 @@ use crate::{
 
 /// Shared physical pages backing a mapping.
 pub struct SharedPages {
-    pub phys_pages: Vec<PhysAddr>,
+    pages: Vec<PageRef>,
     pub size: PageSize,
 }
 impl SharedPages {
@@ -35,39 +36,31 @@ impl SharedPages {
     pub fn new(size: usize, pgsize: PageSize) -> KResult<Self> {
         let num_pages = divide_page(size, pgsize);
         let mut result = Self {
-            phys_pages: Vec::with_capacity(num_pages),
+            pages: Vec::with_capacity(num_pages),
             size: pgsize,
         };
         for _ in 0..num_pages {
-            result.phys_pages.push(alloc_frame(true, pgsize)?);
+            result.pages.push(alloc_frame(true, pgsize)?);
         }
         Ok(result)
     }
 
     /// Return the number of pages.
     pub fn len(&self) -> usize {
-        self.phys_pages.len()
+        self.pages.len()
     }
 
     /// Returns `true` if there are no pages.
     pub fn is_empty(&self) -> bool {
-        self.phys_pages.is_empty()
+        self.pages.is_empty()
     }
 }
 
 impl Deref for SharedPages {
-    type Target = [PhysAddr];
+    type Target = [PageRef];
 
     fn deref(&self) -> &Self::Target {
-        &self.phys_pages
-    }
-}
-
-impl Drop for SharedPages {
-    fn drop(&mut self) {
-        for frame in &self.phys_pages {
-            dealloc_frame(*frame, self.size);
-        }
+        &self.pages
     }
 }
 
@@ -171,13 +164,13 @@ impl SharedBackend {
         self.page_start + divide_page(start - self.start, self.pages.size)
     }
 
-    fn pages_starting_from(&self, start: VirtAddr) -> &[PhysAddr] {
+    fn pages_starting_from(&self, start: VirtAddr) -> &[PageRef] {
         let start_index = self.page_index_for(start);
         &self.pages[start_index..]
     }
 
-    fn page_for(&self, addr: VirtAddr) -> Option<PhysAddr> {
-        self.pages_starting_from(addr).first().copied()
+    fn page_for(&self, addr: VirtAddr) -> Option<&PageRef> {
+        self.pages_starting_from(addr).first()
     }
 }
 
@@ -225,11 +218,16 @@ impl BackendOps for SharedBackend {
 
     fn map(&self, range: VirtAddrRange, flags: MappingFlags, pgtbl: &mut PageTableMut) -> KResult {
         debug!("Shared::map: {:?} {:?}", range, flags);
-        for (vaddr, paddr) in
+        for (vaddr, page) in
             pages_in(range, self.pages.size)?.zip(self.pages_starting_from(range.start))
         {
             pgtbl
-                .map_raw(vaddr, *paddr, self.pages.size, flags)
+                .map_sized(
+                    vaddr,
+                    page.try_clone_ref().map_err(|_| KError::NoMemory)?,
+                    self.pages.size,
+                    flags,
+                )
                 .map_err(map_paging_err)?;
         }
         Ok(())
@@ -259,7 +257,7 @@ impl BackendOps for SharedBackend {
         };
         match pgtbl.query(addr) {
             Ok((paddr, page_flags, _)) => {
-                if paddr != frame {
+                if paddr != frame.phys_addr() {
                     return Err(KError::BadAddress);
                 }
                 if !page_flags.contains(ctx.access_flags()) {
@@ -268,7 +266,12 @@ impl BackendOps for SharedBackend {
             }
             Err(PagingError::NotMapped) => {
                 pgtbl
-                    .map_raw(addr, frame, self.page_size(), flags)
+                    .map_sized(
+                        addr,
+                        frame.try_clone_ref().map_err(|_| KError::NoMemory)?,
+                        self.page_size(),
+                        flags,
+                    )
                     .map_err(map_paging_err)?;
             }
             Err(_) => return Err(KError::BadAddress),

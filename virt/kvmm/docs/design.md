@@ -67,6 +67,9 @@ Guest unit tests live in `ut-tests/` and are mounted with
 | `ut-tests/vdev.rs` | `vdev::unittest_tests` | 3 common + 1 AArch64 | `unittest` |
 | `ut-tests/selftest.rs` | `selftest::tests` | 1 | `unittest`, AArch64 |
 | `ut-tests/arch/riscv64.rs` | `arch::riscv64::tests` | 1 | `unittest`, RISC-V |
+| `ut-tests/guest_memory.rs` | `mm::tests` | 4 | `unittest`, supported VMM architecture |
+| `ut-tests/guest_table_allocation.rs` | `mm::<backend>::allocation_tests` | 3 | `unittest`, supported VMM architecture |
+| `ut-tests/guest_table_split.rs` | `mm::<backend>::allocation_tests::split` | 2 | `unittest`, AArch64/RISC-V |
 
 The original three cases retain `serial` execution. Two additional device-owner
 tests cover dispatch, destruction and rejected preparation without hardware.
@@ -193,13 +196,55 @@ address; actual accesses retain their existing unsafe hardware/aliasing contract
 The RISC-V root holds four exact independent pages in one PageRef range, with
 its required four-page alignment. All existing buffer paths select exact pages.
 
-Child-table builders use PageRef::into_raw and store its PA under the known
-length-one table-page contract; restoration supplies length one explicitly.
-mm::free_pt_page restores that exact transfer once with PageRef::from_raw after
-hardware use and required translation retirement. Roots and vCPU page vectors
-retain typed holders. This does not add references for mapped guest data pages.
-The per-CPU VMXON allocation intentionally retains an unreclaimed raw hold for
-its existing CPU lifetime. Allocation accounting keeps the prior Global class.
+Child-table builders keep fresh pages typed until initialization and parent
+publication, then transfer the exact length-one hold with `PageRef::into_raw`.
+Each constructor creates its partial mapper immediately after allocating the
+zeroed root. Before another allocation can fail, every earlier child is linked
+under that mapper. Its normal destructor also releases an unpublished linked
+prefix. In particular, EPT's zero root has no PDPT to follow, and Stage-2 never
+stages unlinked raw L2 owners. Unlinked candidates remain local `PageRef` owners.
+
+Private constructor and ensure-table helpers accept an allocation callback with
+requested page count and alignment in bytes. The callback supplies fresh zeroed
+exact backing; production uses the existing Global-class kalloc helper. Kernel
+tests inject failure locally at EPT calls 1..6 and Stage-2/G-stage calls 1..5,
+without global hooks or OOM. Success controls own 6/5/8 base pages respectively;
+G-stage's first call owns its exact four-page root. Ensure-table fixtures cover
+allocation failure before publication, existing-table reuse without allocation,
+split translation/attribute preservation, partial progress and empty-table release.
+A failing architecture fixture also checks reserved `Vm::new` rollback of both
+Global table storage and VirtMem backing.
+
+`mm::free_pt_page` restores each child transfer once after hardware use and
+required translation retirement. Empty Stage-2 L3 and G-stage L0 reclamation
+clears the parent and completes the existing architecture fence before consuming
+the hold. The G-stage terminal fence remains for other range updates. This is
+release ordering within the existing protocol, not a new remote-vCPU shootdown
+mechanism. If a later live-map allocation fails, earlier installed leaves and
+children remain mapper-owned; the operation does not promise transactional rollback.
+Root and vCPU page-vector holders protect storage only. They do not certify guest
+quiescence, software walker exclusion or device completion. The per-CPU VMXON
+allocation intentionally retains its existing unreclaimed CPU-lifetime hold.
+
+### Guest RAM reservation ownership
+
+`GuestRamReservation` owns one exact zeroed `VirtMem` PageRef range. It derives
+its HPA base from that range and never manually returns referenced pages through
+the raw allocator. Sizes must be nonzero, 4-KiB aligned, representable as a host
+usize, and have a nonoverflowing guest end. A reservation can have a non-power-of-two
+page count without implicit compound semantics or spare-page ownership. Allocation
+alignment and second-stage hierarchy/permission policy remain unchanged.
+
+`VmGuestMemory` declares the mapper before its reservation so default field
+destruction releases tables first. While a mapper is being constructed, the
+reservation is already a local owner and drops if construction fails. On success,
+vCPU-held VM Arcs retain both owners through the existing stop/teardown lifecycle;
+`stop_and_join` waits for published vCPU tasks, and other retained VM owners can
+delay final release. Zero-memory VMs skip reservation and mapper construction;
+unreserved VMs have only a mapper and keep their existing external-backing contract.
+No permanent physical reference is added per guest second-stage leaf. The VM owner,
+existing mapping mutex, guest quiescence and architecture operations remain separate
+from ordinary host CPU page-table retirement.
 
 ### vCPU Run-State Machine (`VcpuRunState`)
 

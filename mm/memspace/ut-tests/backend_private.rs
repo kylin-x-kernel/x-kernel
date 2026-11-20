@@ -381,6 +381,8 @@ fn private_cow_write_fault_reports_retry_when_pte_changed() {
         .page_at(0)
         .expect("parent should own one page");
     let child_object = backend.object.fork_child();
+    let replacement = kalloc::alloc_page_ref(kalloc::UsageKind::VirtMem).unwrap();
+    let replacement_pa = replacement.phys_addr();
     let mut child_pt = PageTable::try_new().expect("allocate child page table");
     {
         let mut old_pgtbl = parent_pt.modify();
@@ -401,9 +403,9 @@ fn private_cow_write_fault_reports_retry_when_pte_changed() {
         )
         .expect("fork private page");
 
-        let replacement = PhysAddr::from_usize(0x90_0000);
+        let snapshot = old_pgtbl.query_entry(start).unwrap();
         old_pgtbl
-            .remap_raw(start, replacement, flags - MappingFlags::WRITE)
+            .replace_if_same(start, snapshot, replacement, flags - MappingFlags::WRITE)
             .expect("simulate competing PTE replacement");
         let result = cow_private_object_page(
             &backend.object,
@@ -428,7 +430,7 @@ fn private_cow_write_fault_reports_retry_when_pte_changed() {
             .query(start)
             .expect("competing PTE should remain installed")
             .0,
-        PhysAddr::from_usize(0x90_0000)
+        replacement_pa
     );
 }
 
@@ -505,4 +507,134 @@ fn private_cow_unmapped_write_fault_reports_retry_when_child_map_conflicts() {
         !original_page.is_exclusive(),
         "retry must not drop existing shared refs"
     );
+}
+
+#[def_test(serial)]
+fn private_pte_retains_storage_after_object_and_observer_drop() {
+    let initial = kalloc::global_allocator().usages().get(kalloc::UsageKind::VirtMem);
+    let start = VirtAddr::from_usize(0xb0_0000);
+    let flags = MappingFlags::READ | MappingFlags::WRITE;
+    let backend = PrivateBackend::new(start, PageSize::Size4K);
+    let mut table = PageTable::try_new().unwrap();
+    let mut edit = table.modify();
+    BackendOps::handle_fault(&backend, FaultContext::new(start, PageFaultFlags::WRITE), flags, &mut edit).unwrap();
+    edit.try_finish().unwrap();
+    let observer = backend.object.page_at(0).unwrap();
+    assert!(observer.is_exclusive(), "PTE and observer do not add logical COW owners");
+    let physical = observer.phys_addr();
+    // This inactive fixture has no hardware access when its object is dropped.
+    drop(backend);
+    drop(observer);
+    assert_eq!(edit.query(start).unwrap().0, physical);
+    assert_eq!(kalloc::global_allocator().usages().get(kalloc::UsageKind::VirtMem), initial + PAGE_SIZE_4K);
+    edit.unmap(start).unwrap();
+    assert_eq!(kalloc::global_allocator().usages().get(kalloc::UsageKind::VirtMem), initial + PAGE_SIZE_4K);
+    edit.try_finish().unwrap();
+    assert_eq!(kalloc::global_allocator().usages().get(kalloc::UsageKind::VirtMem), initial);
+}
+
+#[def_test]
+fn failed_sparse_unmap_keeps_object_slots_and_cow_shares_without_rollback() {
+    let start = VirtAddr::from_usize(0x1ff000);
+    let range = VirtAddrRange::from_start_size(start, 2 * PAGE_SIZE_4K);
+    let flags = MappingFlags::READ | MappingFlags::WRITE;
+    let object = anon::AnonPrivateObject::new_root();
+    let mut table = PageTable::try_new().unwrap();
+    let first = object.prepare_first_touch_page(0).unwrap()
+        .commit(super::alloc_frame(true, PageSize::Size4K).unwrap(), PageSize::Size4K)
+        .unwrap();
+    let second = object.prepare_first_touch_page(PAGE_SIZE_4K as u64).unwrap()
+        .commit(super::alloc_frame(true, PageSize::Size4K).unwrap(), PageSize::Size4K)
+        .unwrap();
+    let child = object.fork_child();
+    object.prepare_fork_child_pages(0, range.size(), &child).unwrap().commit().unwrap();
+    let mut edit = table.modify();
+    edit.map(start, first.try_clone_mapping_ref().unwrap(), flags).unwrap();
+    edit.map_sized(start + PAGE_SIZE_4K,
+        super::alloc_frame(true, PageSize::Size2M).unwrap(), PageSize::Size2M, flags).unwrap();
+    edit.try_finish().unwrap();
+    assert!(super::unmap_private_object_range(&object, 0, range, PageSize::Size4K, &mut edit).is_err());
+    assert!(edit.query(start).is_err(), "the failed sparse walk cleared its prefix");
+    assert_eq!(object.page_at(0).unwrap().phys_addr(), first.phys_addr());
+    assert_eq!(object.page_at(PAGE_SIZE_4K as u64).unwrap().phys_addr(), second.phys_addr());
+    assert!(!first.is_exclusive());
+    assert!(!second.is_exclusive());
+    edit.unmap(start + PAGE_SIZE_4K).unwrap();
+    super::unmap_private_object_range(&object, 0, range, PageSize::Size4K, &mut edit).unwrap();
+    assert!(object.page_at(0).is_none());
+    assert!(object.page_at(PAGE_SIZE_4K as u64).is_none());
+    assert!(first.is_exclusive(), "only the child's logical slots remain");
+    assert!(second.is_exclusive());
+}
+
+#[def_test(serial)]
+fn unconfirmed_range_retirement_removes_slots_without_error_or_premature_cow_reuse() {
+    use anon::RetiredAnonPrivatePage;
+    use kalloc::UsageKind;
+    use page_table::TlbFlushError;
+
+    let baseline = kalloc::global_allocator().usages().get(UsageKind::VirtMem);
+    for error in [TlbFlushError::NotReady, TlbFlushError::Deferred,
+        TlbFlushError::TimedOut, TlbFlushError::UnsupportedScope] {
+        let start = VirtAddr::from_usize(0xc0_0000);
+        let flags = MappingFlags::READ | MappingFlags::WRITE;
+        let backend = PrivateBackend::new(start, PageSize::Size4K);
+        let mut table = PageTable::try_new().unwrap();
+        let mut edit = table.modify();
+        for index in [0, 1, 3] {
+            let fault = FaultContext::new(start + index * PAGE_SIZE_4K, PageFaultFlags::WRITE);
+            BackendOps::handle_fault(&backend, fault, flags, &mut edit).unwrap();
+        }
+        edit.try_finish().unwrap();
+        let old_shared = backend.object.page_at(0).unwrap();
+        let old_private = backend.object.page_at(PAGE_SIZE_4K as u64).unwrap();
+        let unaffected = backend.object.page_at(3 * PAGE_SIZE_4K as u64).unwrap();
+        fill_frame_prefix(old_shared.phys_addr(), 0x5a, 64);
+        let child = backend.object.fork_child();
+        backend.object.prepare_fork_child_pages(0, PAGE_SIZE_4K, &child).unwrap()
+            .commit().unwrap();
+        let mut retained: [Option<RetiredAnonPrivatePage>; 2] = [None, None];
+        let mut retired_count = 0;
+        let range = VirtAddrRange::from_start_size(start, 2 * PAGE_SIZE_4K);
+        // Inject completion failure locally. The fixture owns an inactive table;
+        // capture the same guards production forgets so the test can clean up.
+        let result = super::unmap_private_object_range_with_retirement(
+            &backend.object, 0, range, PageSize::Size4K, &mut edit,
+            |_| Err(error), |retired| {
+                let offset = retired_count as u64 * PAGE_SIZE_4K as u64;
+                assert!(backend.object.page_at(offset).is_none(),
+                    "retirement callback must run outside the object-map lock");
+                retained[retired_count] = Some(retired);
+                retired_count += 1;
+            });
+        assert_eq!(result, Ok(()), "no completion error may reach exit's expect");
+        assert_eq!(retired_count, 2);
+        assert!(edit.query(start).is_err());
+        assert!(edit.query(start + PAGE_SIZE_4K).is_err());
+        assert!(backend.object.page_at(0).is_none());
+        assert!(backend.object.page_at(PAGE_SIZE_4K as u64).is_none());
+        assert_eq!(backend.object.page_at(3 * PAGE_SIZE_4K as u64).unwrap().phys_addr(),
+            unaffected.phys_addr());
+        assert!(!old_shared.is_exclusive(), "the sibling must still COW");
+        assert!(old_private.is_exclusive(), "the removed logical guard stays owned");
+
+        BackendOps::handle_fault(&backend, FaultContext::new(start, PageFaultFlags::WRITE),
+            flags, &mut edit).unwrap();
+        let fresh = backend.object.page_at(0).unwrap();
+        assert_ne!(fresh.phys_addr(), old_shared.phys_addr());
+        assert_frame_prefix(fresh.phys_addr(), 0, 64);
+        assert_frame_prefix(old_shared.phys_addr(), 0x5a, 64);
+        assert!(!old_shared.is_exclusive(), "refault cannot end the old share");
+        // Only the fixture drives actual retirement, then ends retained shares.
+        edit.try_finish().unwrap();
+        drop(retained);
+        assert!(old_shared.is_exclusive(), "only the child remains after completion");
+        assert!(!old_private.is_exclusive());
+        BackendOps::unmap(&backend, VirtAddrRange::from_start_size(start, 4 * PAGE_SIZE_4K),
+            &mut edit).unwrap();
+        drop(edit);
+        child.remove_range(0, PAGE_SIZE_4K);
+        drop((old_shared, old_private, unaffected, fresh, child, backend, table));
+        assert_eq!(kalloc::global_allocator().usages().get(UsageKind::VirtMem), baseline);
+    }
 }

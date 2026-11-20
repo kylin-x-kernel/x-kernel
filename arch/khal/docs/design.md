@@ -279,9 +279,9 @@ restore controller access/routing and quiesce competing programming first.
 
 ## Page-table storage lifetime references
 
-`PagingHandlerImpl::alloc_frame` obtains kalloc's single-page `PageRef` range from the global
+`PagingHandlerImpl::alloc_frame_raw` obtains kalloc's single-page `PageRef` range from the global
 single-page allocation API and transfers one hold to `page_table` as a PA.
-`dealloc_frame` restores and consumes that exact transfer with
+`dealloc_frame_raw` restores and consumes that exact transfer with
 `PageRef::from_raw(pa, 1)`. The allocation adapter drops the length-one component
 of the generic (PA, page-count) raw pair; this table-storage interface remains
 PA-only and is separate from the data-reference `(PA, bytes)` provider.
@@ -365,8 +365,9 @@ borrowers, and destination managed leaves must first be unmapped and retired.
 PA-only callers mechanically use `map_raw`, `map_region_raw`, `remap_raw` and
 `replace_if_same_raw` for externally owned backing. File Folios now own PageRef,
 file PTEs acquire independent managed holds, and mremap clones managed source
-holds with map_existing. Anonymous COW targets retain their existing external
-raw ownership; anonymous, VMM and device migration remain separate work. A raw
+holds with map_existing. Anonymous private/shared objects and COW targets now own typed PageRef backing;
+their PTEs hold independent managed references. VMM and device consumers retain
+their separately documented contracts. A raw
 install still transfers no mapping hold. Raw replacement cannot change a managed leaf's normalized PA;
 same-PA updates preserve category, and permission clearing retires its old hold.
 Existing raw release paths using `finish()` can still release backing after an

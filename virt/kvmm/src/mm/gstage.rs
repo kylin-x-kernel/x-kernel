@@ -72,6 +72,7 @@ const fn is_table(pte: u64) -> bool {
 /// Owns the root contiguous page (4 × 4 KiB = 16 KiB). On drop,
 /// walks root entries to free L1 pages and any L0 tables they point
 /// at, then the root page itself is freed by `PageRef::drop`.
+/// A failed constructor drops the linked prefix under the same ownership rule.
 pub struct GStage {
     root_page: kalloc::PageRef,
     vmid: u32,
@@ -108,6 +109,61 @@ impl GStage {
         self.root_page.phys_addr().as_usize() as u64
     }
 
+    /// The private allocator supplies fresh zeroed exact backing of the requested
+    /// page count and alignment. No candidate or partial mapper is published.
+    fn new_with_allocator(
+        mem_base: u64,
+        mem_size: u64,
+        hpa_base: u64,
+        vmid: u32,
+        allocate: &mut impl FnMut(usize, usize) -> Option<kalloc::PageRef>,
+    ) -> Option<Self> {
+        let mem_end = mem_base.checked_add(mem_size)?;
+
+        // Sv39x4 root: 4 contiguous 4KB pages (16KB, 16KB-aligned), zeroed.
+        let tables = Self {
+            root_page: allocate(4, 4 * super::PAGE_SIZE_4K)?,
+            vmid,
+        };
+        let root_pa = tables.root_pa();
+        let root_va = kaddr_layout::p2v(root_pa as usize) as *mut u64;
+
+        // Allocate 4 L1 tables and fill root entries
+        for i in 0..L2_ENTRIES {
+            let l1_page = allocate(1, super::PAGE_SIZE_4K)?;
+            let l1_pa = l1_page.phys_addr().as_usize() as u64;
+            let l1_va = kaddr_layout::p2v(l1_pa as usize) as *mut u64;
+            // Fill L1 with 2 MiB superpage entries. Non-RAM (and any partial
+            // block at either end of the range) stays invalid so guest
+            // accesses trap instead of aliasing host memory.
+            for j in 0..L1_ENTRIES {
+                let gpa = ((i as u64) << 30) | ((j as u64) << BLOCK_SHIFT);
+                let block_end = gpa + BLOCK_SIZE;
+                if gpa < mem_base || block_end > mem_end {
+                    continue;
+                }
+                let hpa = hpa_base + (gpa - mem_base);
+                let pte = pte_addr(hpa) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D | PTE_U;
+                // SAFETY: l1_va is valid; j < L1_ENTRIES.
+                unsafe { Self::table_write(l1_va, j, pte) }
+            }
+            // SAFETY: root_va is the owned unpublished root; i < L2_ENTRIES.
+            // The initialized child is committed before any further allocation.
+            unsafe { Self::table_write(root_va, i, pte_addr(l1_pa) | PTE_V) };
+            let _ = l1_page.into_raw();
+        }
+
+        log::info!(
+            "[gstage] init mem={:#x}+{:#x} hpa={:#x} root_pa={:#x}",
+            mem_base,
+            mem_size,
+            hpa_base,
+            root_pa,
+        );
+
+        Some(tables)
+    }
+
     fn destroy(&mut self) {
         let root_va = kaddr_layout::p2v(self.root_page.phys_addr().as_usize()) as *const u64;
         for i in 0..L2_ENTRIES {
@@ -123,12 +179,14 @@ impl GStage {
                 // SAFETY: l1_va was allocated by `new`; j < L1_ENTRIES.
                 let l1_pte = unsafe { Self::table_read(l1_va, j) };
                 if is_table(l1_pte) {
-                    // SAFETY: L0 pages are only ever installed by
-                    // `ensure_l0_table`, which allocates them via PageRef.
+                    // SAFETY: this link owns the sole length-one transfer
+                    // from ensure_l0_table. Teardown has ended its use;
+                    // constructor rollback never publishes the root.
                     unsafe { free_pt_page(pte_pa(l1_pte)) };
                 }
             }
-            // SAFETY: l1_pa was allocated by `new` and is uniquely owned.
+            // SAFETY: this link owns the sole length-one L1 transfer.
+            // The mapper is unpublished or its teardown has ended use.
             unsafe { free_pt_page(l1_pa) };
         }
     }
@@ -140,9 +198,21 @@ impl GStage {
     /// pages the caller later overwrites change meaning. An already-invalid
     /// slot gets a zeroed (all-invalid) L0 table, which keeps trapping.
     ///
-    /// Returns `None` on allocation failure or an out-of-range index. Callers
-    /// are responsible for the `hfence.gvma` once their writes are complete.
+    /// Callers validate the indices and serialize table access. Returns `None`
+    /// if the parent is absent or allocation fails. Callers are responsible for
+    /// the `hfence.gvma` once their writes are complete.
     fn ensure_l0_table(&self, root_idx: usize, l1_idx: usize) -> Option<*mut u64> {
+        self.ensure_l0_table_with_allocator(root_idx, l1_idx, &mut super::alloc_table_pages)
+    }
+
+    /// Uses the same fresh zeroed exact allocation contract as the constructor.
+    /// Callers retain the existing mapping lock and valid-index obligations.
+    fn ensure_l0_table_with_allocator(
+        &self,
+        root_idx: usize,
+        l1_idx: usize,
+        allocate: &mut impl FnMut(usize, usize) -> Option<kalloc::PageRef>,
+    ) -> Option<*mut u64> {
         let root_va = kaddr_layout::p2v(self.root_page.phys_addr().as_usize()) as *const u64;
         // SAFETY: root_va points to 16 KiB; root_idx < L2_ENTRIES < 2048.
         let root_pte = unsafe { Self::table_read(root_va, root_idx) };
@@ -157,7 +227,7 @@ impl GStage {
             return Some(kaddr_layout::p2v(pte_pa(l1_pte) as usize) as *mut u64);
         }
 
-        let l0_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
+        let l0_page = allocate(1, super::PAGE_SIZE_4K)?;
         let l0_pa = l0_page.phys_addr().as_usize() as u64;
         let l0_va = kaddr_layout::p2v(l0_pa as usize) as *mut u64;
 
@@ -203,51 +273,13 @@ impl GuestMem for GStage {
     /// blocks can install them with 4 KiB granularity via
     /// [`GStage::map_region`].
     fn new(mem_base: u64, mem_size: u64, hpa_base: u64, vmid: u32) -> Option<Self> {
-        let mem_end = mem_base.checked_add(mem_size)?;
-
-        // Sv39x4 root: 4 contiguous 4KB pages (16KB, 16KB-aligned), zeroed.
-        let root_page =
-            kalloc::alloc_zeroed_pages_exact_ref(4, 4 * 4096, kalloc::UsageKind::Global).ok()?;
-        let root_pa = root_page.phys_addr().as_usize() as u64;
-        let root_va = kaddr_layout::p2v(root_pa as usize) as *mut u64;
-
-        // Allocate 4 L1 tables and fill root entries
-        for i in 0..L2_ENTRIES {
-            let l1_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
-            let l1_pa = l1_page.phys_addr().as_usize() as u64;
-            let l1_va = kaddr_layout::p2v(l1_pa as usize) as *mut u64;
-            // Ownership moves into the G-stage table until `destroy`.
-            let _ = l1_page.into_raw();
-
-            // Root entry: non-leaf (V=1, R=W=X=0) pointing to L1
-            // SAFETY: root_va is valid; i < L2_ENTRIES < 2048.
-            unsafe { Self::table_write(root_va, i, pte_addr(l1_pa) | PTE_V) }
-
-            // Fill L1 with 2 MiB superpage entries. Non-RAM (and any partial
-            // block at either end of the range) stays invalid so guest
-            // accesses trap instead of aliasing host memory.
-            for j in 0..L1_ENTRIES {
-                let gpa = ((i as u64) << 30) | ((j as u64) << BLOCK_SHIFT);
-                let block_end = gpa + BLOCK_SIZE;
-                if gpa < mem_base || block_end > mem_end {
-                    continue;
-                }
-                let hpa = hpa_base + (gpa - mem_base);
-                let pte = pte_addr(hpa) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_A | PTE_D | PTE_U;
-                // SAFETY: l1_va is valid; j < L1_ENTRIES.
-                unsafe { Self::table_write(l1_va, j, pte) }
-            }
-        }
-
-        log::info!(
-            "[gstage] init mem={:#x}+{:#x} hpa={:#x} root_pa={:#x}",
+        Self::new_with_allocator(
             mem_base,
             mem_size,
             hpa_base,
-            root_pa,
-        );
-
-        Some(Self { root_page, vmid })
+            vmid,
+            &mut super::alloc_table_pages,
+        )
     }
 
     /// Map `[gpa, gpa + size)` onto `[hpa, hpa + size)` at 4 KiB granularity.
@@ -433,8 +465,12 @@ impl GuestMem for GStage {
                     // SAFETY: l0_va was installed by `ensure_l0_table`.
                     // SAFETY: l1_va is valid; l1_idx < L1_ENTRIES.
                     unsafe { Self::table_write(l1_va, l1_idx, 0) };
-                    // SAFETY: l1_pte referenced an L0 table allocated by
-                    // `ensure_l0_table`, now unreachable from the table.
+                    // Complete the existing invalidation before the final hold
+                    // can return this child to the allocator for reuse.
+                    hfence_gvma();
+                    // SAFETY: l1_pte carries the sole length-one transfer from
+                    // ensure_l0_table. The parent is cleared and the existing
+                    // fence completed under the caller's access exclusion.
                     unsafe { free_pt_page(pte_pa(l1_pte)) };
                 }
             }
@@ -453,3 +489,5 @@ fn hfence_gvma() {
         core::arch::asm!("hfence.gvma", "sfence.vma");
     }
 }
+
+unittest::path_mod_test!(allocation_tests, "../../ut-tests/guest_table_allocation.rs");

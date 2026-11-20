@@ -254,3 +254,10 @@ must restore dirty/WRITEBACK synchronously under existing producer exclusion.
 Live EOF is borrowed owner metadata sampled under the folio lock; no second
 size or per-folio generation is stored. Partial EOF ends a payload so growth
 cannot concatenate bytes across a file-offset gap.
+
+A retained initialized pin can acquire a read-only PTE lifetime reference without
+locking folio contents: PageRef cloning neither reads nor writes bytes. The
+caller still validates file extent and excludes invalidation before publishing.
+COW copying, initialization, writes and device completion retain their separate
+content-access rules. Cache removal never proves or requires final physical
+release; quota follows index membership while mapping holds retire in MM.

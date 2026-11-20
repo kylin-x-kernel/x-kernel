@@ -13,6 +13,7 @@ repository.workspace = true
 ignored = ["kcred", "linux-raw-sys"]
 
 [dependencies]
+kalloc = { workspace = true }
 anon = { workspace = true }
 karch = { workspace = true }
 kerrno = { workspace = true }

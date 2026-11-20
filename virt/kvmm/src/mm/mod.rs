@@ -14,64 +14,50 @@ pub fn alloc_vmid() -> u32 {
     NEXT_VMID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// RAII reservation for allocator-chosen guest RAM backing pages.
+/// Owned lifetime protection for allocator-chosen guest RAM backing pages.
 ///
-/// Dropping this handle returns the reserved pages to the host allocator.
+/// The VM must retain this reservation through all guest accesses and required
+/// translation retirement. Dropping it releases its exact independent page
+/// holds; other `PageRef` holders can keep the backing alive.
 pub struct GuestRamReservation {
-    start_va: usize,
-    npages: usize,
-    hpa_base: u64,
-}
-
-impl Drop for GuestRamReservation {
-    fn drop(&mut self) {
-        log::info!(
-            "[kvmm] releasing guest RAM reservation VA {:#x} ({} pages)",
-            self.start_va,
-            self.npages,
-        );
-        kalloc::global_allocator().dealloc_pages(
-            self.start_va,
-            self.npages,
-            kalloc::UsageKind::VirtMem,
-        );
-    }
+    backing: kalloc::PageRef,
 }
 
 impl GuestRamReservation {
+    /// Return the beginning of the contiguous host physical backing range.
     pub fn hpa_base(&self) -> u64 {
-        self.hpa_base
+        self.backing.phys_addr().as_usize() as u64
     }
 }
 
-/// Reserve backing memory for a guest RAM range in the host allocator.
+/// Reserve zeroed backing memory for a guest RAM range.
 ///
 /// The guest RAM range starts at `mem_base` in the guest physical address space.
 /// The backing host physical range is allocator-chosen and may differ from the
 /// guest base; [`GuestMem::gpa_to_hpa`] translates between them.
+///
+/// Returns `None` for a zero or non-page-aligned size, an overflowing guest
+/// range, a size not representable on the host, or an allocation failure.
+/// Allocation and final release require initialized host page metadata and
+/// direct mapping. VM control-plane callers must retain the reservation until
+/// all guest accesses and required translation retirement have completed.
 pub fn reserve_guest_ram(mem_base: u64, mem_size: u64) -> Option<GuestRamReservation> {
-    let npages = (mem_size as usize) / PAGE_SIZE_4K;
-
-    match kalloc::global_allocator().alloc_pages(npages, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem) {
-        Ok(addr) => {
-            let size = npages * PAGE_SIZE_4K;
-            // SAFETY: `addr` points to `npages` pages just allocated from the
-            // host page allocator, so the full reservation is valid to zero.
-            unsafe {
-                core::ptr::write_bytes(addr as *mut u8, 0, size);
-            }
+    mem_base.checked_add(mem_size)?;
+    let size_bytes = usize::try_from(mem_size).ok()?;
+    if size_bytes == 0 || !size_bytes.is_multiple_of(PAGE_SIZE_4K) {
+        return None;
+    }
+    let npages = size_bytes / PAGE_SIZE_4K;
+    match kalloc::alloc_zeroed_pages_exact_ref(npages, PAGE_SIZE_4K, kalloc::UsageKind::VirtMem) {
+        Ok(backing) => {
             log::info!(
                 "[kvmm] reserved guest RAM GPA {:#x}+{:#x} backed by HPA {:#x} ({} pages)",
                 mem_base,
                 mem_size,
-                kaddr_layout::v2p(addr),
+                backing.phys_addr().as_usize(),
                 npages,
             );
-            Some(GuestRamReservation {
-                start_va: addr,
-                npages,
-                hpa_base: kaddr_layout::v2p(addr) as u64,
-            })
+            Some(GuestRamReservation { backing })
         }
         Err(err) => {
             log::error!(
@@ -95,6 +81,17 @@ pub mod ept;
 pub mod gstage;
 
 pub mod mmio;
+
+/// Supply fresh zeroed exact backing to the private table-allocation callbacks.
+#[cfg(any(
+    target_arch = "aarch64",
+    target_arch = "x86_64",
+    target_arch = "riscv64"
+))]
+fn alloc_table_pages(page_count: usize, alignment_bytes: usize) -> Option<kalloc::PageRef> {
+    kalloc::alloc_zeroed_pages_exact_ref(page_count, alignment_bytes, kalloc::UsageKind::Global)
+        .ok()
+}
 
 /// Free a page-table page given its physical address.
 ///
@@ -134,7 +131,9 @@ pub trait GuestMem: Sized {
     /// range starting at `hpa_base`; everything else gets device attributes or
     /// traps according to the architecture implementation.
     ///
-    /// Returns `None` if page table allocation fails.
+    /// Returns `None` if the guest range overflows or page table allocation
+    /// fails. Failed construction releases the entire unpublished table prefix;
+    /// no root or child table remains owned by the failed attempt.
     fn new(mem_base: u64, mem_size: u64, hpa_base: u64, vmid: u32) -> Option<Self>;
 
     /// Map a region of guest physical address space.

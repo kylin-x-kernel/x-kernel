@@ -45,6 +45,7 @@ const L2_ENTRIES: usize = 512; // PD entries per PDPT entry (2 MiB each)
 ///
 /// Owns the root PML4 page. On drop, walks PML4 → PDPT → PD and frees
 /// all sub-pages, then the PML4 page itself is freed by `PageRef::drop`.
+/// A failed constructor drops the linked prefix under the same ownership rule.
 pub struct Ept {
     pml4_page: kalloc::PageRef,
     mem_base: u64,
@@ -63,71 +64,46 @@ impl Ept {
         pml4_pa | (3 << 3) | 6
     }
 
-    fn destroy(&mut self) {
-        let pml4_va = kaddr_layout::p2v(self.pml4_page.phys_addr().as_usize()) as *const u64;
-        // SAFETY: pml4_va points to a valid 4KB page.
-        let pdpt_entry = unsafe { pml4_va.read() };
-        if pdpt_entry & EPT_READ == 0 {
-            return;
-        }
-
-        let pdpt_pa = pdpt_entry & EPT_ADDR_MASK;
-        let pdpt_ptr = kaddr_layout::p2v(pdpt_pa as usize) as *const u64;
-
-        for i in 0..L1_ENTRIES {
-            // SAFETY: i < L1_ENTRIES, so the offset stays inside the PDPT page.
-            let pd_entry_ptr = unsafe { pdpt_ptr.add(i) };
-            // SAFETY: pd_entry_ptr is an aligned, initialized PDPT entry.
-            let pd_entry = unsafe { pd_entry_ptr.read() };
-            if pd_entry & EPT_READ != 0 {
-                let pd_pa = pd_entry & EPT_ADDR_MASK;
-                // SAFETY: pd_pa was allocated by us in new().
-                unsafe { free_pt_page(pd_pa) };
-            }
-        }
-        // SAFETY: pdpt_pa was allocated by us in new().
-        unsafe { free_pt_page(pdpt_pa) };
-    }
-}
-
-impl Drop for Ept {
-    fn drop(&mut self) {
-        self.destroy();
-    }
-}
-
-impl GuestMem for Ept {
-    fn new(mem_base: u64, mem_size: u64, hpa_base: u64, vmid: u32) -> Option<Self> {
+    /// The private allocator supplies fresh zeroed exact backing of the requested
+    /// page count and alignment. No candidate or partial mapper is published.
+    fn new_with_allocator(
+        mem_base: u64,
+        mem_size: u64,
+        hpa_base: u64,
+        vmid: u32,
+        allocate: &mut impl FnMut(usize, usize) -> Option<kalloc::PageRef>,
+    ) -> Option<Self> {
         let _ = vmid;
         let mem_end = mem_base.checked_add(mem_size)?;
 
-        // Allocate PML4 page
-        let pml4_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
-        let pml4_va = kaddr_layout::p2v(pml4_page.phys_addr().as_usize()) as *mut u64;
-        let pml4_pa = pml4_page.phys_addr().as_usize() as u64;
+        // The zero root makes Drop valid even if the next allocation fails.
+        let tables = Self {
+            pml4_page: allocate(1, super::PAGE_SIZE_4K)?,
+            mem_base,
+            mem_size,
+            hpa_base,
+        };
+        let pml4_pa = tables.pml4_page.phys_addr().as_usize() as u64;
+        let pml4_va = kaddr_layout::p2v(pml4_pa as usize) as *mut u64;
 
         // Allocate PDPT page
-        let pdpt_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
+        let pdpt_page = allocate(1, super::PAGE_SIZE_4K)?;
         let pdpt_va = kaddr_layout::p2v(pdpt_page.phys_addr().as_usize()) as *mut u64;
-        let pdpt_pa = pdpt_page.into_raw().0.as_usize() as u64;
+        let pdpt_pa = pdpt_page.phys_addr().as_usize() as u64;
 
         // PML4[0] → PDPT
         // SAFETY: pml4_va is a valid zeroed 4KB page.
         unsafe {
             pml4_va.write(pdpt_pa | EPT_RWX);
         }
+        // The linked PDPT belongs to tables before another allocation can fail.
+        let _ = pdpt_page.into_raw();
 
         // Allocate 4 PD pages (one per PDPT entry, covering 1 GiB each)
         for i in 0..L1_ENTRIES {
-            let pd_page = kalloc::alloc_zeroed_page_ref(kalloc::UsageKind::Global).ok()?;
+            let pd_page = allocate(1, super::PAGE_SIZE_4K)?;
             let pd_va = kaddr_layout::p2v(pd_page.phys_addr().as_usize()) as *mut u64;
-            let pd_pa = pd_page.into_raw().0.as_usize() as u64;
-
-            // PDPT[i] → PD[i]
-            // SAFETY: i < L1_ENTRIES, so the offset stays inside the PDPT page.
-            let pdpt_entry_ptr = unsafe { pdpt_va.add(i) };
-            // SAFETY: pdpt_entry_ptr is aligned in the unpublished PDPT page we own.
-            unsafe { pdpt_entry_ptr.write(pd_pa | EPT_RWX) };
+            let pd_pa = pd_page.phys_addr().as_usize() as u64;
 
             // Fill PD with 2 MiB large page entries
             for j in 0..L2_ENTRIES {
@@ -145,6 +121,14 @@ impl GuestMem for Ept {
                 // SAFETY: pd_entry_ptr is aligned in an unpublished PD page we own.
                 unsafe { pd_entry_ptr.write(entry) };
             }
+            // PDPT[i] → PD[i]
+            // SAFETY: i < L1_ENTRIES, so the offset stays inside the PDPT page.
+            let pdpt_entry_ptr = unsafe { pdpt_va.add(i) };
+            // SAFETY: pdpt_entry_ptr is aligned in the unpublished PDPT page we own.
+            unsafe { pdpt_entry_ptr.write(pd_pa | EPT_RWX) };
+
+            // Commit this child to the partial mapper before the next request.
+            let _ = pd_page.into_raw();
         }
 
         log::info!(
@@ -155,12 +139,54 @@ impl GuestMem for Ept {
             pml4_pa,
         );
 
-        Some(Self {
-            pml4_page,
+        Some(tables)
+    }
+
+    fn destroy(&mut self) {
+        let pml4_va = kaddr_layout::p2v(self.pml4_page.phys_addr().as_usize()) as *const u64;
+        // SAFETY: the typed root is initialized and remains owned through
+        // destroy. Before PDPT publication this slot is zero, so Drop stops here.
+        let pdpt_entry = unsafe { pml4_va.read() };
+        if pdpt_entry & EPT_READ == 0 {
+            return;
+        }
+
+        let pdpt_pa = pdpt_entry & EPT_ADDR_MASK;
+        let pdpt_ptr = kaddr_layout::p2v(pdpt_pa as usize) as *const u64;
+
+        for i in 0..L1_ENTRIES {
+            // SAFETY: i < L1_ENTRIES, so the offset stays inside the PDPT page.
+            let pd_entry_ptr = unsafe { pdpt_ptr.add(i) };
+            // SAFETY: pd_entry_ptr is an aligned, initialized PDPT entry.
+            let pd_entry = unsafe { pd_entry_ptr.read() };
+            if pd_entry & EPT_READ != 0 {
+                let pd_pa = pd_entry & EPT_ADDR_MASK;
+                // SAFETY: this link owns the sole length-one PD transfer.
+                // The mapper is unpublished or its teardown has ended use.
+                unsafe { free_pt_page(pd_pa) };
+            }
+        }
+        // SAFETY: the root link owns this sole length-one PDPT transfer.
+        // The mapper is unpublished or its teardown has ended use.
+        unsafe { free_pt_page(pdpt_pa) };
+    }
+}
+
+impl Drop for Ept {
+    fn drop(&mut self) {
+        self.destroy();
+    }
+}
+
+impl GuestMem for Ept {
+    fn new(mem_base: u64, mem_size: u64, hpa_base: u64, vmid: u32) -> Option<Self> {
+        Self::new_with_allocator(
             mem_base,
             mem_size,
             hpa_base,
-        })
+            vmid,
+            &mut super::alloc_table_pages,
+        )
     }
 
     fn map_region(&self, _gpa: u64, _hpa: u64, _size: u64, _perm: GuestPerm) -> bool {
@@ -225,3 +251,5 @@ impl GuestMem for Ept {
         true
     }
 }
+
+unittest::path_mod_test!(allocation_tests, "../../ut-tests/guest_table_allocation.rs");

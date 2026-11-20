@@ -105,10 +105,10 @@ to `posix/mm`.
   `pin.map_readonly` PTE publication. Each path records the returned content token
   before releasing that guard.
 - COW copies the retained original object after rechecking EOF and fully
-  initializes the target before conditional publication. The dedicated managed
-  source to external-raw target operation commits only on a matching snapshot.
-  The old hold retires; the existing anonymous object holds the target. Failure
-  before commit drops only the candidate; a committed target cannot be freed as
+  initializes the target before conditional publication. The managed
+  `replace_if_same` operation commits only on a matching snapshot. The old hold
+  retires; the anonymous object and target PTE retain independent PageRef holds.
+  Failure before commit drops only the candidate; a committed target cannot be freed as
   an unpublished candidate.
 - No access permissions means no leaf, token or populated count. Partial
   invalidation removes only corresponding tokens. Physical references survive
@@ -166,3 +166,24 @@ keeps a duplicate immutable length. Write faults still check current inode polic
 The `msync` runtime hook runs without the MM mutex and takes an already checked
 file byte range. Its owned runtime retains the source open file even if its VMA
 is concurrently removed. It must not recover coordinates from live VMA state.
+
+File-copy and private COW candidates are typed exact PageRef allocations. The
+candidate is fully initialized under the existing file-content protocol before
+an expected-slot/expected-PTE transaction publishes its independent mapping
+hold. Rejected candidates release automatically, while successful anonymous
+slots own their backing independently of leaf retirement. No file page reaches
+the anonymous backing owner. Private-anon logical shares and retirement
+follow the memspace/anon contracts; physical reference count is not a COW
+exclusivity proof.
+
+Missing-PTE content-token cleanup does not flush TLBs or allocate a cleanup list.
+It removes only tokens whose leaves are absent and drops them outside the token
+mutex. Present leaves keep their COW source identities; removed leaves keep their
+physical protection in page-table retirement. File invalidation and permission
+revocation still obey their existing consistency/completion contracts.
+
+Private-file anonymous cleanup follows memspace's conservative range-retirement
+policy: a successful PTE walk removes anonymous object association even if TLB
+completion is unconfirmed, retaining the removed logical shares instead of
+returning a new teardown error. Missing-PTE content tokens remain independently
+removable. This does not prove remote revocation on a completion error.

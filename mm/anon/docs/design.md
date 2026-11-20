@@ -1,103 +1,118 @@
 # `mm/anon` Design
 
-Kernel unit tests live in `ut-tests/` and are mounted from their original
-source modules with `unittest::path_mod_test!` under `cfg(unittest)`.
+## Scope and ownership
 
-`mm/anon` owns the Linux-aligned anonymous object boundary.
+`mm/anon` owns shared/private anonymous identities, private fork/COW lineage,
+and object-side mapped views expressed through `vmobj`. Private file-COW result
+pages use the same private object model. Shared storage, content access, page
+faults, permissions, and PTE mutation remain runtime responsibilities.
 
-Current scope:
+`src/private.rs` owns private page identities and logical page slots;
+`src/shared.rs` owns shared identities/views; `src/ids.rs` owns typed identity
+allocation. Kernel unit tests live in `ut-tests/` and are mounted with
+`unittest::path_mod_test!`.
 
-- `AnonSharedObject`: stable owner for shared anonymous mappings.
-- `AnonPrivateObject`: stable owner for private anonymous mappings.
-- `AnonLineageId`: fork/COW lineage identity shared by related private objects.
-- shared-anon mapped views registered through the common `mm/vmobj`
-  `MappingView` language.
-- private-anon mapped views registered through the same `mm/vmobj`
-  `MappingView` language.
+## Physical backing and logical COW shares
 
-Module boundary:
+Each immutable `Arc<AnonPrivatePageState>` owns one `PageRef` and a short locked
+logical-share count. Construction validates the selected page count and physical
+alignment against the requested `PageSize`; the state stores no duplicate size.
+`page_size()` derives the validated leaf size from `PageRef::page_count()`, not
+from allocation order or the possibly larger compound retained range. Exact and
+explicitly compound PageRef values retain their existing allocator protocols;
+contiguity does not imply compound ownership.
 
-- `mm/anon` owns anonymous object identity and lineage.
-- `mm/anon` also owns the anonymous branch of object-side mapped-view/rmap
-  registration.
-- `mm/anon` now also owns private-anon page slots and their fork/COW sharing
-  state.
-- anonymous object identity is typed separately from file-backed object
-  identity through `VmObjectId::Anon(AnonObjectId)`.
-- `mm/memspace` consumes these objects from runtime code to describe VMA
-  backing and fork/COW relationships.
-- `mm/vmobj` remains the shared object/rmap language layer for both file-backed
-  and anonymous reverse-mapping infrastructure.
+A private `AnonPrivatePageSlot` owns one logical share. Slots live in the object
+map, prepared fork reservations, or retired replacement guards.
+Checked fork reservation increments the count; slot Drop decrements it. Moving
+slots between these containers does not alter the count. The last object drops
+its remaining slots.
 
-Runtime role:
+`AnonPrivatePageHandle` is an observer/source handle. Its Clone retains the same
+identity without adding logical shares. `try_clone_mapping_ref()` acquires an
+independent physical hold for a managed PTE without adding a logical owner.
+Physical references and observer counts must never decide COW exclusivity.
 
-- anonymous shared/private runtimes use stable object identities;
-- fork/COW flows through explicit anonymous lineage rather than runtime-local
-  state alone.
-- anonymous shared mappings register formal object-side views through the same
-  `vmobj` language that file-backed mappings use.
-- anonymous private mappings register views so fork/COW descendants and
-  file-private anonymous result pages live in one private-anon object/rmap
-  world.
-- file-private mappings expose their private anonymous result object and
-  lineage through `VmArea.backing()`.
-- private-anon objects produce object-side invalidation work for operations
-  such as `madvise(MADV_DONTNEED)`.
-- `AnonPrivateObject` owns actual private page contents: page slots,
-  fork-shared COW references, and `MADV_DONTNEED` discard state live in the
-  object layer.
-- private-anon page-state updates are transactional:
-  - prepare first-touch page publication in `mm/anon`, install the PTE in the
-    runtime, then commit the page slot into `AnonPrivateObject`;
-  - release private object slots after the runtime has torn down visible PTEs
-    and completed TLB invalidation; transactional detach remains available for
-    callers that need rollback;
-  - prepare fork-shared page state first, then commit it into the child
-    object only after parent write-protect, child page-table installation, and
-    the page-table finalization boundary succeed.
+## Calling context and synchronization
 
-First-touch contract:
+Object maps/views use task-context `ksync::Mutex` and may block. These operations
+require initialized heap, scheduler synchronization, page metadata, and physical
+allocation infrastructure; they are not IRQ/NMI or early-boot interfaces. The
+short existing `SpinNoIrq` count lock covers only a counter operation, never
+allocation, map callbacks, physical release, or a sleepable lock acquisition.
+Physical hold clone/drop retains the underlying `PageRef` context contract.
 
-- `AnonPrivateObject::prepare_first_touch_page()` validates that the object
-  offset is currently empty but does not publish a page slot.
-- `PreparedAnonPrivatePage::commit()` publishes the frame into the object only
-  after the runtime has installed the PTE.
-- the runtime owns the freshly allocated frame until commit succeeds; on read,
-  map, or commit failure it must tear down any visible PTE and release the
-  frame.
-- direct page-slot installation is not part of the public object API; external
-  runtime code must use the prepare/commit path.
+Runtime callers hold the owning-MM mutex across fork/share reservation and
+exclusive check through in-place reuse/writable publication. `is_exclusive()`
+is only a snapshot. A private mapping starts with one root object; split/moved
+views stay within that MM; fork creates a distinct child object whose shares
+already count against exclusivity. This excludes a new logical share between
+an exclusive observation and writable publication. Public callers must preserve
+this association and serialization.
 
-Fork-share contract:
+Lock order remains owning-MM, object-map mutex, then short logical-count lock.
+A commit callback runs under the object-map lock; it must not reenter the object.
+The runtime retains its existing content-access and page-table locking rules.
 
-- `AnonPrivateObject::prepare_fork_child_pages()` retains existing private
-  page slots but does not publish them into the child object.
-- the runtime write-protects the parent PTE, maps the child PTE, and finalizes
-  both page-table mutation batches before committing the child object slots.
-- if any step fails before commit, the prepared fork state drops and releases
-  retained page references; runtime rollback restores parent PTE flags and
-  removes child PTEs installed during the failed transaction.
+## Publication and rollback
 
-COW replacement contract:
+First touch prepares an absent offset. `commit_after(PageRef, PageSize, closure)`
+validates geometry, locks/rechecks the absent slot, and gives the callback a
+reference to the candidate handle. The callback clones PTE lifetime protection
+before publication and returns an error only if the PTE remains unchanged.
+After callback success, object insertion has no fallible step under the
+repository's existing infallible collection-allocation model. Rejected candidates
+release outside the map lock. Typed `commit` supports publication without a
+callback only when the caller excludes access during its fallible operation.
 
-- runtime code must use `replace_page_if_same_after()` when publishing a COW
-  replacement page into an `AnonPrivateObject`.
-- the object slot is rechecked against the page handle observed before copy;
-  if the slot changed, the runtime must drop the prepared frame and retry the
-  fault instead of overwriting the competing slot.
-- the runtime-provided commit closure performs the page-table compare/replace
-  step; object publication happens only after that closure succeeds.
+COW replacement checks the observed identity and invokes the same candidate
+callback while holding the slot lock. It changes the slot only after successful
+PTE compare/replace and returns `RetiredAnonPrivatePage` owning the old logical
+share. Callback/geometry/identity errors leave the old slot intact and release
+only the candidate. No raw PA ownership or released-frame record escapes.
 
-## Allocation-free private range release
+Fork preparation reserves owned logical slots before parent write protection and
+child mapping. Commit checks every child offset before moving any reservation
+into the child. Failure drops uncommitted reservations after map locks release.
+The child remains unpublished/unrunnable; rollback must exclude its accesses and
+restore parent permissions before prepared shares end.
 
-`AnonPrivateObject::release_range_after_unmap` removes one object slot at a
-time and reports last-reference frames outside the page-map lock. The runtime
-must first remove the entire corresponding PTE range and finish TLB invalidation,
-while excluding faults and fork on that mapping. Unlike `detach_range`, this
-path needs no temporary slot/release vectors and cannot roll back PTE changes;
-on page-table teardown failure the runtime leaves slots intact. Transactional
-`detach_range` remains available to callers that need explicit detach rollback.
+Range teardown leaves slots in the original map during the sparse PTE walk;
+a failed walk needs no object rollback or reinsertion. After PTE removal,
+`retire_range` transfers each removed logical share to the runtime outside the
+map mutex. Confirmed access retirement permits `remove_range` to drop those
+guards directly. Unconfirmed completion instead retains the removed guards,
+without keeping stale contents associated with the object. Neither operation
+allocates a key list, release array or detached-slot container. Owning-MM
+exclusion covers the whole operation, including the per-slot callback.
 
-## Atomically Publishing the First Anonymous COW Page
+## Retirement and final destruction
 
-`PreparedAnonPrivatePage::commit_after()` rechecks that the slot is empty while holding the object's page-slot map lock, then runs the caller's atomic PTE update; the owned anonymous page is published only after that update succeeds. If the callback fails, the slot stays empty and the frame remains owned by the caller. File cache pages that have not undergone COW remain owned by filemap and do not enter the anonymous object.
+A removed logical share must remain counted until accesses entitled to its old
+contents have ended. Otherwise a sibling could write in place while an old PTE
+still observes the page, even with enough physical references to prevent free.
+Runtime retains `RetiredAnonPrivatePage` until confirmed old-access retirement.
+A range can end its object association before that boundary by transferring the
+old logical shares through `retire_range`. The current runtime permanently
+retains affected guards when existing completion cannot be confirmed, as for
+single-page COW. This may retain old backing and COW shares indefinitely, but
+never retains the whole object or associates discarded contents with a new
+fault. There is no recovery queue or new TLB protocol in this crate. Removing
+object association or returning from software cleanup does not prove remote
+permission revocation; the synchronous completion contract is separate work.
+
+Final destruction of an object that still owns slots must follow owning-MM
+unmap/completion or equivalent old-access exclusion, since ordinary slot Drop
+ends sharing. An empty object may drop while its removed logical guards remain
+retained independently. Observer handles may drop independently of revocation;
+all physical storage returns through `PageRef` only after its final hold ends.
+The retained logical guard and physical mapping hold solve different problems.
+
+## Validation
+
+`ut-tests/private.rs` uses actual typed allocations. It covers geometry and
+candidate errors, fork overflow/collision rollback, sparse in-place range removal,
+observer/PTE independence from logical shares, a retired share blocking sibling
+reuse, and both directions of object-versus-PTE final physical release. These
+fixtures exercise ownership without publishing hardware PTEs; runtime completion
+and concurrent MM integration need the caller's tests.

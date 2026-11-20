@@ -3,15 +3,11 @@
 // See LICENSES for license details.
 
 //! Memory mapping backends.
-use kalloc::{UsageKind, global_allocator};
+use kalloc::{PageRef, UsageKind};
 use kalloc_types::{AllocFlags, KBox};
 use kerrno::{KError, KResult};
-use khal::{
-    mem::{p2v, v2p},
-    paging::{MappingFlags, PageSize, PageTableMut, PagingError},
-};
-use memacct;
-use memaddr::{DynPageIter, MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
+use khal::paging::{MappingFlags, PageSize, PageTableMut, PagingError};
+use memaddr::{DynPageIter, MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 pub mod linear;
 pub mod private;
 pub mod shared;
@@ -27,36 +23,23 @@ pub fn divide_page(size: usize, pgsize: PageSize) -> usize {
     size >> (pgsize as usize).trailing_zeros()
 }
 
-#[doc(hidden)]
-pub fn alloc_frame(zeroed: bool, size: PageSize) -> KResult<PhysAddr> {
-    let pgsize = size as usize;
-    let num_pages = pgsize / PAGE_SIZE_4K;
-    let vaddr = VirtAddr::from(
-        global_allocator()
-            .alloc_pages(num_pages, pgsize, UsageKind::VirtMem)
-            .map_err(|_| KError::NoMemory)?,
-    );
+/// Allocates one exact anonymous mapping range with typed physical ownership.
+///
+/// The range is aligned to `size`; every base page has an independent reference.
+/// Content access and COW exclusivity remain the caller's separate obligation.
+/// Drop releases this hold; callers never manually free its physical address.
+///
+/// # Errors
+/// Returns `NoMemory` when allocation or memory-accounting admission fails.
+pub fn alloc_frame(zeroed: bool, size: PageSize) -> KResult<PageRef> {
+    let bytes = size as usize;
+    let pages = bytes / PAGE_SIZE_4K;
     if zeroed {
-        // SAFETY: `vaddr` names a freshly allocated virtual region of `pgsize`
-        // bytes, so zero-filling that range is valid.
-        unsafe { core::ptr::write_bytes(vaddr.as_mut_ptr(), 0, pgsize) };
+        kalloc::alloc_zeroed_pages_exact_ref(pages, bytes, UsageKind::VirtMem)
+    } else {
+        kalloc::alloc_pages_exact_ref(pages, bytes, UsageKind::VirtMem)
     }
-    let paddr = v2p(vaddr);
-    if memacct::charge_frame(paddr, pgsize, UsageKind::VirtMem).is_err() {
-        global_allocator().dealloc_pages(vaddr.as_usize(), num_pages, UsageKind::VirtMem);
-        return Err(KError::NoMemory);
-    }
-
-    Ok(paddr)
-}
-
-#[doc(hidden)]
-pub fn dealloc_frame(frame: PhysAddr, align: PageSize) {
-    let vaddr = p2v(frame);
-    let page_size: usize = align.into();
-    let num_pages = page_size / PAGE_SIZE_4K;
-    memacct::uncharge_frame(frame, page_size);
-    global_allocator().dealloc_pages(vaddr.as_usize(), num_pages, UsageKind::VirtMem);
+    .map_err(|_| KError::NoMemory)
 }
 
 #[doc(hidden)]

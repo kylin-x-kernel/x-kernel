@@ -50,3 +50,54 @@ fn overflowing_guest_range_does_not_allocate_table_storage() {
         before
     );
 }
+
+#[def_test(serial)]
+fn guest_reservation_is_exact_zeroed_and_released_only_after_its_last_hold() {
+    const PAGE_BYTES: usize = 4096;
+    let before = kalloc::global_allocator().usages().get(UsageKind::VirtMem);
+    let reservation = super::reserve_guest_ram(0x4000_0000, 3 * PAGE_BYTES as u64).unwrap();
+    assert_eq!(reservation.backing.page_count(), 3);
+    assert_eq!(
+        reservation.hpa_base(),
+        reservation.backing.phys_addr().as_usize() as u64
+    );
+    assert_eq!(
+        kalloc::global_allocator().usages().get(UsageKind::VirtMem),
+        before + 3 * PAGE_BYTES
+    );
+    let bytes = kaddr_layout::p2v(reservation.hpa_base() as usize) as *const u8;
+    // SAFETY: this fixture retains the exact three-page reservation, has not
+    // published it to any guest, and creates only a read-only initialized view.
+    let bytes = unsafe { core::slice::from_raw_parts(bytes, 3 * PAGE_BYTES) };
+    assert!(bytes.iter().all(|&byte| byte == 0));
+    let observer = reservation.backing.try_clone_ref().unwrap();
+    drop(reservation);
+    assert_eq!(
+        kalloc::global_allocator().usages().get(UsageKind::VirtMem),
+        before + 3 * PAGE_BYTES
+    );
+    drop(observer);
+    assert_eq!(
+        kalloc::global_allocator().usages().get(UsageKind::VirtMem),
+        before
+    );
+}
+
+#[def_test(serial)]
+fn invalid_guest_reservation_geometry_allocates_nothing() {
+    let before = kalloc::global_allocator().usages().get(UsageKind::VirtMem);
+    for (base, size) in [
+        (0, 0),
+        (0, 1),
+        (0, 4095),
+        (0, 4097),
+        (0, u64::MAX),
+        (u64::MAX - 4095, 8192),
+    ] {
+        assert!(super::reserve_guest_ram(base, size).is_none());
+        assert_eq!(
+            kalloc::global_allocator().usages().get(UsageKind::VirtMem),
+            before
+        );
+    }
+}

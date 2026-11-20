@@ -13,12 +13,12 @@ use khal::{
 };
 use ksync::Mutex;
 use kvfs::{AddressSpaceViewGuard, MappedFolio, VfsFile};
-use memaddr::{MemoryAddr, PAGE_SIZE_4K, PhysAddr, VirtAddr, VirtAddrRange};
+use memaddr::{MemoryAddr, PAGE_SIZE_4K, VirtAddr, VirtAddrRange};
 use memspace::{
     FaultContext, ForkCloneTarget, InvalidateHandle, MmObserver, MmSpace, VmArea, VmBackingInfo,
     VmBackingKind, VmRuntimeOps, VmRuntimeRef,
     backend::{
-        FaultCompletion, FaultCompletionResult, alloc_frame, dealloc_frame,
+        FaultCompletion, FaultCompletionResult, alloc_frame,
         private::{
             PrivateForkMaterialize, clone_private_object_pages_for_fork, cow_private_object_page,
             discard_private_object_range, map_existing_private_object_page,
@@ -59,7 +59,7 @@ impl FilePrivateRuntime {
         self.file_end.unwrap_or_else(|| self.file.size())
     }
 
-    fn alloc_new_frame(&self, zeroed: bool) -> KResult<PhysAddr> {
+    fn alloc_new_frame(&self, zeroed: bool) -> KResult<kalloc::PageRef> {
         alloc_frame(zeroed, self.size)
     }
 
@@ -87,10 +87,11 @@ impl FilePrivateRuntime {
         let object_start = self.anon_offset_for(va)?;
         let prepared = self.anon.prepare_first_touch_page(object_start)?;
         let frame = self.alloc_new_frame(true)?;
+        let paddr = frame.phys_addr();
 
         // SAFETY: `frame` was freshly allocated for this page and has at
         // least `self.size` bytes of kernel-mapped storage.
-        let buf = unsafe { slice::from_raw_parts_mut(p2v(frame).as_mut_ptr(), self.size as _) };
+        let buf = unsafe { slice::from_raw_parts_mut(p2v(paddr).as_mut_ptr(), self.size as _) };
         let start =
             page_data_offset.unwrap_or_else(|| self.start.as_usize().saturating_sub(va.as_usize()));
         assert!(start < self.size as _);
@@ -115,31 +116,29 @@ impl FilePrivateRuntime {
             let index = object_offset / PAGE_SIZE_4K as u64;
             let page_off = (object_offset % PAGE_SIZE_4K as u64) as usize;
             let step = (max_read - copied).min(PAGE_SIZE_4K - page_off);
-            if let Err(err) = address_space.with_folio_or_create(index, |folio| {
+            address_space.with_folio_or_create(index, |folio| {
                 buf[start + copied..start + copied + step]
                     .copy_from_slice(&folio.data()[page_off..page_off + step]);
                 Ok(())
-            }) {
-                dealloc_frame(frame, self.size);
-                return Err(err);
-            }
+            })?;
             copied += step;
         }
-        if let Err(err) = pgtbl.map_raw(va, frame, self.size, flags) {
-            dealloc_frame(frame, self.size);
-            return Err(memspace::backend::map_paging_err(err));
-        }
-        if let Err(err) = prepared.commit(frame, self.size) {
-            if let Ok((_frame, _flags, page_size)) = pgtbl.unmap(va) {
-                assert_eq!(page_size, self.size);
-                pgtbl.finish();
-            }
-            dealloc_frame(frame, self.size);
-            return Err(err);
-        }
-
+        prepared
+            .commit_after(frame, self.size, |candidate| {
+                let reference = candidate
+                    .try_clone_mapping_ref()
+                    .map_err(|_| PagingError::NoMemory)?;
+                pgtbl.map_sized(va, reference, self.size, flags)
+            })
+            .map_err(|error| match error {
+                anon::AnonPrivatePageCommitError::Changed => KError::AlreadyExists,
+                anon::AnonPrivatePageCommitError::InvalidPage => KError::InvalidInput,
+                anon::AnonPrivatePageCommitError::Commit(error) => {
+                    memspace::backend::map_paging_err(error)
+                }
+            })?;
         if flags.contains(MappingFlags::EXECUTE) {
-            karch::flush_icache_range(p2v(frame), self.size.into());
+            karch::flush_icache_range(p2v(paddr), self.size.into());
         }
         Ok(())
     }
@@ -165,25 +164,26 @@ impl FilePrivateRuntime {
         let Ok(start) = self.local_offset_for(range.start) else {
             return;
         };
-        // Cleared file leaves have transferred their independent physical holds
-        // into page-table retirement. Keep content tokens only for present PTEs;
-        // releasing a cleared token does not depend on TLB completion.
-        pgtbl.finish();
-        let mut unmapped_offsets = alloc::vec::Vec::new();
-        let mut addr = range.start;
-        while addr < range.end {
-            if matches!(pgtbl.query(addr), Err(PagingError::NotMapped)) {
-                unmapped_offsets.push(
-                    start.saturating_add(
-                        addr.as_usize().saturating_sub(range.start.as_usize()) as u64
-                    ),
-                );
-            }
-            addr += self.size as usize;
-        }
-        for offset in unmapped_offsets {
-            let removed = self.file_pages.lock().remove(&offset);
-            drop(removed);
+        let end = start.saturating_add(range.size() as u64);
+        let mut cursor = start;
+        loop {
+            let removed = {
+                let mut pages = self.file_pages.lock();
+                let mut absent = pages.extract_if(cursor..end, |&offset, _| {
+                    // Cleared leaves keep their physical holds in PTE
+                    // retirement. Content tokens need no completion wait.
+                    matches!(
+                        pgtbl.query(self.start + offset as usize),
+                        Err(PagingError::NotMapped)
+                    )
+                });
+                absent.next()
+            };
+            let Some((offset, token)) = removed else {
+                break;
+            };
+            cursor = offset + 1;
+            drop(token);
         }
     }
 
@@ -243,7 +243,6 @@ impl FilePrivateRuntime {
                         }
                         Err(err) => {
                             let rollback = pgtbl.unmap(va);
-                            pgtbl.finish();
                             if !matches!(rollback, Ok(_) | Err(PagingError::NotMapped)) {
                                 pages.insert(object_start, mapped);
                             }
@@ -300,32 +299,31 @@ impl FilePrivateRuntime {
             }
             let prepared = self.anon.prepare_first_touch_page(anon_offset)?;
             let frame = self.alloc_new_frame(false)?;
+            let paddr = frame.phys_addr();
             // SAFETY: file tokens are installed only for Size4K mappings, so
             // frame is a fresh exclusive allocation of PAGE_SIZE_4K bytes.
             // MaybeUninit accepts its contents; copying initializes the whole
             // array under the source lock before any PTE exposes the frame.
             let destination = unsafe {
-                &mut *p2v(frame)
+                &mut *p2v(paddr)
                     .as_mut_ptr()
                     .cast::<[MaybeUninit<u8>; PAGE_SIZE_4K]>()
             };
-            if let Err(error) = source.copy_to_uninit(destination) {
-                dealloc_frame(frame, self.size);
-                return Err(error);
-            }
-            if let Err(err) = prepared.commit_after(frame, self.size, || {
-                // SAFETY: frame is the exclusively allocated candidate, owned
-                // by this caller until commit_after publishes its anonymous slot.
-                // The old file PTE is managed; replacement retires its own hold.
-                unsafe { pgtbl.replace_managed_with_external_if_same(addr, expected, frame, flags) }
+            source.copy_to_uninit(destination)?;
+            if let Err(err) = prepared.commit_after(frame, self.size, |candidate| {
+                let reference = candidate
+                    .try_clone_mapping_ref()
+                    .map_err(|_| page_table::PteReplaceError::PageTable(PagingError::NoMemory))?;
+                pgtbl
+                    .replace_if_same(addr, expected, reference, flags)
                     .map(|_| ())
             }) {
-                dealloc_frame(frame, self.size);
                 return match err {
                     anon::AnonPrivatePageCommitError::Changed
                     | anon::AnonPrivatePageCommitError::Commit(
                         page_table::PteReplaceError::Changed { .. },
                     ) => Ok(Some(PrivateCowResult::Retry)),
+                    anon::AnonPrivatePageCommitError::InvalidPage => Err(KError::InvalidInput),
                     anon::AnonPrivatePageCommitError::Commit(
                         page_table::PteReplaceError::PageTable(err),
                     ) => Err(memspace::backend::map_paging_err(err)),
@@ -335,7 +333,7 @@ impl FilePrivateRuntime {
             let removed = self.file_pages.lock().remove(&local_offset);
             drop(removed);
             if flags.contains(MappingFlags::EXECUTE) {
-                karch::flush_icache_range(p2v(frame), self.size.into());
+                karch::flush_icache_range(p2v(paddr), self.size.into());
             }
             Ok(Some(PrivateCowResult::Resolved))
         })
@@ -775,7 +773,7 @@ impl VmRuntimeOps for FilePrivateRuntime {
                     file_pages.lock().insert(offset, mapped);
                 }
                 drop(pins);
-                // Anonymous child slots and their manual frame references commit
+                // Anonymous child logical slots commit
                 // only after every file mapping has succeeded. This helper rolls
                 // back its own PTE updates and references on any failure.
                 clone_private_object_pages_for_fork(

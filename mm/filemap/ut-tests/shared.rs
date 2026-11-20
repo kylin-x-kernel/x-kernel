@@ -237,7 +237,7 @@ fn shared_relocation_releases_seal_registrations(fail_preparation: bool) {
     use memfs::shmem;
     use memspace::{
         MmSpace, VmArea,
-        backend::{alloc_frame, dealloc_frame},
+        backend::alloc_frame,
     };
 
     let location = shmem::create_memfd_file("shared-relocation-seals", true, kcred::initial_cred())
@@ -297,10 +297,11 @@ fn shared_relocation_releases_seal_registrations(fail_preparation: bool) {
         .expect("shared source snapshot");
     if fail_preparation {
         let collision = alloc_frame(true, PageSize::Size4K).expect("destination collision frame");
+        let collision_pa = collision.phys_addr();
         guard
             .page_table_mut()
             .modify()
-            .map_raw(target + PAGE_SIZE_4K, collision, PageSize::Size4K, flags)
+            .map_sized(target + PAGE_SIZE_4K, collision, PageSize::Size4K, flags)
             .expect("force second destination PTE preparation failure");
         assert!(
             guard
@@ -311,7 +312,7 @@ fn shared_relocation_releases_seal_registrations(fail_preparation: bool) {
         assert!(guard.page_table().query(target).is_err());
         assert_eq!(
             guard.page_table().query(target + PAGE_SIZE_4K).unwrap().0,
-            collision
+            collision_pa
         );
         let mut pgtbl = guard.page_table_mut().modify();
         pgtbl
@@ -319,7 +320,6 @@ fn shared_relocation_releases_seal_registrations(fail_preparation: bool) {
             .expect("remove test collision");
         pgtbl.finish();
         drop(pgtbl);
-        dealloc_frame(collision, PageSize::Size4K);
         guard
             .unmap(start, len)
             .expect("unmap original source after failed move");

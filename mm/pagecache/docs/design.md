@@ -114,11 +114,12 @@ half-open byte range that is rounded outward to folio boundaries:
 - the scan advances a cursor across bounded batches, so a dirty folio does not
   stall the rest and the range is visited once.
 
-The operation only touches page-cache state. Callers must already have removed
-the user PTEs and completed the matching TLB invalidation for every mapping
-view covering the range, because discarding a folio returns its physical frame
-to the allocator immediately. Serialization with cache population and with
-truncate belongs to the owning `kvfs::AddressSpace`, not to this container.
+The operation only touches page-cache state. Cache detachment releases cache
+ownership and residency quota; managed PTEs independently retain physical
+backing through translation retirement. The container has no TLB completion
+prerequisite for physical safety. Serialization with cache population, truncate
+and mapping revocation belongs to `kvfs::AddressSpace` and its file-consistency
+contract.
 
 ### Writeback
 
@@ -450,3 +451,8 @@ and copying of the existing prefix. Partial EOF reserves only its valid bytes.
 Geometric rounding preserves the previous Vec capacity bound across windows
 (at most 128 KiB for 31 data pages). Capacity is not prepared work and consumes
 no extra budget. There is no retained buffer pool, cached size or new field.
+
+Read-only PTE publication from a PinnedFolio clones the immutable backing's
+PageRef without taking its content lock. It reads no page bytes. The retained
+content identity and its lock remain necessary for later private-file COW;
+copying, buffered writes and shared write admission keep their access protocol.

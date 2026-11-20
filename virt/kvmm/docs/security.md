@@ -35,11 +35,43 @@ use of that table page and complete all required translation retirement before
 calling; this boundary consumes the transfer exactly once. An address lookup
 alone cannot establish ownership or hardware quiescence.
 
-The EPT, Stage-2 and G-stage page-table builders transfer child-page holds into
-raw addresses stored in parent entries. Their destruction paths call
-`free_pt_page` for those child pages, while root-page fields retain their own
-`PageRef` holders. These ownership holders protect storage lifetime; they do not
-perform translation retirement or prove that a vCPU has stopped using a table.
+The EPT, Stage-2 and G-stage constructors create a typed partial mapper before
+allocating children. Every linked parent descriptor carries one length-one raw
+transfer; every unlinked candidate remains a local typed owner. The private
+allocation callback must return fresh zeroed exact backing with the requested
+page count and alignment. This is a trusted internal contract, not a driver or
+guest allocation interface. Zero roots make partial destruction safe: EPT
+`destroy` reads its owned root but does not follow an absent PDPT; Stage-2 and
+G-stage skip invalid descriptors and distinguish child tables from data leaves.
+Stage-2 links each L2 before requesting the next, so no raw unlinked ownership
+escapes cleanup. Failed construction has never published its root to an observer.
+
+The same raw-transfer rule applies to runtime ensure-table helpers. They prepare
+an unpublished typed child, publish its parent link, and transfer the hold in an
+infallible commit window. Allocation failure leaves that slot unchanged. Earlier
+successful live updates remain owned if a later allocation fails; false does not
+mean the whole operation made no change. Existing mapping-lock and caller
+quiescence requirements still apply. Empty G-stage L0 removal now clears the
+parent and executes the existing `hfence_gvma` before `free_pt_page`, as required
+by the release boundary. The final range fence is retained. This does not establish
+new remote-vCPU synchronization or replace the caller's hardware-use obligations.
+
+Guest RAM reservation validates nonzero page-aligned host-representable size and
+a checked guest end before admission. Its exact `VirtMem` PageRef keeps every
+reserved base page alive and zeroes backing before publication. Drop releases
+only those holds, allowing another holder to delay reuse. `VmGuestMemory` field
+order destroys its mapper before the reservation; construction failure unwinds
+table children before the caller's reservation drops. vCPU-held VM Arcs and the
+existing stop/join/architecture operations retain access-lifetime responsibility.
+A physical reference does not certify guest, translation or device completion.
+Externally supplied memslots remain outside this ownership conversion.
+
+Serial kernel fixtures force each constructor allocation ordinal through a local
+callback, verify exact page geometry/accounting and late VM-build backing rollback,
+and exercise ensure-table failure, reuse and empty-table release. Guest-reservation
+tests check a three-page exact allocation, zeroing, last-holder release and rejected
+geometry. Inactive fixtures establish ownership cleanup and descriptor behavior;
+they do not prove hardware TLB completion, remote-vCPU safety or guest-entry support.
 
 ## Timer Residency Security
 

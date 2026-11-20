@@ -12,13 +12,13 @@ use super::{MappingFlags, PageSize, PageTable, PagingHandlerImpl};
 #[def_test]
 fn handler_keeps_the_transferred_reference_until_table_retirement() {
     let _guard = NoPreemptIrqSave::new();
-    let pa = PagingHandlerImpl::alloc_frame().unwrap();
+    let pa = PagingHandlerImpl::alloc_frame_raw().unwrap();
     // SAFETY: consumes this handler's exact transfer before any table/hardware
     // use; after cloning we transfer its original hold back to the handler.
     let owner = unsafe { PageRef::from_raw(pa, 1) };
     let observer = owner.try_clone_ref().unwrap();
     assert_eq!(owner.into_raw(), (pa, 1));
-    PagingHandlerImpl::dealloc_frame(pa);
+    PagingHandlerImpl::dealloc_frame_raw(pa);
 
     // A live observer keeps the page out of inventory after the handler drops
     // its hold. Neither allocation is ever installed as an active hardware table.
@@ -236,54 +236,6 @@ fn managed_alias_retains_real_page_after_source_retirement() {
         before + memaddr::PAGE_SIZE_4K
     );
     edit.try_finish().unwrap();
-    assert_eq!(
-        kalloc::global_allocator().usages().get(UsageKind::VirtMem),
-        before
-    );
-}
-
-#[def_test(serial)]
-fn managed_to_external_replacement_keeps_raw_target_externally_owned() {
-    let _guard = NoPreemptIrqSave::new();
-    let before = kalloc::global_allocator().usages().get(UsageKind::VirtMem);
-    let mut table = PageTable::try_new().unwrap();
-    let source = alloc_page_ref(UsageKind::VirtMem).unwrap();
-    let target = alloc_page_ref(UsageKind::VirtMem).unwrap();
-    let target_pa = target.phys_addr();
-    let address = 0xa000000usize.into();
-    let mut edit = table.modify();
-    edit.map(address, source, MappingFlags::READ).unwrap();
-    edit.try_finish().unwrap();
-    let expected = edit.query_entry(address).unwrap();
-    // SAFETY: target retains this exact allocation until the inactive raw leaf
-    // is removed and its retirement completes below. It is not consumed by PTE
-    // publication or treated as an unpublished candidate after success.
-    unsafe {
-        edit.replace_managed_with_external_if_same(
-            address,
-            expected,
-            target_pa,
-            MappingFlags::READ | MappingFlags::WRITE,
-        )
-    }
-    .unwrap();
-    assert_eq!(edit.query(address).unwrap().0, target_pa);
-    assert_eq!(
-        kalloc::global_allocator().usages().get(UsageKind::VirtMem),
-        before + 2 * memaddr::PAGE_SIZE_4K
-    );
-    edit.try_finish().unwrap();
-    assert_eq!(
-        kalloc::global_allocator().usages().get(UsageKind::VirtMem),
-        before + memaddr::PAGE_SIZE_4K
-    );
-    edit.unmap(address).unwrap();
-    edit.try_finish().unwrap();
-    assert_eq!(
-        kalloc::global_allocator().usages().get(UsageKind::VirtMem),
-        before + memaddr::PAGE_SIZE_4K
-    );
-    drop(target);
     assert_eq!(
         kalloc::global_allocator().usages().get(UsageKind::VirtMem),
         before

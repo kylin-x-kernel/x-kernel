@@ -28,11 +28,11 @@ impl MappingPages {
     /// errors propagate unchanged.
     ///
     /// Locking: the caller must not hold the mapping state lock or a folio
-    /// lock. Every view covering the range must have completed PTE removal and
-    /// TLB invalidation before this call, because a discarded folio returns its
-    /// physical frame to the allocator immediately. Task context only; may
-    /// sleep waiting for writeback and returns `InvalidInput` before mutation
-    /// outside sleepable task context.
+    /// lock. The owner serializes cache population and mapping revocation for
+    /// its file-consistency contract. Detachment releases cache ownership and
+    /// quota; managed PTEs retain their own backing until translation retirement.
+    /// Task context only; may sleep waiting for writeback and returns
+    /// `InvalidInput` before mutation outside sleepable task context.
     pub fn invalidate_pages_range(&self, start: u64, end: u64) -> KResult<()> {
         let wait = CompletionWait::prepare()?;
         // Decide emptiness on the byte range before rounding: outward rounding

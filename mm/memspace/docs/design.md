@@ -307,18 +307,23 @@ If applying a single request fails, `MmSpace` puts it back at the tail of the qu
 ### Private anonymous discard / COW
 
 Private-anon and private-file teardown share `unmap_private_object_range`.
-After detaching the object slots, it calls the page-table sparse range API,
-which skips absent subtrees instead of probing every virtual page from the
-root. It retains the runtime's uniform page size, address-space lock, explicit
-TLB finish, and final object/frame release. The shared helper also serves
-private discard and address-space cleanup; VMA deletion, object-page indexing,
-shared backends, and intermediate page-table reclamation are unchanged.
+It calls the page-table sparse range API while keeping original logical slots
+in the object. The sparse walk skips absent subtrees instead of probing every
+virtual page from the root and retains the runtime's uniform page size and
+address-space lock. A failed walk leaves slots intact. Successful PTE removal
+ends their object association: confirmed access retirement drops the removed
+logical shares; unconfirmed completion retains those guards permanently. PTE
+physical holds retire independently in the page-table layer. The shared helper
+also serves private discard and address-space cleanup without changing VMA
+coordinate or intermediate page-table reclamation policy.
 
 - Post-write private pages of `AnonymousPrivate` and `FilePrivate` are held by
   `AnonPrivateObject`.
-- `MADV_DONTNEED` converts the VMA range into an object range through the runtime; the
-  private-anon helper then detaches the object page slots, unmaps present PTEs, and releases the frames after TLB
-  finalization completes.
+- `MADV_DONTNEED` converts the VMA range into an object range through the runtime.
+  The helper unmaps present PTEs and removes logical object slots in place.
+  Confirmed access retirement ends the removed shares; unconfirmed completion
+  retains their guards without exposing discarded contents through a refault.
+  Physical pages return only after every object/observer/PTE hold ends.
 - A COW write fault uses an object slot comparison and the PTE snapshot comparison of `PageTableMut::replace_if_same()`.
   A change on either side returns a retry-class outcome.
 
@@ -409,13 +414,16 @@ dirty tracking.
    writeback in separate owner crates.
 
 7. relocation source retirement is separate from ordinary runtime unmap.
-   Reason: ordinary private/file-private unmap may detach backing object pages;
-   successful relocation only retires the old virtual role.
+   Reason: ordinary private/file-private unmap removes logical object slots;
+   successful relocation retains those slots and only retires the old virtual role.
 
 ## Drop / Resource Release
 
 - `MmSpace::clear()` cleans up the present PTEs of all VMAs through runtime unmap.
-- `PageTableMut::finish()` is the TLB finalization boundary before detached frames are released.
+- Page-table retirement retains managed physical holds through TLB completion.
+  Successful sparse unmap removes private object slots without a release list.
+  Their logical shares end only after old-access retirement; unconfirmed
+  completion retains removed shares rather than returning a new teardown error.
 - After `VmAreaSet` is cleared, the VMA metadata and the runtime references are released together.
 - File/anon object view guards are released together with the runtime/object references, and the views are unregistered.
 
@@ -526,3 +534,47 @@ retires its holds while destination holds independently retain the same pages.
 Folio/content-token release has no TLB-completion dependency. Existing finish
 advances retirement; global synchronous return guarantees remain a separate
 TODO, with no new retry, pending-state or recovery engine introduced here.
+
+## Anonymous object and mapping holds
+
+`alloc_frame` allocates an exact, page-size-aligned PageRef range using the
+existing physical-accounting admission. Private anonymous first touch and
+file-private copies initialize the candidate before `commit_after` installs an
+independent managed PTE hold and commits the logical object slot. COW uses both
+the expected object identity and PTE snapshot; rejection drops the unpublished
+candidate without a raw free. Shared anonymous `SharedPages` owns typed ranges
+and lends a separate managed hold to each installed leaf, preserving its eager
+allocation and shared-content policy. Huge leaves use exact ranges; this does
+not imply a compound allocation or introduce splitting.
+
+Logical COW shares belong to object slots, including reserved fork slots; PTEs
+and temporary observer handles do not contribute. The owning MM lock covers
+exclusive-reuse decisions through writable PTE publication and source fork
+reservation. Removing a physical hold and ending a private owner's access are
+different events. A replaced logical slot remains in its retirement guard
+through the existing `try_finish` boundary. Range unmap keeps slots in the
+object during the sparse walk, then transfers each removed logical share outside
+the map mutex. On confirmed completion each guard drops; otherwise the runtime
+forgets only those affected guards, as for committed single-page COW. It returns
+normal software cleanup rather than `WouldBlock` into infallible MM teardown.
+A subsequent fault therefore cannot restore old discarded object contents.
+No temporary release list, rollback insertion, recovery queue or new TLB failure
+state is introduced. Observer handles can end independently. These results do
+not prove remote revocation after a completion error; the synchronous TLB
+contract is separate work.
+
+Fork prepares logical shares, write-protects the parent and installs managed
+child PTEs before committing the child slots. Child rollback has no published
+runnable child access; failed preparation restores parent flags and removes
+only installed child leaves. A failed sparse unmap leaves original slot records
+intact, including the cleared PTE prefix; later faults can rematerialize those
+mappings. Physical references retire in the page-table layer, so object removal
+cannot return still-mapped storage to inventory. An inactive-table
+regression checks that final PTE retirement, rather than backend destruction,
+returns the last physical allocation.
+
+`alloc_frame` returns a typed `PageRef`; there is no memspace raw allocation/free
+pair. Test fixtures own PageRef values too; tests of externally owned linear
+mappings borrow physical addresses while retaining those owners. The separate
+page-table storage adapter names its PA transfers `alloc_frame_raw` and
+`dealloc_frame_raw`, keeping raw ownership explicit.
