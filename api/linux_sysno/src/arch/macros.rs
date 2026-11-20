@@ -142,9 +142,22 @@ macro_rules! syscall_enum {
                 Self::$first_syscall
             }
 
-            /// Returns the last syscall in the table.
+            /// Returns the syscall with the largest numeric identifier.
             pub const fn last() -> Self {
-                Self::ALL[Self::ALL.len() - 1]
+                let mut last = Self::ALL[0];
+                let mut index = 1;
+                while index < Self::ALL.len() {
+                    if Self::ALL[index].id() > last.id() {
+                        last = Self::ALL[index];
+                    }
+                    index += 1;
+                }
+                last
+            }
+
+            /// Returns the largest numeric identifier in the table.
+            pub const fn max_id() -> usize {
+                Self::last().id() as usize
             }
 
             /// Returns the syscall number.
@@ -165,8 +178,11 @@ macro_rules! syscall_enum {
 
             /// Returns the length of the syscall table, including any gaps.
             /// This is not the same thing as the total number of syscalls.
+            ///
+            /// Derived from the largest identifier, not from the declaration
+            /// order of `ALL`, so extension blocks may be added anywhere.
             pub const fn table_size() -> usize {
-                (Self::last().id() - Self::first().id()) as usize + 1
+                Self::max_id() - Self::first().id() as usize + 1
             }
 
             /// Returns an iterator that iterates over all possible syscalls.

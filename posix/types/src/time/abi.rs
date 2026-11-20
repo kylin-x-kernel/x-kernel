@@ -246,6 +246,9 @@ unsafe impl UserRead for itimerval {}
 // SAFETY: these time structs are POD syscall carriers whose fields are validated
 // by the conversion helpers when semantic checks are needed.
 unsafe impl UserRead for timespec {}
+// SAFETY: `__kernel_timespec` is a POD syscall carrier whose fields are
+// validated by the conversion helpers when semantic checks are needed.
+unsafe impl UserRead for __kernel_timespec {}
 // SAFETY: these time structs are POD syscall carriers whose fields are validated
 // by the conversion helpers when semantic checks are needed.
 unsafe impl UserRead for timeval {}
@@ -262,6 +265,9 @@ unsafe impl UserWrite for itimerval {}
 // SAFETY: these time structs are POD syscall carriers whose fields are validated
 // by the conversion helpers when semantic checks are needed.
 unsafe impl UserWrite for timespec {}
+// SAFETY: `__kernel_timespec` always exposes fully initialized fields when
+// copied to user memory.
+unsafe impl UserWrite for __kernel_timespec {}
 // SAFETY: these time structs are POD syscall carriers whose fields are validated
 // by the conversion helpers when semantic checks are needed.
 unsafe impl UserWrite for timeval {}

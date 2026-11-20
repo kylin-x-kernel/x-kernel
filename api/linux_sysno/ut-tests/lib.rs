@@ -35,3 +35,22 @@ fn test_syscall_len() {
     assert!(Sysno::table_size() > 300);
     assert!(Sysno::table_size() < 1000);
 }
+
+#[def_test]
+fn test_last_is_the_numeric_maximum() {
+    let start = Sysno::first().id() as usize;
+    let end = start + Sysno::table_size();
+    let mut maximum = start;
+
+    for sysno in Sysno::ALL {
+        let id = sysno.id() as usize;
+        assert!(id >= start, "{sysno:?} is below the first syscall");
+        assert!(id < end, "{sysno:?} is outside the table span");
+        maximum = maximum.max(id);
+    }
+
+    assert_eq!(Sysno::last().id() as usize, maximum);
+    assert_eq!(Sysno::max_id(), maximum);
+    assert_eq!(Sysno::new(maximum), Some(Sysno::last()));
+    assert_eq!(Sysno::new(maximum + 1), None);
+}

@@ -118,6 +118,10 @@ validated private range with `copy_nonoverlapping` under MM/COW exclusion.
   original object slots remain untouched; the already cleared PTE prefix can be
   re-established by later faults, and logical shares must not end on the failure path. The original address-space lock and
   the TLB guard still cover the process and do not release intermediate page tables.
+- `LinearBackend::_owner` must outlive every PTE that maps the owned physical
+  range. `VmRuntimeRef::new_linear_owned` / `MmapMapper::map_physical_owned`
+  are the only paths that install such an owner; releasing it while the VMA is
+  live would be a physical use-after-free.
 - `mremap` move-style source retirement must not call ordinary runtime
   `unmap()` on the moved source range.
 - `relocate_mapping()` prepares every destination PTE before removing source
@@ -305,6 +309,18 @@ retires its holds while destination holds independently retain the same pages.
 Folio/content-token release has no TLB-completion dependency. Existing finish
 advances retirement; global synchronous return guarantees remain a separate
 TODO, with no new retry, pending-state or recovery engine introduced here.
+
+## Owned Linear Mapping Page Retention
+
+Device-like linear mappings normally name memory that outlives the VMA. A file
+whose backing pages are released with the file object instead supplies an owner
+through `VmRuntimeRef::new_linear_owned`, reached from
+`MmapMapper::map_physical_owned`. `LinearBackend::_owner` retains that
+`Arc<dyn Any + Send + Sync>` until the last VMA runtime is dropped; while the
+mapping exists the owner keeps the physical pages allocated, so `close(fd)`
+cannot free memory that user PTEs still reference. The io_uring ring mapping is
+the current producer; dropping the owner early is a user-triggerable physical
+use-after-free and information leak.
 
 ## IO Mapping Invalidation Ordering
 

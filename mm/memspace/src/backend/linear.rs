@@ -24,11 +24,30 @@ use crate::{
 #[derive(Clone)]
 pub struct LinearBackend {
     offset: isize,
+    /// Backing owner that must outlive the mapping.
+    ///
+    /// A raw linear mapping normally names device memory or a kernel mapping
+    /// that outlives the VMA. A file whose backing pages are released with the
+    /// file object (for example an io_uring ring) supplies the owner here so
+    /// closing the file cannot free pages that the user mapping still uses.
+    _owner: Option<Arc<dyn core::any::Any + Send + Sync>>,
 }
 
 impl LinearBackend {
     pub fn new(offset: isize) -> Self {
-        Self { offset }
+        Self {
+            offset,
+            _owner: None,
+        }
+    }
+
+    /// Creates a linear mapping that keeps `owner` alive until the mapping is
+    /// torn down.
+    pub fn new_owned(offset: isize, owner: Arc<dyn core::any::Any + Send + Sync>) -> Self {
+        Self {
+            offset,
+            _owner: Some(owner),
+        }
     }
 
     pub fn clone_for_fork_runtime(

@@ -503,11 +503,11 @@ fn test_process_lifecycle() {
     assert!(threads.contains(&(child_pid + 1)));
 
     // Remove secondary thread
-    let is_last = child.exit_thread(&sibling_task, 0);
+    let is_last = child.exit_thread(&sibling_task, 0, true);
     assert!(!is_last); // main thread is still there
 
     // Remove main thread
-    let is_last = child.exit_thread(&leader_task, 0);
+    let is_last = child.exit_thread(&leader_task, 0, true);
     assert!(is_last);
 
     // Test Group Exit
@@ -531,8 +531,8 @@ fn test_process_lifecycle() {
 fn test_finish_thread_exit_reports_last_thread_only_once() {
     let (process, task) = build_prepared_test_user_task();
     let task = prepare_user_task(task).publish().unwrap().activate();
-    let is_last = process_exit::finish_thread_exit(&process, &task, 0);
-    let is_last_again = process_exit::finish_thread_exit(&process, &task, 0);
+    let is_last = process_exit::finish_thread_exit(&process, &task, 0, true);
+    let is_last_again = process_exit::finish_thread_exit(&process, &task, 0, true);
 
     assert!(!process_exit::complete_process_exit(&process));
     assert!(wait_reap::reap_zombie_process(&process));
@@ -574,7 +574,7 @@ fn test_last_thread_exit_reservation_is_unique_and_rejects_late_publication() {
         let last_tid = last_tid.clone();
         ktask::spawn(move || {
             start_gate.wait_until(|| start.load(Ordering::Acquire));
-            if process_exit::finish_thread_exit(&process, &task, 0) {
+            if process_exit::finish_thread_exit(&process, &task, 0, true) {
                 cleanup_calls.fetch_add(1, Ordering::SeqCst);
                 last_tid.store(task.as_thread().tid(), Ordering::Release);
                 cleanup_entered.store(true, Ordering::Release);
@@ -608,7 +608,7 @@ fn test_last_thread_exit_reservation_is_unique_and_rejects_late_publication() {
         assert_eq!(exit.join(), 0);
     }
     if late_publication_error.is_none() {
-        process_exit::finish_thread_exit(&process, &late_task, 0);
+        process_exit::finish_thread_exit(&process, &late_task, 0, true);
     }
     assert!(!process_exit::complete_process_exit(&process));
     assert!(wait_reap::reap_zombie_process(&process));
@@ -2067,7 +2067,7 @@ fn test_group_exit_prevents_late_thread_exit_from_overwriting_exit_code() {
     let leader_task = publish_test_thread(&proc, 500);
     let sibling_task = publish_test_thread(&proc, 501);
 
-    let not_last = proc.exit_thread(&leader_task, 11);
+    let not_last = proc.exit_thread(&leader_task, 11, true);
     assert!(!not_last, "first exiting thread should not be last");
     assert_eq!(
         proc.exit_code(),
@@ -2076,7 +2076,7 @@ fn test_group_exit_prevents_late_thread_exit_from_overwriting_exit_code() {
     );
 
     proc.group_exit();
-    let is_last = proc.exit_thread(&sibling_task, 22);
+    let is_last = proc.exit_thread(&sibling_task, 22, true);
     assert!(is_last, "second exiting thread should be the last thread");
     assert_eq!(
         proc.exit_code(),
@@ -2123,7 +2123,7 @@ fn test_process_scheduler_clock_retains_runtime_during_sibling_exit() {
             while !retire.load(Ordering::Acquire) {
                 ktask::yield_now();
             }
-            was_last.store(process.exit_thread(&ktask::current().clone(), 0), Ordering::Release);
+            was_last.store(process.exit_thread(&ktask::current().clone(), 0, true), Ordering::Release);
             done.store(true, Ordering::Release);
         }
     });
@@ -2148,10 +2148,10 @@ fn test_process_scheduler_clock_retains_runtime_during_sibling_exit() {
     assert_eq!(worker.join(), 0);
     assert!(process.process_cpu_time() >= previous);
     for sibling in &siblings {
-        assert!(!process.exit_thread(sibling, 0));
+        assert!(!process.exit_thread(sibling, 0, true));
         assert!(process.process_cpu_time() >= previous);
     }
-    assert!(process.exit_thread(&leader, 0));
+    assert!(process.exit_thread(&leader, 0, true));
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     assert!(process.process_cpu_time() >= previous);
     process.free();
@@ -2172,7 +2172,7 @@ fn test_last_exiting_thread_remains_in_scheduler_clock_until_publication() {
         let published = published.clone();
         let was_last = was_last.clone();
         move || {
-            was_last.store(process.exit_thread(&ktask::current().clone(), 0), Ordering::Release);
+            was_last.store(process.exit_thread(&ktask::current().clone(), 0, true), Ordering::Release);
             before.store(process.process_cpu_time().as_nanos_u64_saturating(), Ordering::Release);
             let until = khal::time::monotonic_time() + TimeSpan::from_millis(25);
             while khal::time::monotonic_time() < until {
@@ -2265,7 +2265,7 @@ fn test_process_exit_notifies_pidfd_and_parent_waiters() {
     // every exit notification observes the final exited-member totals.
     leader_task.as_thread().account_tick(true, 77);
     leader_task.as_thread().account_tick(false, 88);
-    assert!(process_exit::finish_thread_exit(&child, &leader_task, 0));
+    assert!(process_exit::finish_thread_exit(&child, &leader_task, 0, true));
 
     let parent_counter = new_wake_counter();
     let parent_waker = counter_waker(parent_counter);
@@ -2325,7 +2325,7 @@ fn test_zombie_retains_namespace_owner_after_task_drop() {
     let init = ensure_init();
     let child = init.fork(581);
     let task = publish_test_thread(&child, 581);
-    let is_last = process_exit::finish_thread_exit(&child, &task, 0);
+    let is_last = process_exit::finish_thread_exit(&child, &task, 0, true);
     assert!(is_last, "fixture child must have a single thread");
 
     let autoreap = process_exit::complete_process_exit(&child);
@@ -2377,7 +2377,7 @@ fn test_complete_process_exit_wakes_parent_after_child_is_waitable() {
 fn test_child_exit_signal_info_carries_linux_child_payload() {
     let (child, prepared) = build_prepared_test_user_task();
     let task = prepare_user_task(prepared).publish().unwrap().activate();
-    process_exit::finish_thread_exit(&child, &task, 9 << 8);
+    process_exit::finish_thread_exit(&child, &task, 9 << 8, true);
 
     // The fixture forks from init, so the parent is init in the root
     // namespace; the projection there equals the root number. The
@@ -2656,7 +2656,7 @@ fn test_lifecycle_accumulates_exited_thread_and_child_cpu_time() {
     last.as_thread().account_tick(true, 33);
     last.as_thread().account_tick(false, 44);
 
-    assert!(!process_exit::finish_thread_exit(&proc, &first, 0));
+    assert!(!process_exit::finish_thread_exit(&proc, &first, 0, true));
     assert_eq!(
         proc.exited_thread_time(),
         (TimeSpan::from_nanos(11), TimeSpan::from_nanos(22))
@@ -2669,7 +2669,7 @@ fn test_lifecycle_accumulates_exited_thread_and_child_cpu_time() {
         (TimeSpan::from_nanos(132), TimeSpan::from_nanos(154))
     );
 
-    assert!(process_exit::finish_thread_exit(&proc, &last, 0));
+    assert!(process_exit::finish_thread_exit(&proc, &last, 0, true));
     proc.exit_with_publication(ProcessExitPublication::WaitableZombie);
     assert_eq!(
         proc.exited_thread_time(),
@@ -2823,7 +2823,7 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
 
     assert!(!thread.has_exit_address_space());
     assert!(!sibling_task.as_thread().has_exit_address_space());
-    let is_last = process.exit_thread(&sibling_task, 0);
+    let is_last = process.exit_thread(&sibling_task, 0, true);
     assert!(
         !is_last,
         "published sibling thread removal must not tear down the whole process"
@@ -2833,9 +2833,9 @@ fn test_prepare_thread_clone_defers_tid_visibility_until_publication() {
     assert!(!process.contains_published_tid(tid));
     assert!(crate::lookup::task(tid).is_err());
     assert_eq!(process.thread_count(), 1);
-    assert!(!process.exit_thread(&sibling_task, 0));
+    assert!(!process.exit_thread(&sibling_task, 0, true));
     drop(published);
-    assert!(process.exit_thread(&leader_task, 0));
+    assert!(process.exit_thread(&leader_task, 0, true));
     assert!(thread.has_exit_address_space());
     assert_eq!(process.thread_count(), 0);
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
@@ -2892,11 +2892,11 @@ fn test_thread_pidfd_fdinfo_reports_its_own_tid() {
     assert_eq!(pidfd.fdinfo_pid(Some(&child_ns)), 0);
 
     // Once the thread leaves, the tid no longer names the captured identity.
-    assert!(!process.exit_thread(sibling.task(), 0));
+    assert!(!process.exit_thread(sibling.task(), 0, true));
     assert_eq!(pidfd.fdinfo_pid(None), -1);
     drop(sibling);
 
-    assert!(process.exit_thread(&leader_task, 0));
+    assert!(process.exit_thread(&leader_task, 0, true));
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
     let _ = process_publication().unpublish_process_if_matches(&process);
@@ -2942,7 +2942,7 @@ fn test_namespaced_process_lookup_uses_namespace_index() {
     let other_ns = kidentity::PidNamespace::new_child(&root_ns);
     assert!(crate::procfs::process_task_in_namespace(1, Some(&other_ns)).is_err());
 
-    assert!(process.exit_thread(&leader_task, 0));
+    assert!(process.exit_thread(&leader_task, 0, true));
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
     let _ = process_publication().unpublish_process_if_matches(&process);
@@ -2989,7 +2989,7 @@ fn test_process_migration_reconciles_a_prepared_sibling_at_publication() {
     sibling.task().as_thread().detach_cgroup();
     leader_task.as_thread().detach_cgroup();
     drop(sibling);
-    process.exit_thread(&leader_task, 0);
+    process.exit_thread(&leader_task, 0, true);
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
     let _ = process_publication().unpublish_process_if_matches(&process);
@@ -3096,7 +3096,7 @@ fn test_cgroup_reconciliation_failure_does_not_publish_task() {
     assert!(process_publication().task(sibling_tid).is_err());
 
     *process.cgroup_transaction() = Some(original);
-    process.exit_thread(&leader_task, 0);
+    process.exit_thread(&leader_task, 0, true);
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
     let _ = process_publication().unpublish_process_if_matches(&process);
@@ -3156,9 +3156,9 @@ fn test_scheduler_resolves_non_leader_tid_not_as_tgid() {
         "tgid lookup must stay inside the process thread group"
     );
 
-    let _ = process.exit_thread(&sibling_task, 0);
+    let _ = process.exit_thread(&sibling_task, 0, true);
     drop(sibling);
-    process.exit_thread(&leader_task, 0);
+    process.exit_thread(&leader_task, 0, true);
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     process.free();
     let _ = process_publication().unpublish_process_if_matches(&process);
@@ -3425,7 +3425,7 @@ fn test_exit_and_reap_unpublish_tid_and_pid() {
     assert_eq!(procfs::thread_group_member_count(&process), 1);
 
     assert!(
-        process.exit_thread(&published, 0),
+        process.exit_thread(&published, 0, true),
         "single-threaded process exit must report the last thread"
     );
     let stat = TaskStat::from_thread(&published);
@@ -3463,7 +3463,7 @@ fn test_exited_leader_membership_survives_sibling_exit_until_reap() {
     let sibling = publish_test_thread(&process, sibling_number.root_nr());
     assert_eq!(procfs::thread_group_member_count(&process), 2);
 
-    assert!(!process.exit_thread(&leader, 0));
+    assert!(!process.exit_thread(&leader, 0, true));
     assert_eq!(scheduler::process_task_count(&process), 1);
     assert_eq!(procfs::thread_group_member_count(&process), 2);
     assert!(
@@ -3472,7 +3472,7 @@ fn test_exited_leader_membership_survives_sibling_exit_until_reap() {
             .is_err()
     );
 
-    assert!(process.exit_thread(&sibling, 0));
+    assert!(process.exit_thread(&sibling, 0, true));
     assert_eq!(scheduler::process_task_count(&process), 0);
     assert_eq!(procfs::thread_group_member_count(&process), 1);
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
@@ -3498,8 +3498,8 @@ fn test_taskstat_exit_signal_is_minus_one_for_non_leader_threads() {
         "a CLONE_THREAD sibling has no parent notification contract"
     );
 
-    assert!(!process.exit_thread(&sibling, 0));
-    assert!(process.exit_thread(&leader, 0));
+    assert!(!process.exit_thread(&sibling, 0, true));
+    assert!(process.exit_thread(&leader, 0, true));
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
 }
 
@@ -3556,7 +3556,7 @@ fn test_process_exec_commits_parent_exit_signal_before_post_commit_work() {
         "procfs observes the post-exec wait contract"
     );
 
-    assert!(process.exit_thread(&leader, 0));
+    assert!(process.exit_thread(&leader, 0, true));
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
 }
 
@@ -3594,11 +3594,11 @@ fn test_unpublish_task_if_matches_preserves_reused_tid_identity() {
     // task is still a live process member even though its TID slot was reused
     // by `second`. Exiting `second` therefore must not be the last-member exit.
     assert!(
-        !process.exit_thread(&second, 0),
+        !process.exit_thread(&second, 0, true),
         "an older live member must keep the process alive"
     );
     assert!(
-        process.exit_thread(&first, 0),
+        process.exit_thread(&first, 0, true),
         "the last live member must be able to exit cleanly"
     );
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
@@ -3630,14 +3630,14 @@ fn test_capget_reports_exited_group_leader_credentials() {
         "the test requires the sibling to retain root credentials"
     );
 
-    assert!(!process.exit_thread(&leader, 0));
+    assert!(!process.exit_thread(&leader, 0, true));
     assert_eq!(
         crate::capability::target_capabilities(process.pid(), kidentity::root_pid_namespace()).unwrap(),
         CapSets::EMPTY,
         "the exited leader's empty capability sets must win over the live sibling"
     );
 
-    assert!(process.exit_thread(&survivor, 0));
+    assert!(process.exit_thread(&survivor, 0, true));
     process.exit_with_publication(ProcessExitPublication::WaitableZombie);
     assert_eq!(
         crate::capability::target_capabilities(process.pid(), kidentity::root_pid_namespace()).unwrap(),
@@ -3730,7 +3730,7 @@ fn test_capget_target_resolves_pid_in_observer_namespace() {
         "a root number outside the observer's namespace must not resolve"
     );
 
-    nested.exit_thread(published.task(), 0);
+    nested.exit_thread(published.task(), 0, true);
     nested.exit_with_publication(ProcessExitPublication::WaitableZombie);
     nested.free();
     let _ = process_publication().unpublish_process_if_matches(&nested);
@@ -3753,7 +3753,7 @@ fn test_exec_leader_takeover_moves_number_onto_survivor() {
     assert_ne!(survivor_tid, pid);
 
     // The `exec` sibling sweep retires the leader from the process first.
-    assert!(!process.exit_thread(&leader, 0));
+    assert!(!process.exit_thread(&leader, 0, true));
     assert_eq!(process.thread_count(), 1);
 
     assert!(process.assume_leader_identity(&survivor));

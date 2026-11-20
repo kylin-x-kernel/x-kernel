@@ -2217,6 +2217,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "kasyncio"
+version = "0.3.0-dev"
+dependencies = [
+ "anon_inodefs",
+ "kalloc",
+ "kcred",
+ "kerrno",
+ "khal",
+ "klogger",
+ "kns",
+ "kpoll",
+ "kprocess",
+ "ksignal",
+ "ksync",
+ "ktask",
+ "ktime_types",
+ "kvfs",
+ "memacct",
+ "memaddr",
+ "posix-process",
+ "posix-types",
+ "unittest",
+]
+
+[[package]]
 name = "kbandwidth"
 version = "0.3.0-dev"
 dependencies = [
@@ -3448,6 +3473,7 @@ dependencies = [
  "kaddr_layout",
  "kalloc",
  "karch",
+ "kasyncio",
  "kbuild_config",
  "kcgroup",
  "kcpu",

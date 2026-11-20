@@ -68,6 +68,7 @@ kuaccess.workspace = true
 ktty.workspace = true
 kvfs.workspace = true
 cgroup2fs = { workspace = true, optional = true }
+kasyncio.workspace = true
 entropy.workspace = true
 posix-fs.workspace = true
 posix-bpf = { workspace = true, optional = true }

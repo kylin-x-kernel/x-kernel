@@ -803,6 +803,7 @@ syscall_enum! {
             tipc_send_msg = 619,
             tipc_memref_create = 648,
         }
+
     }
 
     LAST: open_tree_attr;

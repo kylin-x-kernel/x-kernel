@@ -770,6 +770,21 @@ pub trait MmapMapper {
     /// first, and framebuffer nodes add a within-buffer offset themselves.
     fn map_physical(&mut self, range: PhysAddrRange) -> VfsResult<()>;
 
+    /// Map an absolute physical range while keeping `owner` alive until the
+    /// mapping is torn down.
+    ///
+    /// File objects whose backing storage is otherwise released with the file
+    /// (for example an io_uring ring) use this so closing the descriptor
+    /// cannot free pages that the user mapping still references. The owner is
+    /// opaque to the memory subsystem; it is dropped with the mapping runtime.
+    fn map_physical_owned(
+        &mut self,
+        _range: PhysAddrRange,
+        _owner: Arc<dyn core::any::Any + Send + Sync>,
+    ) -> VfsResult<()> {
+        Err(KError::Unsupported)
+    }
+
     /// Request a file-backed mapping (regular file or cached file).
     fn map_file_backed(&mut self) -> VfsResult<()>;
 

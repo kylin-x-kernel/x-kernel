@@ -489,7 +489,12 @@ impl Process {
     /// reserves process cleanup. The reservation rejects later task publication.
     /// Captures structural MM ownership before retirement; callers must finish
     /// user-memory cleanup first and perform no subsequent user access.
-    pub(crate) fn exit_thread(self: &Arc<Self>, task: &KtaskRef, exit_code: i32) -> bool {
+    pub(crate) fn exit_thread(
+        self: &Arc<Self>,
+        task: &KtaskRef,
+        exit_code: i32,
+        record_status: bool,
+    ) -> bool {
         task.as_thread().capture_exit_address_space();
         let tid = task.as_thread().tid();
         {
@@ -497,7 +502,8 @@ impl Process {
             // A `de_thread` sweep target dies of the execing thread's SIGKILL,
             // not of its own exit status, so it must not become the process exit
             // code.
-            if !group_exit.group_exited && !task.as_thread().is_exec_sweep_target() {
+            if record_status && !group_exit.group_exited && !task.as_thread().is_exec_sweep_target()
+            {
                 group_exit.exit_code = exit_code;
             }
         }

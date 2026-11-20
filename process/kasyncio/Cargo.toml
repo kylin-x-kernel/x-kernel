@@ -1,0 +1,39 @@
+[package]
+name = "kasyncio"
+description = "Asynchronous I/O submission/completion infrastructure for X-Kernel"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[package.metadata.cargo-shear]
+# ut-tests/ uses kns (fork namespace flags); shear ignores ut-tests/, so
+# declare it here instead of dropping a dependency the guest tests need.
+ignored = ["kns"]
+
+[dependencies]
+anon_inodefs.workspace = true
+kcred.workspace = true
+kalloc.workspace = true
+memacct.workspace = true
+kerrno.workspace = true
+khal.workspace = true
+klogger.workspace = true
+kpoll.workspace = true
+kprocess.workspace = true
+ksignal.workspace = true
+ksync.workspace = true
+ktask.workspace = true
+ktime_types.workspace = true
+kvfs.workspace = true
+kns.workspace = true
+memaddr.workspace = true
+posix-process.workspace = true
+posix-types.workspace = true
+unittest.workspace = true
+
+[lints]
+workspace = true

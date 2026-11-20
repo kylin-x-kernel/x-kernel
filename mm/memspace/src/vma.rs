@@ -212,6 +212,16 @@ impl VmRuntimeRef {
         Self::Linear(LinearBackend::new(offset))
     }
 
+    /// Creates a linear mapping that owns backing storage until it is torn
+    /// down.
+    ///
+    /// Used when the backing pages are released with a file object: the VMA
+    /// keeps them alive after the descriptor closes, matching Linux's
+    /// `vm_insert_pages` reference for an io_uring ring.
+    pub fn new_linear_owned(offset: isize, owner: Arc<dyn core::any::Any + Send + Sync>) -> Self {
+        Self::Linear(LinearBackend::new_owned(offset, owner))
+    }
+
     pub fn new_anon_shared(start: VirtAddr, size: usize, pgsize: PageSize) -> KResult<Self> {
         Ok(Self::AnonShared(SharedBackend::new_anonymous(
             start, size, pgsize,

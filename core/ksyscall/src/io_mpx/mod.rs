@@ -11,6 +11,7 @@
 //! Allows monitoring multiple file descriptors for I/O events.
 
 mod epoll;
+mod io_uring;
 mod poll;
 mod select;
 
@@ -19,7 +20,7 @@ use alloc::{sync::Arc, vec::Vec};
 use kpoll::{IoEvents, PollContext, PollRegisterError, Pollable};
 use kvfs::VfsFile;
 
-pub(crate) use self::{epoll::*, poll::*, select::*};
+pub(crate) use self::{epoll::*, io_uring::*, poll::*, select::*};
 
 struct FdPollSet(pub Vec<(Arc<VfsFile>, IoEvents)>);
 impl Pollable for FdPollSet {

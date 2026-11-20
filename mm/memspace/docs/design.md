@@ -455,6 +455,18 @@ runtime for the same coordinate used by faults, fork and relocation; splitting,
 prefix unmapping and protection do not maintain a second VMA offset field.
 
 
+## Owned Linear Mappings for File-Backed Physical Pages
+
+`VmRuntimeRef::new_linear_owned` is the memspace-side constructor for a linear
+mapping whose backing is released with a file object rather than living for the
+kernel's lifetime. The provider is memspace; the consumer is the mmap callback
+layer (`mm/filemap`'s `MmapMapper::map_physical_owned`) on behalf of a file
+owner (currently the kasyncio io_uring ring block). The caller passes an opaque
+`Arc<dyn Any + Send + Sync>`, `LinearBackend::_owner` keeps it for the lifetime
+of the runtime, fork clones of the runtime share it, and the last VMA runtime
+drop releases it. This keeps file-owned pages alive across `close(fd)` until
+`munmap`, matching Linux's page-reference ownership for such mappings.
+
 ## DMA Mapping Capability
 
 memspace directly implements kiface-mm-api DmaMappingIf. The caller selects Coherent

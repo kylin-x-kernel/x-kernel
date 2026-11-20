@@ -32,8 +32,13 @@ use crate::{
 /// The pin preserves the root until task destruction, not live user mappings.
 /// Requires schedulable task context without spinlock, IRQ-disable or
 /// preemption-disable guards. No caller-supplied callback runs during retirement.
-pub fn finish_thread_exit(process: &Arc<Process>, task: &KtaskRef, exit_code: i32) -> bool {
-    process.exit_thread(task, exit_code)
+pub fn finish_thread_exit(
+    process: &Arc<Process>,
+    task: &KtaskRef,
+    exit_code: i32,
+    record_status: bool,
+) -> bool {
+    process.exit_thread(task, exit_code, record_status)
 }
 
 /// Marks the process thread group as group-exited.

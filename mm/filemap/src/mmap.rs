@@ -71,6 +71,21 @@ impl MmapMapper for FileMapper {
         Ok(())
     }
 
+    fn map_physical_owned(
+        &mut self,
+        range: PhysAddrRange,
+        owner: Arc<dyn core::any::Any + Send + Sync>,
+    ) -> kvfs::VfsResult<()> {
+        if range.is_empty() || range.size().align_down(self.req.page_size) < self.req.length {
+            return Err(kvfs::VfsError::InvalidInput);
+        }
+        self.runtime = Some(VmRuntimeRef::new_linear_owned(
+            self.req.start.as_usize() as isize - range.start.as_usize() as isize,
+            owner,
+        ));
+        Ok(())
+    }
+
     fn map_file_backed(&mut self) -> kvfs::VfsResult<()> {
         self.runtime = Some(build_file_runtime(
             self.req.start,

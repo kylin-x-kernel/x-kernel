@@ -101,7 +101,8 @@ providers are available. The first root PID allocation must yield 1. It keeps
 the task's default all-online-CPU affinity. Its `after_init_exit` callback runs
 on the init task when the loop ends and normally shuts the system down.
 
-`do_exit`, `raise_signal_fatal` and `check_signals` are current-user-thread paths;
+`do_exit`, `do_exit_worker`, `raise_signal_fatal` and `check_signals` are
+current-user-thread paths;
 `check_signals` must receive that thread and its saved context. The loop uses
 current-task state, mapped userspace and scheduler services. These paths may
 allocate, lock, yield or block and are unsuitable for interrupt context or early
@@ -109,6 +110,11 @@ boot. Do not reenter teardown for the same thread or hold a TEE session context
 across its exit cleanup.
 
 ## Runtime and teardown flow
+
+`do_exit_worker()` is the kernel-worker variant of `do_exit()`: it runs the
+same process-tail teardown when the worker is the last member, but passes
+`record_status = false` through `finish_thread_exit` so a worker exit never
+replaces the status recorded by the process's ordinary threads.
 
 `UserContext::run` owns the IRQ-masked user-transfer boundary. Its entry callback
 calls `krcu::enter_user_quiescent`; its return callback calls

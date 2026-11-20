@@ -377,6 +377,15 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         ),
 
         // io mpx
+        Sysno::io_uring_setup => sys_io_uring_setup(uctx.arg0() as _, uctx.arg1().into()),
+        Sysno::io_uring_enter => sys_io_uring_enter(
+            uctx.arg0() as _,
+            uctx.arg1() as _,
+            uctx.arg2() as _,
+            uctx.arg3() as _,
+            uctx.arg4().into(),
+            uctx.arg5() as _,
+        ),
         #[cfg(target_arch = "x86_64")]
         Sysno::poll => sys_poll(uctx.arg0().into(), uctx.arg1() as _, uctx.arg2() as _),
         Sysno::ppoll => sys_ppoll(
@@ -485,8 +494,8 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         // inotify
         //
         // Moved out of the `dummy fds` group below. Returning ENOSYS here is
-        // not a safe "probe and fall back" failure the way it is for `fsopen`
-        // or `io_uring_setup`: Chromium's `base::FilePathWatcher` has no
+        // not a safe "probe and fall back" failure the way it is for
+        // `memfd_secret`: Chromium's `base::FilePathWatcher` has no
         // equivalent fallback, so it reports `inotify_init() failed: Function
         // not implemented (38)` and its browser process then never finishes
         // starting up (no renderer is forked, no window is created). See
@@ -940,7 +949,6 @@ pub fn handle_syscall(uctx: &mut UserContext) -> UserThreadRuntimeAction {
         Sysno::fanotify_init
         | Sysno::userfaultfd
         | Sysno::perf_event_open
-        | Sysno::io_uring_setup
         | Sysno::fspick
         | Sysno::memfd_secret => sys_dummy_fd(sysno),
 

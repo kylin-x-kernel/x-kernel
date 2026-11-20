@@ -190,6 +190,7 @@ intrusive-collections = { version = "=0.10.2", default-features = false, feature
 # Internal: process management
 kfutex = { path = "process/kfutex" }
 fs_context = { path = "process/fs_context" }
+kasyncio = { path = "process/kasyncio" }
 kfd = { path = "process/kfd" }
 kfd_objects = { path = "process/kfd_objects" }
 kexec = { path = "process/kexec" }

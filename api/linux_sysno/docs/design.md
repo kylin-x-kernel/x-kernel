@@ -10,9 +10,10 @@ control, or guarantee that a listed call is implemented by X-Kernel.
 The complete source scope is `src/lib.rs`, `src/args.rs`, `src/macros.rs`,
 `src/map.rs`, `src/set.rs`, `src/errno/{mod,macros,generated}.rs`, and
 `src/arch/{mod,macros,aarch64,arm,loongarch64,riscv64,x86_64}.rs`.
-`build.rs` detects Thumb-compatible target names. Tests live in the source files
-behind `cfg(unittest)`. Architecture tables and errno constants are checked-in
-ABI data; no network fetch or table regeneration occurs during a normal build.
+`build.rs` detects Thumb-compatible target names. Tests live under `ut-tests/`
+and are mounted with `unittest::path_mod_test!`. Architecture tables and errno
+constants are checked-in ABI data; no network fetch or table regeneration occurs
+during a normal build.
 
 ## Architecture and interfaces
 
@@ -26,8 +27,9 @@ validated Sysno ──> SysnoSet (bitset) / SysnoMap<T> (membership + slots)
 `lib.rs` re-exports the current architecture's `Sysno`, enabled architecture
 modules, argument carrier, errno types, set/map and iterators. The architecture
 macro generates a non-exhaustive enum, numeric/name lookup and iteration.
-The table's first/last identifiers define its numeric span; gaps occupy storage
-but are not valid keys. Numeric `From<i32/u32>` conversions panic on gaps; the
+The table's first identifier and its largest identifier define the numeric span;
+`last()` returns the largest identifier regardless of declaration order. Gaps
+occupy storage but are not valid keys. Numeric `From<i32/u32>` conversions panic on gaps; the
 fallible `new` constructor is the syscall-boundary entry point. Parsing names
 is exact and case-sensitive.
 

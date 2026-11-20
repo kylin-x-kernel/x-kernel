@@ -26,7 +26,7 @@ impl Errno {
     }
 
     /// Converts the `Errno` into a raw `i32`.
-    pub fn into_raw(self) -> i32 {
+    pub const fn into_raw(self) -> i32 {
         self.0
     }
 

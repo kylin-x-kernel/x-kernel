@@ -516,7 +516,16 @@ pub fn exec_de_thread() -> bool {
 ///
 /// The current-thread accessor panics if no user-thread runtime is installed.
 pub fn do_exit(exit_code: i32, group_exit: bool) {
-    do_exit_inner(exit_code, group_exit, false);
+    do_exit_inner(exit_code, group_exit, false, true);
+}
+
+/// Tears down a kernel worker thread without publishing a process status.
+///
+/// A worker may be the last member after the ordinary threads exited; its
+/// teardown must still run the process tail, but it must not replace the
+/// status recorded by those threads.
+pub fn do_exit_worker() {
+    do_exit_inner(0, false, false, false);
 }
 
 /// Tears down the current thread after a fatal signal.
@@ -526,7 +535,7 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
 /// that instead reaches `exit_group(2)` goes through [`do_exit`] and still
 /// records the genuine group exit, so the exec aborts.
 pub(crate) fn do_exit_from_signal(exit_code: i32) {
-    do_exit_inner(exit_code, true, true);
+    do_exit_inner(exit_code, true, true, true);
 }
 
 /// Releases process-owned TEE sessions while the runtime and filesystem remain.
@@ -540,7 +549,7 @@ fn exit_tee() {
     }
 }
 
-fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
+fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool, record_status: bool) {
     let curr = current();
     let thr = current_user_thread();
     let process = thr.process();
@@ -588,7 +597,7 @@ fn do_exit_inner(exit_code: i32, group_exit: bool, signal_death: bool) {
     // sole last-thread continuation and retires the global TID. The last
     // thread's handoff completes in `complete_process_exit` after cleanup,
     // before the parent can observe it.
-    let is_last_thread = process_exit::finish_thread_exit(process, &curr, exit_code);
+    let is_last_thread = process_exit::finish_thread_exit(process, &curr, exit_code, record_status);
 
     if is_last_thread {
         #[cfg(feature = "tee")]

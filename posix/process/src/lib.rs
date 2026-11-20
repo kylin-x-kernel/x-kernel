@@ -45,7 +45,7 @@ mod init_process;
 mod runtime;
 pub use init_process::spawn_init_process;
 pub use runtime::{
-    check_signals, do_exit, exec_de_thread, new_user_task, prepare_user_entry,
+    check_signals, do_exit, do_exit_worker, exec_de_thread, new_user_task, prepare_user_entry,
     raise_current_thread_fault, raise_signal_fatal,
 };
 #[cfg(unittest)]
