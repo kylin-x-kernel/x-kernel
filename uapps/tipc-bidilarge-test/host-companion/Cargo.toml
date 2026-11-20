@@ -1,0 +1,12 @@
+[package]
+name = "tipc-bidi-large-client"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+libtrusty-rs = "0.1.0"
+# libtrusty-rs = { path = "/home/greatwall/code/aosp_platform_system_core/trusty/libtrusty-rs" }
+
+[workspace]

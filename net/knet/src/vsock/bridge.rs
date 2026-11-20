@@ -85,6 +85,8 @@ struct VsockBridge {
     connections: Mutex<Vec<BridgeConnection>>,
     rx_queue: Mutex<VecDeque<VsockBridgeEvent>>,
     rx_waiters: PollSet,
+    /// Wakes the RX task when TIPC reports READY or SEND_UNBLOCKED.
+    tipc_progress_waiters: PollSet,
     handle_set: Arc<HandleSet>,
     ports: Mutex<Vec<PublishedPort>>,
     start_requested: AtomicBool,
@@ -97,6 +99,7 @@ impl VsockBridge {
             connections: Mutex::new(Vec::new()),
             rx_queue: Mutex::new(VecDeque::new()),
             rx_waiters: PollSet::new(),
+            tipc_progress_waiters: PollSet::new(),
             handle_set: HandleSet::handle_set_create(),
             ports: Mutex::new(Vec::new()),
             start_requested: AtomicBool::new(false),
@@ -176,6 +179,49 @@ impl VsockBridge {
     fn push_rx_event(&self, event: VsockBridgeEvent) {
         self.rx_queue.lock().push_back(event);
         self.rx_waiters.wake();
+    }
+
+    fn is_rx_blocked_on_tipc(&self, conn_id: VsockConnId) -> bool {
+        self.connections
+            .lock()
+            .iter()
+            .find(|conn| conn.conn_id() == conn_id)
+            .is_some_and(|conn| {
+                matches!(
+                    conn.state(),
+                    BridgeConnectionState::TipcConnecting | BridgeConnectionState::TipcSendBlocked
+                )
+            })
+    }
+
+    /// Waits until TIPC can consume the queued vsock record again.
+    ///
+    /// The RX task must not poll this state: a fixed delay caps throughput at
+    /// the number of messages that fit in the TIPC queue per delay. Wake-ups
+    /// come from READY, SEND_UNBLOCKED, and connection teardown. The timeout
+    /// is only a liveness fallback so a dead peer cannot park the RX task and
+    /// delay unrelated connection events indefinitely.
+    fn wait_for_rx_progress(&self, conn_id: VsockConnId) {
+        let mut registrations = PollRegistrations::new();
+        let wait = poll_fn(|cx| {
+            if !self.is_rx_blocked_on_tipc(conn_id) {
+                return Poll::Ready(());
+            }
+            let mut context = registrations.context(cx);
+            if context.register(&self.tipc_progress_waiters).is_err() {
+                return Poll::Ready(());
+            }
+            drop(context);
+            if self.is_rx_blocked_on_tipc(conn_id) {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        });
+        let _ = block_on(ktask::future::timeout(
+            Some(TimeSpan::from_millis(10)),
+            wait,
+        ));
     }
 
     fn pop_rx_event(&self) -> Result<VsockBridgeEvent, PollRegisterError> {
@@ -298,10 +344,11 @@ impl VsockBridge {
             Some(
                 BridgeConnectionState::TipcConnecting | BridgeConnectionState::TipcSendBlocked,
             ) => {
-                // TIPC is not ready to consume the packet yet. Re-queue the event
-                // locally and retry after a short backoff.
+                // TIPC is not ready to consume the packet yet. Keep the event
+                // queued and wait for the TIPC side to make progress instead
+                // of applying a fixed per-message delay.
                 self.push_rx_event(VsockBridgeEvent::Received(conn_id, len));
-                ktask::sleep(TimeSpan::from_millis(10));
+                self.wait_for_rx_progress(conn_id);
             }
             Some(_) => {
                 warn!("vsock bridge received data in invalid state for {conn_id:?}");
@@ -439,6 +486,7 @@ impl VsockBridge {
             conn.set_state(BridgeConnectionState::Active);
             conn.channel().ok()
         };
+        self.tipc_progress_waiters.wake();
         if let Some(channel) = channel {
             let token = self
                 .connections
@@ -481,6 +529,7 @@ impl VsockBridge {
             self.remove_channel_handle(removed.token(), channel.clone());
             channel.close();
         }
+        self.tipc_progress_waiters.wake();
         // The peer may already have removed the connection.
         let _ = disconnect_bridge(conn_id);
     }
@@ -653,6 +702,7 @@ impl VsockBridge {
             conn.set_state(BridgeConnectionState::Active);
             conn.local_port() == 0
         };
+        self.tipc_progress_waiters.wake();
         if send_dynamic_success {
             let result = send_bridge(conn_id, &[DYNAMIC_CONNECT_STATUS_OK]);
             if result.is_err() {
@@ -663,14 +713,21 @@ impl VsockBridge {
     }
 
     fn on_tipc_send_unblocked(&self, conn_id: VsockConnId) {
-        let mut conns = self.connections.lock();
-        let Some(conn) = conns.iter_mut().find(|conn| conn.conn_id() == conn_id) else {
-            return;
+        let result = {
+            let mut conns = self.connections.lock();
+            let Some(conn) = conns.iter_mut().find(|conn| conn.conn_id() == conn_id) else {
+                return;
+            };
+            conn.tipc_try_send()
         };
-        if let Err(err) = conn.tipc_try_send() {
-            warn!("vsock bridge failed to retry TIPC send: {err:?}");
-            drop(conns);
-            self.close_connection(conn_id);
+        match result {
+            Ok(()) => {
+                self.tipc_progress_waiters.wake();
+            }
+            Err(err) => {
+                warn!("vsock bridge failed to retry TIPC send: {err:?}");
+                self.close_connection(conn_id);
+            }
         }
     }
 

@@ -1,0 +1,12 @@
+[package]
+name = "tipc-bidi-large-server"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+rust_libtipc = { package = "rkutipc", version = "0.1.0" }
+#rust_libtipc = { package = "rkutipc", path = "/home/greatwall/code/rkutipc" }
+
+[workspace]

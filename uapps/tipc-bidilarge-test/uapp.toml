@@ -1,0 +1,20 @@
+[package]
+name = "tipc-bidilarge-test"
+description = "Bidirectional 10 MiB vsock-TIPC throughput test TA"
+enabled = true
+order = 40
+
+[prepare]
+env = [
+  "RUSTFLAGS=",
+  "CC=aarch64-linux-musl-gcc",
+  "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc",
+]
+commands = [
+  "cargo build --release --target aarch64-unknown-linux-musl",
+]
+
+[[install]]
+src = "target/aarch64-unknown-linux-musl/release/tipc-bidi-large-server"
+dest = "/tipc-bidi-large-server"
+mode = "0755"
