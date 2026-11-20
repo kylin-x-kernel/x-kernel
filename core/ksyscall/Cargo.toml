@@ -51,6 +51,7 @@ ktimer.workspace = true
 bitflags.workspace = true
 linux-raw-sys = { workspace = true, features = ["general", "ioctl", "loop_device"] }
 kprocess.workspace = true
+kcgroup.workspace = true
 kseccomp.workspace = true
 krlimit.workspace = true
 ksignal.workspace = true
@@ -66,7 +67,6 @@ kexec.workspace = true
 kuaccess.workspace = true
 ktty.workspace = true
 kvfs.workspace = true
-kcgroup.workspace = true
 cgroup2fs = { workspace = true, optional = true }
 entropy.workspace = true
 posix-fs.workspace = true

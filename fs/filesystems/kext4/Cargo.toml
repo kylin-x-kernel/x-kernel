@@ -16,6 +16,7 @@ times = []
 [dependencies]
 kalloc-types.workspace = true
 bitflags.workspace = true
+crc.workspace = true
 block = { workspace = true }
 iov_iter.workspace = true
 kcred.workspace = true

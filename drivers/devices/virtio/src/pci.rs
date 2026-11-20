@@ -326,7 +326,7 @@ pub fn probe_pci_device<H: VirtIoHal, C: ConfigurationAccess>(
     // this function and enabling the device.
     if matches!(
         dev_kind,
-        DeviceKind::Vsock | DeviceKind::Input | DeviceKind::Display
+        DeviceKind::Vsock | DeviceKind::Input | DeviceKind::Display | DeviceKind::Fs9p
     ) {
         let (_, command) = root.get_status_command(bdf);
         root.set_command(bdf, command | Command::INTERRUPT_DISABLE);

@@ -201,6 +201,49 @@ fn recovery_refresh_rejects_a_changed_journal_backing_identity() {
 
     assert_eq!(
         filesystem.refresh_recovered_superblock(),
-        Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal)),
+        Err(Ext4Error::Corrupt(CorruptKind::InvalidJournal))
+    );
+}
+
+#[def_test]
+fn bitmap_range_set_validation_checks_whole_bytes_with_partial_edges() {
+    // Bits are little-endian within each byte: the first bitmap has bits
+    // 4..=23 set and bits 0..=3 clear.
+    let bitmap = [0b1111_0000u8, 0xff, 0xff];
+    let holey = [0b1111_0000u8, 0xff, 0b1110_1111];
+    let kind = CorruptKind::InvalidInodeBitmap;
+    // Empty and fully-covered ranges.
+    assert_eq!(validate_ext4_bitmap_range_set(&bitmap, 5, 5, kind), Ok(()));
+    assert_eq!(validate_ext4_bitmap_range_set(&bitmap, 8, 24, kind), Ok(()));
+    assert_eq!(validate_ext4_bitmap_range_set(&bitmap, 8, 20, kind), Ok(()));
+    assert_eq!(validate_ext4_bitmap_range_set(&bitmap, 9, 16, kind), Ok(()));
+    // Partial edge bytes: bits outside the range may be clear.
+    assert_eq!(validate_ext4_bitmap_range_set(&bitmap, 4, 8, kind), Ok(()));
+    assert_eq!(
+        validate_ext4_bitmap_range_set(&bitmap, 3, 8, kind),
+        Err(Ext4Error::Corrupt(kind))
+    );
+    // A clear bit inside the range fails, edge bytes included.
+    assert_eq!(
+        validate_ext4_bitmap_range_set(&bitmap, 0, 8, kind),
+        Err(Ext4Error::Corrupt(kind))
+    );
+    assert_eq!(
+        validate_ext4_bitmap_range_set(&bitmap, 2, 8, kind),
+        Err(Ext4Error::Corrupt(kind))
+    );
+    assert_eq!(
+        validate_ext4_bitmap_range_set(&holey, 16, 21, kind),
+        Err(Ext4Error::Corrupt(kind))
+    );
+    assert_eq!(validate_ext4_bitmap_range_set(&holey, 16, 20, kind), Ok(()));
+    // Inverted and out-of-capacity ranges keep their distinct errors.
+    assert_eq!(
+        validate_ext4_bitmap_range_set(&bitmap, 5, 3, kind),
+        Err(Ext4Error::Corrupt(kind))
+    );
+    assert_eq!(
+        validate_ext4_bitmap_range_set(&bitmap, 0, 25, kind),
+        Err(Ext4Error::Corrupt(CorruptKind::Truncated))
     );
 }

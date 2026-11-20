@@ -1930,10 +1930,45 @@ pub(crate) fn validate_ext4_bitmap_range_set(
     if end_bit > bitmap_bit_capacity(bitmap)? {
         return Err(Ext4Error::Corrupt(CorruptKind::Truncated));
     }
-    for bit in start_bit..end_bit {
-        if !is_ext4_bitmap_bit_set(bitmap, bit)? {
+    if start_bit == end_bit {
+        return Ok(());
+    }
+    // Check whole bytes instead of one bit at a time: allocators run this over
+    // the inode bitmap's tail (and the block bitmap's tail) on every
+    // allocation, and the per-bit form made that validation the single largest
+    // cost of a create.
+    let first_byte = usize::try_from(start_bit / 8).map_err(|_| Ext4Error::Overflow)?;
+    let last_byte = usize::try_from((end_bit - 1) / 8).map_err(|_| Ext4Error::Overflow)?;
+    let first_mask = !0u8 << (start_bit % 8);
+    let trailing_bits = end_bit % 8;
+    let last_mask = if trailing_bits == 0 {
+        !0u8
+    } else {
+        (1u8 << trailing_bits) - 1
+    };
+    let byte = |index: usize| {
+        bitmap
+            .get(index)
+            .copied()
+            .ok_or(Ext4Error::Corrupt(CorruptKind::Truncated))
+    };
+    if first_byte == last_byte {
+        let mask = first_mask & last_mask;
+        if byte(first_byte)? & mask != mask {
             return Err(Ext4Error::Corrupt(corrupt_kind));
         }
+        return Ok(());
+    }
+    if byte(first_byte)? & first_mask != first_mask {
+        return Err(Ext4Error::Corrupt(corrupt_kind));
+    }
+    for index in first_byte + 1..last_byte {
+        if byte(index)? != !0u8 {
+            return Err(Ext4Error::Corrupt(corrupt_kind));
+        }
+    }
+    if byte(last_byte)? & last_mask != last_mask {
+        return Err(Ext4Error::Corrupt(corrupt_kind));
     }
     Ok(())
 }
