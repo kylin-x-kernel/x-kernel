@@ -188,9 +188,55 @@ pub struct SerialPort {
 struct SerialIo {
     backend: Backend,
     input: Option<SerialInput>,
+    #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
+    saved_receive_interrupt: Option<bool>,
 }
 
 impl SerialPort {
+    /// Masks receive delivery on the retained x86 ISA console for system sleep.
+    /// Polled transmit remains available to the PM owner until platform entry.
+    /// # Errors
+    /// Returns BadState if already suspended, or Unsupported for other UARTs.
+    #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
+    pub fn suspend_ioport(&self) -> Result<(), DriverError> {
+        let mut io = self.io.lock();
+        if io.saved_receive_interrupt.is_some() {
+            return Err(DriverError::BadState);
+        }
+        let receive = match &mut io.backend {
+            Backend::Ns16550IoPort(uart) => {
+                let receive = uart.receive_interrupt_enabled();
+                uart.set_receive_interrupt(false);
+                receive
+            }
+            #[cfg(any(unittest, feature = "pl011", feature = "ns16550-mmio"))]
+            _ => return Err(DriverError::Unsupported),
+        };
+        io.saved_receive_interrupt = Some(receive);
+        Ok(())
+    }
+
+    /// Reconstructs the ISA console's original fixed line setup after S3.
+    /// Retains buffered input and restores the hardware RX-enable snapshot;
+    /// allocated input storage alone does not imply an installed IRQ action.
+    /// # Errors
+    /// Returns BadState without a paired suspend, or Unsupported for other UARTs.
+    #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
+    pub fn resume_ioport(&self) -> Result<(), DriverError> {
+        let mut io = self.io.lock();
+        let receive = io.saved_receive_interrupt.ok_or(DriverError::BadState)?;
+        match &mut io.backend {
+            Backend::Ns16550IoPort(uart) => {
+                uart.init_masked();
+                uart.set_receive_interrupt(receive);
+            }
+            #[cfg(any(unittest, feature = "pl011", feature = "ns16550-mmio"))]
+            _ => return Err(DriverError::Unsupported),
+        }
+        io.saved_receive_interrupt = None;
+        Ok(())
+    }
+
     /// Build a PL011 port over an already-mapped MMIO window.
     ///
     /// `role` records whether this port is the kernel stdout console or an
@@ -294,6 +340,8 @@ impl SerialPort {
             io: SpinNoIrq::new(SerialIo {
                 backend,
                 input: None,
+                #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
+                saved_receive_interrupt: None,
             }),
             emergency_tx,
             ident,
@@ -334,7 +382,7 @@ impl SerialPort {
     /// bytes first, then sample at most one hardware receive budget. Not NMI-safe.
     pub fn read_data(&self, bytes: &mut [u8]) -> usize {
         let mut io = self.io.lock();
-        let SerialIo { backend, input } = &mut *io;
+        let SerialIo { backend, input, .. } = &mut *io;
         if let Some(input) = input {
             return input.read(bytes, || backend.try_receive());
         }
@@ -395,7 +443,7 @@ impl SerialPort {
     #[cfg(all(unittest, feature = "pl011"))]
     pub(crate) fn collect_input(&self) -> usize {
         let mut io = self.io.lock();
-        let SerialIo { backend, input } = &mut *io;
+        let SerialIo { backend, input, .. } = &mut *io;
         input
             .as_mut()
             .map_or(0, |input| input.collect(|| backend.try_receive()))
@@ -408,7 +456,7 @@ impl SerialPort {
     pub(crate) fn handle_input_irq(&self) -> IrqEvent {
         let (has_input_event, waker) = {
             let mut io = self.io.lock();
-            let SerialIo { backend, input } = &mut *io;
+            let SerialIo { backend, input, .. } = &mut *io;
             let Some(input) = input else {
                 return IrqEvent::NOT_HANDLED;
             };

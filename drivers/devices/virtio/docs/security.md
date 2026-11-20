@@ -686,3 +686,13 @@ streaming DMA mapping can allocate. The IRQ handler exclusively acknowledges the
 transport; the timer-side probe only reads the atomic readiness hint. Pending
 input is consumed only through normal `read_event`. False-positive wakes are
 harmless because callers drain and recheck.
+
+## Block PM reset boundary
+
+Host integration must exclude producers and serialize PM against removal.
+Busy suspend leaves its own device usable. Ring reconstruction requires reset
+acknowledgment, zero live descriptors and retained coherent allocations; feature
+or capacity mismatch refuses activation. The transport remains closed after
+failed recovery, and the system coordinator must fail-stop rather than release
+producers. A host-side repeated-reset transfer test checks descriptor/index reuse;
+QEMU system S3 validates the production PCI/IRQ/device ordering separately.

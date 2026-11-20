@@ -58,6 +58,7 @@ pub mod driver_registry;
 mod enumeration;
 mod firmware_dma;
 mod manager;
+pub mod power;
 mod resource;
 #[cfg(feature = "hwrng")]
 pub mod rng_completion;

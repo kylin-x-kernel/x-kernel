@@ -25,6 +25,7 @@ pub(crate) enum ErasedCallError {
 
 /// Object-safe view of one typed driver.
 pub(crate) trait ErasedDeviceDriver: Send + Sync {
+    fn supports_suspend(&self) -> bool;
     fn name(&self) -> &'static str;
     fn device_kind(&self) -> DeviceKind;
     fn bus_types(&self) -> &'static [BusTypeId];
@@ -54,6 +55,10 @@ pub(crate) trait ErasedDeviceDriver: Send + Sync {
 }
 
 impl<D: DeviceDriver + 'static> ErasedDeviceDriver for D {
+    fn supports_suspend(&self) -> bool {
+        DeviceDriver::supports_suspend(self)
+    }
+
     fn name(&self) -> &'static str {
         DeviceDriver::name(self)
     }

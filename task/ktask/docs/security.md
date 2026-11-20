@@ -1011,9 +1011,14 @@ Stop callbacks cannot borrow stack metadata that their caller may reclaim.
 ParkedCpus boxes state before queueing and joins every queued callback even on
 preparation timeout. A CPU that stops servicing Stop work can therefore prevent
 rollback: timeout is not proof of safe storage reclamation. CPU topology must
-remain stable. Hardware-reset context preservation remains a separate platform obligation;
-this spin-only rendezvous cannot authorize firmware sleep. Local scheduling is enabled only with fixed owner affinity.
-Freezer-aware futures must not retain a device or lock needed by PM while Pending.
+remain stable. Reset-aware use is unsafe and additionally requires prepared
+platform context storage, restored AP contexts and recovered shared resources
+before release. Local scheduling is enabled only with fixed owner affinity.
+Infrastructure tags are assigned before task publication by audited constructors;
+freezer-aware futures must not retain a device/lock needed by PM while Pending.
+
+`acquire_for_system_sleep` requires preparation on the boot CPU and explicit
+hotplug exclusion until all remote callbacks have joined.
 
 ## CPU parking and PM infrastructure tasks
 

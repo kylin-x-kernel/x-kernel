@@ -104,6 +104,14 @@ impl SerialPort {
         unsafe { x86::io::outb(self.port_int_en(), u8::from(enabled)) };
     }
 
+    /// Reads the current RX notification mask without changing FIFO state.
+    ///
+    /// Call after initialization with exclusive UART access and DLAB clear.
+    pub fn receive_interrupt_enabled(&self) -> bool {
+        // SAFETY: this initialized port owns its I/O range and has DLAB clear.
+        unsafe { x86::io::inb(self.port_int_en()) & 1 != 0 }
+    }
+
     fn line_sts(&mut self) -> LineStsFlags {
         unsafe { LineStsFlags::from_bits_truncate(x86::io::inb(self.port_line_sts())) }
     }

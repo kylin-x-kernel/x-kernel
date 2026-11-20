@@ -175,3 +175,15 @@ opaque to these tests; the production mapping of firmware declarations and
 legacy descriptors is covered by the IRQ-core and serial integration tests. The
 storage failure is a deterministic capacity-overflow result, not a test of
 allocator exhaustion recovery.
+
+## System-sleep UART ownership
+
+The kdriver serial participant calls SerialPort::suspend_ioport and resume_ioport
+on the retained stdout instance. The port lock serializes register snapshots
+and recovery; suspend masks RX notifications while keeping polled TX usable
+for PM diagnostics. Resume restores the saved UART configuration before normal
+producers or device IRQ delivery are admitted. MMIO UART PM is unsupported.
+
+ISA sleep keeps the hardware RX-enable bit in the locked SerialIo snapshot.
+Suspending twice or resuming without that snapshot returns BadState; successful
+recovery consumes it. Buffered input remains separate from IRQ activation state.

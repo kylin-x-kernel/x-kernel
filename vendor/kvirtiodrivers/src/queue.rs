@@ -201,6 +201,51 @@ impl<H: Hal, const SIZE: usize, B: DmaBackend> VirtQueue<H, SIZE, B> {
         })
     }
 
+    /// Whether every submitted chain has been reclaimed by the driver.
+    pub fn is_empty(&self) -> bool {
+        self.num_used == 0
+    }
+
+    /// Reinitializes drained rings after an acknowledged device reset.
+    ///
+    /// # Safety
+    /// The transport must have completed reset and stopped all DMA to these
+    /// rings. No buffer mapping or indirect chain may remain outstanding.
+    /// The caller must negotiate the same ring features before activating it.
+    pub unsafe fn restore_empty<T: Transport>(&mut self, transport: &mut T) -> Result<()> {
+        if self.num_used != 0 || transport.queue_used(self.queue_idx) {
+            return Err(Error::NotReady);
+        }
+        if transport.max_queue_size(self.queue_idx) < SIZE as u32 {
+            return Err(Error::InvalidParam);
+        }
+        self.desc_shadow = FromZeros::new_zeroed();
+        for index in 0..SIZE - 1 {
+            self.desc_shadow[index].next = (index + 1) as u16;
+        }
+        // SAFETY: the caller guarantees completed reset and DMA exclusion;
+        // these are our exclusively owned, correctly sized coherent ring areas.
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.desc_shadow.as_ptr(), self.desc.as_ptr().cast::<Descriptor>(), SIZE);
+        }
+        // SAFETY: reset excludes DMA into the owned, initialized available ring.
+        unsafe { core::ptr::write_bytes(self.avail.as_ptr(), 0, 1) };
+        // SAFETY: the same exclusion covers the separately owned used ring.
+        unsafe { core::ptr::write_bytes(self.used.as_ptr(), 0, 1) };
+        self.free_head = 0;
+        self.avail_idx = 0;
+        self.last_used_idx = 0;
+        // Publish descriptor/free-list and zeroed ring stores before transport
+        // queue registration makes these DMA addresses visible to the device.
+        fence(Ordering::Release);
+        transport.queue_set(
+            self.queue_idx, SIZE as u32,
+            self.layout.descriptors_paddr(), self.layout.driver_area_paddr(),
+            self.layout.device_area_paddr(),
+        );
+        Ok(())
+    }
+
     /// Add buffers to the virtqueue, return a token.
     ///
     /// The buffers must not be empty.
@@ -1255,6 +1300,30 @@ mod tests {
     };
     use safe_mmio::UniqueMmioPointer;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn drained_queue_transfers_again_after_repeated_transport_reset() {
+        let state = Arc::new(Mutex::new(State::new(vec![QueueStatus::default()], ())));
+        let mut transport = FakeTransport {
+            device_type: DeviceType::Block,
+            max_queue_size: 4,
+            device_features: 0,
+            state: state.clone(),
+        };
+        let mut queue = VirtQueue::<FakeHal, 4>::new(&mut transport, 0, false, false, false).unwrap();
+        for value in 0..3u8 {
+            let input = [value];
+            let inputs = [&input[..]];
+            // SAFETY: input stays live and immutable until the chain is reclaimed.
+            let token = unsafe { queue.add(&inputs, &mut []) }.unwrap();
+            assert_eq!(state.lock().unwrap().read_from_queue::<4>(0), vec![value]);
+            // SAFETY: the fake device completed this chain and buffers match add.
+            unsafe { queue.pop_used(token, &inputs, &mut []) }.unwrap();
+            transport.queue_unset(0);
+            // SAFETY: fake reset synchronously stops DMA and all chains retired.
+            unsafe { queue.restore_empty(&mut transport) }.unwrap();
+        }
+    }
 
     #[test]
     fn queue_too_big() {

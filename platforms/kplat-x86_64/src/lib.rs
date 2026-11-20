@@ -17,6 +17,7 @@ mod init;
 mod mp;
 mod peripherals;
 mod power;
+mod suspend;
 
 kplat::default_dma_if_impl!();
 kplat::default_mmio_if_impl!();

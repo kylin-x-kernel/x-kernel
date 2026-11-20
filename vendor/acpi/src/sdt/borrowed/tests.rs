@@ -15,6 +15,30 @@ fn table(signature: &[u8; 4], size: usize) -> Vec<u8> {
     bytes
 }
 
+#[test]
+fn facs_address_obeys_revision_and_complete_field_extent() {
+    for (size, revision, extended, expected) in [
+        (40, 1, 0, Some(0x1000)),
+        (140, 1, 0x2000, Some(0x1000)),
+        (139, 2, 0, Some(0x1000)),
+        (140, 2, 0, Some(0x1000)),
+        (140, 2, 0x2000, Some(0x2000)),
+    ] {
+        let mut bytes = table(b"FACP", size);
+        bytes[8] = revision;
+        bytes[36..40].copy_from_slice(&0x1000u32.to_le_bytes());
+        if size >= 140 {
+            bytes[132..140].copy_from_slice(&(extended as u64).to_le_bytes());
+        }
+        fix_checksum(&mut bytes, 9);
+        let fadt = fadt::Fadt::new(Table::parse(&bytes).unwrap()).unwrap();
+        assert_eq!(fadt.firmware_control_address(), expected);
+    }
+    let bytes = table(b"FACP", 39);
+    let fadt = fadt::Fadt::new(Table::parse(&bytes).unwrap()).unwrap();
+    assert_eq!(fadt.firmware_control_address(), None);
+}
+
 fn rsdp(extended: bool) -> Vec<u8> {
     let mut bytes = vec![0; if extended { 36 } else { 20 }];
     bytes[..8].copy_from_slice(b"RSD PTR ");

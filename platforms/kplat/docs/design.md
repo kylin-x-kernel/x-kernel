@@ -31,3 +31,7 @@ PlatformMmioIf prepares physical device access before mapping. PlatformDmaIf
 prepares/releases platform sharing; neither allocates memory or owns the mapping.
 Current CPU identity uses kiface-cpu-api. Generated device_interface facade functions
 remain convenience calls; the wrapper uses kiface single-provider binding.
+
+## Reset-aware x86 system sleep
+
+On x86, `sys::SystemSleepIf` re-exports the [system sleep contract](../../../util/kiface/crates/power-api/docs/design.md).

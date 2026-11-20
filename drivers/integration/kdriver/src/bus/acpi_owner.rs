@@ -63,6 +63,7 @@ struct ReadyState {
     /// Retained so the OSL/interpreter lifetime outlives the table.
     _ctx: AcpiContext<AcpiOs>,
     table: PrtTable,
+    s3_types: Option<[u8; 2]>,
 }
 
 enum OwnerState {
@@ -85,6 +86,13 @@ const _: fn() = || {
 /// firmware tables have been discovered. Later calls reuse the retained state.
 pub(crate) fn init(config: PciConfigAccess) {
     let _ = OWNER.call_once(|| initialize(config));
+}
+
+pub(crate) fn s3_sleep_types() -> Option<[u8; 2]> {
+    match OWNER.get()? {
+        OwnerState::Ready(ready) => ready.s3_types,
+        OwnerState::Failed(_) => None,
+    }
 }
 
 /// Queries the published firmware route for one PCI function and pin.
@@ -162,7 +170,18 @@ fn initialize(config: PciConfigAccess) -> OwnerState {
                 table.origin(),
                 table.len()
             );
-            OwnerState::Ready(Box::new(ReadyState { _ctx: ctx, table }))
+            let s3_types = match ctx.s3_sleep_types() {
+                Ok(types) => types,
+                Err(error) => {
+                    log::warn!("ACPI: S3 discovery failed: {error:?}");
+                    None
+                }
+            };
+            OwnerState::Ready(Box::new(ReadyState {
+                _ctx: ctx,
+                table,
+                s3_types,
+            }))
         }
         Err(error) => {
             log::error!("ACPI INTx: root _PRT load failed: {error:?}");

@@ -210,6 +210,37 @@ impl<H: Handler + AmlHost> AcpiContext<H> {
         self.irq_model
     }
 
+    /// Copies the two three-bit sleep types declared by `\\_S3`.
+    ///
+    /// An absent or malformed package does not advertise S3. Evaluation runs
+    /// during firmware discovery, before any PM participant is suspended.
+    ///
+    /// # Errors
+    /// Returns the retained host or AML evaluation failure.
+    pub fn s3_sleep_types(&mut self) -> Result<Option<[u8; 2]>, ContextError> {
+        let name = AmlName::from_str("\\_S3").map_err(ContextError::Aml)?;
+        self.evaluate_if_present(&name, Vec::new(), |object| {
+            let Object::Package(items) = object else {
+                return None;
+            };
+            if items.len() < 2 {
+                return None;
+            }
+            let mut types = [0; 2];
+            for (value, item) in types.iter_mut().zip(items.iter()) {
+                let Object::Integer(integer) = &**item else {
+                    return None;
+                };
+                if *integer > 7 {
+                    return None;
+                }
+                *value = *integer as u8;
+            }
+            Some(types)
+        })
+        .map(Option::flatten)
+    }
+
     /// Executes `\_PIC(1)` once and marks the context as initialized.
     ///
     /// An absent `_PIC` is tolerated because the model is a firmware hint; the

@@ -30,6 +30,7 @@ struct BlockState<H: Hal, T: Transport> {
     requests: BlockRequests,
     is_irq_driven: bool,
     is_accepting: bool,
+    is_suspended: bool,
     active_requests: usize,
     drain_notification: Option<Arc<dyn BlockSignals>>,
 }
@@ -150,6 +151,7 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
                 requests,
                 is_irq_driven,
                 is_accepting: true,
+                is_suspended: false,
                 active_requests: 0,
                 drain_notification: None,
             }),
@@ -158,6 +160,48 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
             name: alloc::format!("vd{}", vd_name(index)),
             index,
         }
+    }
+
+    /// Quiesces a drained disk while retaining publication and request storage.
+    /// The host must exclude new producers and serialize PM against removal.
+    /// Busy leaves the device accepting so the coordinator can roll back/retry.
+    ///
+    /// # Errors
+    /// Returns ResourceBusy while closing or with outstanding requests, BadState
+    /// after transport removal, or the transport quiescence error.
+    pub fn suspend(&self) -> DriverResult<()> {
+        let mut state = self.state.lock();
+        if !state.is_accepting || state.active_requests != 0 || !state.requests.is_drained() {
+            return Err(DriverError::ResourceBusy);
+        }
+        let device = state.device.as_mut().ok_or(DriverError::BadState)?;
+        device.suspend().map_err(as_driver_error)?;
+        state.is_accepting = false;
+        state.is_suspended = true;
+        Ok(())
+    }
+
+    /// Rebuilds the drained disk after power loss, retaining its identity.
+    /// IRQ routing must already be accessible and producers remain excluded
+    /// until this succeeds. Failure leaves admission closed for fatal recovery.
+    ///
+    /// # Errors
+    /// Returns BadState without owned suspended transport, or the transport
+    /// reset/feature/geometry error. The host must keep producers excluded.
+    pub fn resume(&self) -> DriverResult<()> {
+        let mut state = self.state.lock();
+        if !state.is_suspended {
+            return Err(DriverError::BadState);
+        }
+        let is_irq_driven = state.is_irq_driven;
+        let device = state.device.as_mut().ok_or(DriverError::BadState)?;
+        device.resume().map_err(as_driver_error)?;
+        if is_irq_driven {
+            device.enable_interrupts();
+        }
+        state.is_suspended = false;
+        state.is_accepting = true;
+        Ok(())
     }
 
     /// Enables queue interrupts after the host installed IRQ/completion handling.
@@ -188,8 +232,8 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
     /// The host serializes close, supplies a fresh closing-task notification,
     /// then withdraws disk lookup and waits without device/registry locks. Keep
     /// IRQ and completion processing active until the drain signal is observed.
-    /// Live is accepting with a transport; Closing retains a transport without
-    /// accepting; Closed has neither. This method does not destroy the transport.
+    /// Closing a suspended disk keeps admission closed and cancels resume before
+    /// releasing the state lock. The transport remains owned until finish_close.
     ///
     /// # Panics
     /// Panics if another close is already draining this device.
@@ -197,9 +241,10 @@ impl<H: Hal, T: Transport> VirtIoBlkDev<H, T> {
         let is_drained = {
             let mut state = self.state.lock();
             assert!(
-                state.is_accepting || state.device.is_none(),
+                state.is_accepting || state.is_suspended || state.device.is_none(),
                 "concurrent block close"
             );
+            state.is_suspended = false;
             state.is_accepting = false;
             if state.active_requests == 0 {
                 true

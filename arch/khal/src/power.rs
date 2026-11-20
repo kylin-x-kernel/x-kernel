@@ -24,6 +24,9 @@
 //! that the other CPUs spin on with interrupts disabled.
 
 use kerrno::KResult;
+/// Reset-aware x86 platform sleep interface.
+#[cfg(target_arch = "x86_64")]
+pub use kplat::sys::SystemSleepIf;
 #[cfg(feature = "smp")]
 pub use kplat::sys::boot_ap;
 pub use kplat::sys::{

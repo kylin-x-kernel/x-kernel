@@ -379,3 +379,20 @@ exact/compound lifetime checks, using `map`, `map_sized` and
 `replace_if_same` for reference-consuming mapping transactions and explicit raw
 names for PA-only fixtures. Inactive test tables do not verify hardware
 shootdown or prove an architecture's private category-bit selection.
+
+## Reset-aware system sleep interface
+
+On x86, `power::SystemSleepIf` re-exports the `kiface-power-api` contract via
+`kplat::sys`. The interface separates platform resource preparation, saved
+remote CPU context, BSP firmware entry, AP reconstruction and final release.
+The kpm coordinator supplies boot-discovered S3 types and independently owns
+task/work, device/DMA, IRQ, clock/event and RTC ordering. The bare legacy
+`suspend_to_ram` endpoint remains separate; it does not establish this system
+transaction. Other architectures currently refuse `kpm::suspend_guest`.
+
+`prepare` runs on the boot CPU in serialized, sleepable PM context with IRQs
+enabled. `park_cpu` runs on each remote Stop task with IRQs and migration
+disabled. `enter` and `restore_cpus` run on the boot CPU with IRQs disabled,
+other CPUs held and logical time frozen; they never sleep. `finish` runs on
+the boot CPU after callback join and shared-device/time recovery, while the
+serialized platform ownership remains held.

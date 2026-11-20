@@ -11,6 +11,7 @@ members = [
     "util/kiface/crates/time-api",
     "util/kiface/crates/irq-context-api",
     "util/kiface/crates/cpu-api",
+    "util/kiface/crates/power-api",
     "util/kiface/crates/task-wait-api",
     "core/kpm",
     "drivers/firmware/fwnode",
@@ -169,6 +170,7 @@ kiface-logging-api = { path = "util/kiface/crates/logging-api" }
 kiface-console-api = { path = "util/kiface/crates/console-api" }
 kiface-time-api = { path = "util/kiface/crates/time-api" }
 kiface-irq-context-api = { path = "util/kiface/crates/irq-context-api" }
+kiface-power-api = { path = "util/kiface/crates/power-api" }
 kiface-cpu-api = { path = "util/kiface/crates/cpu-api" }
 kiface-task-wait-api = { path = "util/kiface/crates/task-wait-api" }
 krcu = { path = "sync/krcu" }

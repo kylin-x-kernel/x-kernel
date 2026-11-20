@@ -311,6 +311,12 @@ pub trait DeviceDriver: Send + Sync {
         Ok(())
     }
 
+    /// Whether this driver implements reversible system power management.
+    /// Default no-op callbacks do not establish DMA/IRQ quiescence or recovery.
+    fn supports_suspend(&self) -> bool {
+        false
+    }
+
     /// Quiesce a device for system suspend. PM scheduling is not wired yet.
     fn suspend(&self, _ctx: &PmContext<'_>, _data: Option<&mut Self::Data>) -> DriverResult<()> {
         Ok(())
@@ -338,6 +344,11 @@ pub struct DriverObject {
 }
 
 impl DriverObject {
+    /// Whether the driver implements reversible system suspend.
+    pub fn supports_suspend(&self) -> bool {
+        self.ops.erased().supports_suspend()
+    }
+
     /// Create a registered driver object.
     pub fn new(id: DriverId, ops: BoxedDriver) -> Self {
         Self {
@@ -360,14 +371,6 @@ impl DriverObject {
         self.ops.erased().remove(ctx, data)
     }
 
-    #[cfg_attr(
-        all(not(unittest), not(doc)),
-        expect(
-            dead_code,
-            reason = "CG-024-lint-exceptions: PM callbacks are reserved and tested only in unit \
-                      builds"
-        )
-    )]
     pub(crate) fn suspend_erased(
         &self,
         ctx: &PmContext<'_>,
@@ -376,14 +379,6 @@ impl DriverObject {
         self.ops.erased().suspend(ctx, data)
     }
 
-    #[cfg_attr(
-        all(not(unittest), not(doc)),
-        expect(
-            dead_code,
-            reason = "CG-024-lint-exceptions: PM callbacks are reserved and tested only in unit \
-                      builds"
-        )
-    )]
     pub(crate) fn resume_erased(
         &self,
         ctx: &PmContext<'_>,

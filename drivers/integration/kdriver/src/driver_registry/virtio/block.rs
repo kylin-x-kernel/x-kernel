@@ -19,12 +19,22 @@ use crate::{block_completion, block_completion_dispatch::BlockIoReclaimer, block
 
 /// Close operations needed after the transport type is erased.
 pub(super) trait BlockActivationOps: Send + Sync {
+    fn suspend(&self) -> DriverResult<()>;
+    fn resume(&self) -> DriverResult<()>;
     fn begin_close(&self, notification: Arc<dyn block::completion::BlockSignals>);
     fn disable_interrupts(&self);
     fn finish_close(&self);
 }
 
 impl<H: VirtIoHal + 'static, T: Transport + 'static> BlockActivationOps for VirtIoBlkDev<H, T> {
+    fn suspend(&self) -> DriverResult<()> {
+        VirtIoBlkDev::suspend(self)
+    }
+
+    fn resume(&self) -> DriverResult<()> {
+        VirtIoBlkDev::resume(self)
+    }
+
     fn begin_close(&self, notification: Arc<dyn block::completion::BlockSignals>) {
         VirtIoBlkDev::begin_close(self, notification)
     }
@@ -39,7 +49,7 @@ impl<H: VirtIoHal + 'static, T: Transport + 'static> BlockActivationOps for Virt
 }
 
 pub(super) struct BlockActivation {
-    device: Arc<dyn BlockActivationOps>,
+    pub(super) device: Arc<dyn BlockActivationOps>,
     irq: Option<DevIrq>,
     reclaimer: Arc<BlockIoReclaimer>,
     disk: Option<GendiskRef>,

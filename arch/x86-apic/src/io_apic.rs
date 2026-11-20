@@ -494,3 +494,106 @@ fn program_initial_redirection_table(
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/io_apic.rs");
+
+/// Saved redirection state, allocated before entering the CPU/IRQ barrier.
+/// Restore routing masked first, then release original masks after devices.
+pub struct SavedIoApics {
+    entries: alloc::vec::Vec<(usize, u8, RedirectionTableEntry)>,
+    is_masked: bool,
+}
+
+impl SavedIoApics {
+    /// Reserves storage without changing interrupt delivery.
+    /// # Errors
+    /// Returns NotFound before IO-APIC preparation has completed.
+    pub fn prepare() -> KResult<Self> {
+        let registry = IO_APICS.get().ok_or(KError::NotFound)?;
+        let capacity = {
+            let registry = registry.lock();
+            registry
+                .instances
+                .iter()
+                .flatten()
+                .map(|c| c.pin_count as usize)
+                .sum()
+        };
+        Ok(Self {
+            entries: alloc::vec::Vec::with_capacity(capacity),
+            is_masked: false,
+        })
+    }
+
+    /// Captures and masks external interrupt routing without allocating.
+    /// # Safety
+    /// All other CPUs must be parked, local IRQs disabled and route mutations
+    /// excluded until this object restores delivery. Storage must be prepared.
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: prepare validated the permanent registry \
+                  before the caller excluded route mutation"
+    )]
+    pub unsafe fn mask_all(&mut self) {
+        assert!(!self.is_masked);
+        let mut registry = IO_APICS.get().expect("prepared IO-APIC registry").lock();
+        for (index, controller) in registry.instances.iter_mut().enumerate() {
+            let Some(controller) = controller else {
+                continue;
+            };
+            for pin in 0..controller.pin_count {
+                let pin = pin as u8;
+                // SAFETY: the registry owns the mapped controller and bounds
+                // pin accesses by its probed count; the lock serializes access.
+                let entry = unsafe { controller.io_apic.table_entry(pin) };
+                assert!(self.entries.len() < self.entries.capacity());
+                self.entries.push((index, pin, entry));
+                // SAFETY: same mapped and bounded controller, now masked.
+                unsafe { controller.io_apic.disable_irq(pin) };
+            }
+        }
+        self.is_masked = true;
+    }
+
+    /// Reconstructs routing after reset while retaining interrupt exclusion.
+    /// # Safety
+    /// Controller mappings must be restored, local IRQs disabled, remote CPUs
+    /// held, and external route mutations excluded.
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: mask_all retained each installed \
+                  controller under the caller's topology exclusion"
+    )]
+    pub unsafe fn restore_masked(&self) {
+        assert!(self.is_masked);
+        let mut registry = IO_APICS.get().expect("prepared IO-APIC registry").lock();
+        for &(index, pin, mut entry) in &self.entries {
+            entry.set_flags(entry.flags() | IrqFlags::MASKED);
+            let controller = registry.instances[index].as_mut().expect("saved IO-APIC");
+            // SAFETY: this transaction owns the same controller and saved pin.
+            unsafe { controller.io_apic.set_table_entry(pin, entry) };
+        }
+    }
+
+    /// Restores each pin's original mask after its consumers are safe.
+    /// # Safety
+    /// Device/controller/time recovery must be complete and all resources
+    /// reachable from any newly enabled IRQ must be usable.
+    #[expect(
+        clippy::expect_used,
+        reason = "CG-021-no-panic-on-reachable-failure: the owned snapshot and caller's route \
+                  exclusion retain the permanent registry and controllers"
+    )]
+    pub unsafe fn resume(&mut self) {
+        if !self.is_masked {
+            return;
+        }
+        let mut registry = IO_APICS.get().expect("prepared IO-APIC registry").lock();
+        for &(index, pin, entry) in &self.entries {
+            let controller = registry.instances[index].as_mut().expect("saved IO-APIC");
+            // SAFETY: the caller completed recovery; this pin's original route
+            // and mask are restored on the retained mapped controller.
+            unsafe { controller.io_apic.set_table_entry(pin, entry) };
+        }
+        self.is_masked = false;
+        self.entries.clear();
+    }
+}

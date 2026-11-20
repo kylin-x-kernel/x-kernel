@@ -380,3 +380,16 @@ Private register-model tests cover masked programming/readback failure, route
 preservation and exact target/vector selection. Allocation tests cover unbound,
 released, conflicting and reused routes. QEMU boot tests complement, rather than
 replace, those tests; they do not constitute physical-controller timing proof.
+
+## Sleep routing snapshot
+
+`SavedIoApics` reserves complete redirection storage before critical entry.
+With CPUs parked it captures and masks every installed pin without allocation,
+reconstructs routes masked after reset, then restores original masks only after
+device/time recovery. Local APIC context reconstruction remains per-CPU platform
+work; this object does not stop producers or save remote execution contexts.
+
+The x86 platform SystemSleepIf provider is the consumer: prepare reserves the
+snapshot before the barrier; enter captures/masks, wake rebuilds masked routes,
+and finish restores the exact pre-sleep routing snapshot. Route mutation must
+remain excluded through finish; device callbacks cannot reroute these pins.

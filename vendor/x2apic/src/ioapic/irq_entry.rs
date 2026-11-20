@@ -69,7 +69,7 @@ bitflags! {
 }
 
 /// Redirection table entry.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct RedirectionTableEntry {
     low: u32,
     high: u32,

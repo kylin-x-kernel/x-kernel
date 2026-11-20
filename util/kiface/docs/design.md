@@ -62,6 +62,7 @@ synchronization libraries such as kmutex and kspin do not use this prefix.
   lock diagnostics, implemented by `ktask`.
 - [`kiface-task-wait-api`](../crates/task-wait-api/docs/design.md): task-bound completion
   waiting shared by IRQ and RCU, above the low-level task/preemption contracts.
+- [kiface-power-api](../crates/power-api/docs/design.md) defines reset-aware x86 system sleep operations.
 - [kiface-cpu-api](../crates/cpu-api/docs/design.md): CPU identity, IRQ exclusion,
   protected exception observations and reschedule transport.
 - [kiface-irq-context-api](../crates/irq-context-api/docs/design.md): IRQ/NMI/BH facts,

@@ -3,7 +3,7 @@
 use crate::config::{ReadOnly, read_config};
 use crate::hal::Hal;
 use crate::queue::VirtQueue;
-use crate::transport::{InterruptStatus, Transport};
+use crate::transport::{DeviceStatus, InterruptStatus, Transport};
 use crate::{Error, Result};
 use bitflags::bitflags;
 use log::info;
@@ -100,6 +100,48 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
             max_segments,
             max_segment_size,
         })
+    }
+
+    /// Suppresses notifications on a drained device, retaining DMA storage.
+    /// The platform must separately mask/synchronize IRQs and stop bus DMA.
+    pub fn suspend(&mut self) -> Result<()> {
+        if !self.queue.is_empty() {
+            return Err(Error::NotReady);
+        }
+        self.queue.set_dev_notify(false);
+        self.transport.ack_interrupt();
+        Ok(())
+    }
+
+    /// Rebuilds feature negotiation and empty queue state after reset or abort.
+    /// Geometry and ring feature changes are rejected before driver activation.
+    /// Reset acknowledgment is busy-polled; a nonresponsive device can prevent
+    /// recovery. The PM owner must retain producer exclusion throughout.
+    pub fn resume(&mut self) -> Result<()> {
+        if !self.queue.is_empty() {
+            return Err(Error::NotReady);
+        }
+        self.transport.set_status(DeviceStatus::empty());
+        while self.transport.get_status() != DeviceStatus::empty() {
+            core::hint::spin_loop();
+        }
+        let features = self.transport.begin_init(self.negotiated_features);
+        if features != self.negotiated_features {
+            return Err(Error::Unsupported);
+        }
+        let capacity = self.transport.read_consistent(|| {
+            Ok((read_config!(self.transport, BlkConfig, capacity_low)? as u64)
+                | ((read_config!(self.transport, BlkConfig, capacity_high)? as u64) << 32))
+        })?;
+        if capacity != self.capacity {
+            return Err(Error::Unsupported);
+        }
+        // SAFETY: reset was acknowledged above with no outstanding descriptors;
+        // PM retains producer exclusion until this same device is reconstructed.
+        // Feature negotiation above preserves the ring layout and semantics.
+        unsafe { self.queue.restore_empty(&mut self.transport) }?;
+        self.transport.finish_init();
+        Ok(())
     }
 
     /// Gets the capacity of the block device, in 512 byte ([`SECTOR_SIZE`]) sectors.
@@ -775,6 +817,41 @@ mod tests {
     use alloc::{sync::Arc, vec};
     use core::mem::size_of;
     use std::{sync::Mutex, thread};
+
+    #[test]
+    fn resume_waits_for_delayed_reset_acknowledgment() {
+        let config = BlkConfig {
+            capacity_low: ReadOnly::new(66),
+            capacity_high: ReadOnly::new(0),
+            size_max: ReadOnly::new(0),
+            seg_max: ReadOnly::new(0),
+            cylinders: ReadOnly::new(0),
+            heads: ReadOnly::new(0),
+            sectors: ReadOnly::new(0),
+            blk_size: ReadOnly::new(0),
+            physical_block_exp: ReadOnly::new(0),
+            alignment_offset: ReadOnly::new(0),
+            min_io_size: ReadOnly::new(0),
+            opt_io_size: ReadOnly::new(0),
+        };
+        let state = Arc::new(Mutex::new(State::new(vec![QueueStatus::default()], config)));
+        let transport = FakeTransport {
+            device_type: DeviceType::Block,
+            max_queue_size: QUEUE_SIZE.into(),
+            device_features: 0,
+            state: state.clone(),
+        };
+        let mut blk = VirtIOBlk::<FakeHal, _>::new(transport).unwrap();
+        for _ in 0..3 {
+            blk.suspend().unwrap();
+            state.lock().unwrap().reset_reads_remaining = 3;
+            blk.resume().unwrap();
+            let state = state.lock().unwrap();
+            assert_eq!(state.reset_reads_remaining, 0);
+            assert!(state.status_history.last().unwrap().contains(DeviceStatus::DRIVER_OK));
+            assert_eq!(state.queues[0].size, QUEUE_SIZE.into());
+        }
+    }
 
     #[test]
     fn scatter_read_write_limits_and_error_retirement() {

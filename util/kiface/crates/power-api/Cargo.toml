@@ -1,0 +1,18 @@
+[package]
+name = "kiface-power-api"
+description = "Platform power management capability contracts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+kerrno.workspace = true
+ktime_types.workspace = true
+kiface.workspace = true
+
+[lints]
+workspace = true

@@ -26,3 +26,7 @@ MMIO/DMA preparation errors must be handled by
 their callers; moving or renaming contracts does not certify rollback on
 partial platform sharing failure. The existing AArch64 partial-sharing error
 policy is tracked separately in kiface's capability audit.
+
+## x86 system sleep
+
+On x86, `sys::SystemSleepIf` re-exports the [system sleep contract](../../../util/kiface/crates/power-api/docs/security.md).

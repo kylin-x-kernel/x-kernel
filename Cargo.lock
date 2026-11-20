@@ -2750,6 +2750,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiface-power-api"
+version = "0.3.0-dev"
+dependencies = [
+ "kerrno",
+ "kiface",
+ "ktime_types",
+]
+
+[[package]]
 name = "kiface-task-api"
 version = "0.3.0-dev"
 dependencies = [
@@ -2974,6 +2983,7 @@ dependencies = [
  "kerrno",
  "kiface",
  "kiface-cpu-api",
+ "kiface-power-api",
  "kplat-macros",
 ]
 

@@ -879,3 +879,15 @@ acknowledges this device's interrupt status and sets the hint. The timer-side
 readiness probe only reads the hint and never touches the ISR. Neither path
 pops or recycles descriptors. Event reads set the hint from the actual dequeue
 result, so an empty queue clears it only after a task observes it.
+
+## Retained block device system sleep
+
+The block adapter accepts suspend only with no active requests and completely
+reclaimed request slots. It retains class/disk identity, coherent rings, DMA
+backend and IRQ/completion ownership, suppresses notification and closes request
+admission. The host subsequently excludes PCI bus mastering and system IRQs.
+Resume acknowledges transport reset, renegotiates identical features, verifies
+unchanged capacity, rebuilds empty rings in their retained allocations and
+restores notification policy before reopening admission. No transport is
+destroyed or republished. Other VirtIO device kinds do not advertise this PM
+contract.

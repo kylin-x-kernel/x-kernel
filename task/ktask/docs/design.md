@@ -1842,9 +1842,9 @@ weak and retired by the next poll rather than held forever.
 `cpu_park::ParkedCpus` owns boxed Stop callback state and retains it until
 `CpuStopWork::is_queued` observes completion with Acquire. Drop first releases
 all callbacks then joins them. The regular rendezvous disarms local timers but
-does not preserve CPUs across reset. Reset-surviving platform context save and
-restore are separate capabilities; this rendezvous alone cannot authorize
-firmware sleep.
+does not preserve CPUs across reset. Its x86 system-sleep variant invokes the
+platform context-save hook before acknowledging, and retains a second software
+barrier after wake until shared device/time recovery is complete.
 
 `future::block_on_freezable` uses the existing prepared wait protocol and
 cooperative checkpoint. Its unsafe caller contract excludes recovery-needed
@@ -1852,3 +1852,6 @@ resources held across Pending. Runtime, alarm and syslog loops require separate
 audits before adopting it. `with_pm_infrastructure` is an immutable, unsafe builder property
 for infrastructure whose resources remain valid until CPU park; the system
 freezer snapshots these explicitly tagged tasks, never their names.
+
+The reset-aware acquire entry requires sleepable task context on the boot CPU
+with a prepared platform transaction and hotplug excluded throughout join.

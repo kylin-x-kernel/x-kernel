@@ -52,13 +52,19 @@ impl<C: FromBytes + Immutable + IntoBytes> Transport for FakeTransport<C> {
     }
 
     fn get_status(&self) -> DeviceStatus {
-        self.state
-            .lock()
-            .unwrap()
-            .status_history
-            .last()
-            .copied()
-            .unwrap_or_default()
+        let mut state = self.state.lock().unwrap();
+        let status = state.status_history.last().copied().unwrap_or_default();
+        if status.is_empty() && state.reset_reads_remaining != 0 {
+            state.reset_reads_remaining -= 1;
+            DeviceStatus::DRIVER_OK
+        } else {
+            if status.is_empty() {
+                for queue in &mut state.queues {
+                    *queue = QueueStatus::default();
+                }
+            }
+            status
+        }
     }
 
     fn set_status(&mut self, status: DeviceStatus) {
@@ -158,6 +164,8 @@ impl<C: FromBytes + Immutable + IntoBytes> Transport for FakeTransport<C> {
 pub struct State<C> {
     /// Every status the driver has set, in order. The last element is the current status.
     pub status_history: Vec<DeviceStatus>,
+    /// Number of nonzero reads to return before acknowledging a requested reset.
+    pub reset_reads_remaining: usize,
     /// The features which the driver says it supports.
     pub driver_features: u64,
     /// The guest page size set by the driver.
@@ -191,6 +199,7 @@ impl<C> State<C> {
     pub const fn new(queues: Vec<QueueStatus>, config_space: C) -> Self {
         Self {
             status_history: Vec::new(),
+            reset_reads_remaining: 0,
             driver_features: 0,
             guest_page_size: 0,
             interrupt_pending: false,

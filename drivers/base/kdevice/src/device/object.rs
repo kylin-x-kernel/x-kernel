@@ -591,6 +591,47 @@ impl DeviceObject {
         runtime.capture_ref()
     }
 
+    /// Invoke a system PM callback on the retained binding under its lifecycle lock.
+    /// # Errors
+    /// Returns BadState for stale binding or data, or the driver's error.
+    pub fn power_transition(
+        self: &Arc<Self>,
+        binding: &BindingRef,
+        driver: &crate::DriverObject,
+        resume: bool,
+    ) -> DriverResult<()> {
+        if !driver.supports_suspend()
+            || (self.is_registered()
+                && !crate::find_driver(binding.driver_id())
+                    .is_some_and(|registered| core::ptr::eq(registered.as_ref(), driver)))
+        {
+            return Err(DriverError::BadState);
+        }
+        let guard = self.binding_lock.lock();
+        let current = self
+            .capture_lifecycle_binding()
+            .ok_or(DriverError::BadState)?;
+        if !current.same_binding(binding) || current.driver_id() != driver.id() {
+            return Err(DriverError::BadState);
+        }
+        let permit = crate::driver::ContextPermit::new(&guard);
+        let ctx = crate::PmContext::new(self.clone(), current, &permit);
+        let mut data = ctx.take_data().map_err(|_| DriverError::BadState)?;
+        let result = if resume {
+            driver.resume_erased(&ctx, data.as_mut())
+        } else {
+            driver.suspend_erased(&ctx, data.as_mut())
+        };
+        if let Some(data) = data {
+            ctx.restore_data(data)
+                .map_err(|error| error.into_parts().1)?;
+        }
+        result.map_err(|error| match error {
+            crate::driver::ErasedCallError::Driver(error) => error,
+            crate::driver::ErasedCallError::TypeMismatch => DriverError::BadState,
+        })
+    }
+
     fn capture_lifecycle_binding(&self) -> Option<BindingRef> {
         let runtime = {
             let slot = self.slot.lock();

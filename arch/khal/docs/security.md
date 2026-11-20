@@ -370,3 +370,18 @@ PA fixtures. Together with generic transaction fixtures they check ownership
 conservation and release ordering. Their page tables are inactive; the tests do
 not establish real hardware shootdown, private-bit encoding safety or complete
 production backing lifetime correctness.
+
+## Reset-aware sleep obligations
+
+The HAL re-exports the contract defined in [kiface-power-api](../../../util/kiface/crates/power-api/docs/security.md) as
+`power::SystemSleepIf`. Its reset-aware operations are unsafe because the provider cannot establish
+scheduler, device and saved-stack ownership. Callers must serialize PM, pin the
+boot CPU, exclude hotplug, retain all contexts through AP callback join and
+recover shared hardware before releasing software barriers. Firmware entry and
+AP restart run IRQ-off with logical time frozen; delays cannot depend on paused
+local events. `persistent_time` is sampled with MONOTONIC advancing.
+
+For `park_cpu`, local IRQs and migration must be disabled on the target CPU,
+and device access must remain usable through context capture. Before `enter`,
+all NMI sources must also be quiesced. CPU affinity alone does not replace
+IRQ/migration exclusion.

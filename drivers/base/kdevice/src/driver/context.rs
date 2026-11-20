@@ -203,14 +203,6 @@ pub struct PmContext<'a> {
 }
 
 impl<'a> PmContext<'a> {
-    #[cfg_attr(
-        all(not(unittest), not(doc)),
-        expect(
-            dead_code,
-            reason = "CG-024-lint-exceptions: PM callbacks are part of the typed ABI but have no \
-                      kpm caller in this ticket"
-        )
-    )]
     pub(crate) fn new(
         device: Arc<DeviceObject>,
         binding: BindingRef,
@@ -234,26 +226,10 @@ impl<'a> PmContext<'a> {
         &self.binding
     }
 
-    #[cfg_attr(
-        all(not(unittest), not(doc)),
-        expect(
-            dead_code,
-            reason = "CG-024-lint-exceptions: PM callbacks are reserved and tested only in unit \
-                      builds"
-        )
-    )]
     pub(crate) fn take_data(&self) -> Result<Option<DriverData>, DataTakeError> {
         self.device.take_data(self.binding.runtime())
     }
 
-    #[cfg_attr(
-        all(not(unittest), not(doc)),
-        expect(
-            dead_code,
-            reason = "CG-024-lint-exceptions: PM callbacks are reserved and tested only in unit \
-                      builds"
-        )
-    )]
     pub(crate) fn restore_data(&self, data: DriverData) -> Result<(), DataInstallError> {
         self.device.restore_data(self.binding.runtime(), data)
     }

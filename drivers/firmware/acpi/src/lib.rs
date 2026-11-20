@@ -60,7 +60,7 @@ mod table;
 
 pub use self::{
     desc::{AcpiDesc, AcpiInitError, desc, init, rsdp_addr},
-    fadt::{Pm1aControlBlock, find_pm1a_control_block_from_init},
+    fadt::{Pm1aControlBlock, find_facs_address_from_init, find_pm1a_control_block_from_init},
     host::{AmlHost, HostAccessKind, HostFailure, HostFailureReason},
     madt::{
         InterruptSourceOverride, IoApicEntry, LocalApicEntry, MadtEntry, MadtEntryIter, MadtInfo,

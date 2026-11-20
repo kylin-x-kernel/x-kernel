@@ -50,3 +50,7 @@ pub trait PlatformPowerIf {
     /// callers and must have completed before this is reached.
     fn suspend_to_ram() -> KResult;
 }
+
+/// Reset-aware x86 system sleep contract provided by the platform.
+#[cfg(target_arch = "x86_64")]
+pub use kiface_power_api::SystemSleepIf;

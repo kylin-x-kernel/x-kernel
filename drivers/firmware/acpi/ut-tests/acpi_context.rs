@@ -5,7 +5,7 @@
 use alloc::{vec, vec::Vec};
 use core::str::FromStr;
 
-use acpi_rs::aml::{AmlError, namespace::AmlName, op_region::RegionSpace, object::Object};
+use acpi_rs::aml::{AmlError, namespace::AmlName, object::Object, op_region::RegionSpace};
 use unittest::def_test;
 
 use super::*;
@@ -17,6 +17,39 @@ use crate::host::{HostAccessKind, HostFailureReason};
 
 fn name(path: &str) -> AmlName {
     AmlName::from_str(path).unwrap()
+}
+
+#[def_test]
+fn s3_requires_a_present_package_with_bounded_sleep_types() {
+    use crate::acpi_test_support::insert;
+
+    let mut absent = test_context();
+    assert_eq!(absent.s3_sleep_types().unwrap(), None);
+    for object in [
+        Object::Integer(1),
+        Object::Package(vec![Object::Integer(1).wrap()]),
+        Object::Package(vec![Object::Integer(8).wrap(), Object::Integer(1).wrap()]),
+        Object::Package(vec![
+            Object::Integer(1).wrap(),
+            Object::Buffer(vec![]).wrap(),
+        ]),
+    ] {
+        let mut context = test_context();
+        insert(&mut context, "\\_S3", object);
+        assert_eq!(context.s3_sleep_types().unwrap(), None);
+    }
+    let mut context = test_context();
+    insert(
+        &mut context,
+        "\\_S3",
+        Object::Package(vec![
+            Object::Integer(1).wrap(),
+            Object::Integer(2).wrap(),
+            Object::Integer(0).wrap(),
+            Object::Integer(0).wrap(),
+        ]),
+    );
+    assert_eq!(context.s3_sleep_types().unwrap(), Some([1, 2]));
 }
 
 #[def_test]
@@ -225,7 +258,10 @@ fn evaluate_if_present_distinguishes_absence() {
 fn records_unsupported_region_when_host_does_not() {
     let mut context = test_context();
     context.host.set_record_unsupported(false);
-    let error = context.aml_error(AmlError::NoHandlerForRegionAccess(RegionSpace::SmBus), false);
+    let error = context.aml_error(
+        AmlError::NoHandlerForRegionAccess(RegionSpace::SmBus),
+        false,
+    );
     assert!(matches!(error, ContextError::UnsupportedRegion(4)));
     assert_eq!(context.host.unsupported_regions(), vec![4]);
     assert!(matches!(

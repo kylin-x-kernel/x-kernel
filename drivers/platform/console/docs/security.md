@@ -117,3 +117,14 @@ Visibility depends on access to the physical or virtual console.
 - Does the timeout path return directly without recursively printing an error?
 - Are MMIO/PIO window lifetimes and natural alignment preserved?
 - Does the documentation distinguish bypassing ordinary locks from complete, serialized, reliable output?
+
+## System-sleep port access
+
+The PM owner must freeze normal serial producers and exclude external device
+IRQs while suspend_ioport/resume_ioport retain and restore the UART snapshot.
+Polled diagnostic TX remains usable; this does not authorize concurrent port
+reconfiguration or MMIO-device power loss.
+
+The retained snapshot records the hardware RX-enable bit before masking it;
+allocated input storage is not evidence that IRQ setup completed. Resume requires
+a paired suspend and restores that bit only after the fixed line setup.

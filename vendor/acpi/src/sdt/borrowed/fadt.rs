@@ -38,6 +38,18 @@ impl<'a> Fadt<'a> {
         })
     }
 
+    /// Selects the nonzero extended FACS address, otherwise the legacy address.
+    pub fn firmware_control_address(&self) -> Option<u64> {
+        if self.0.header().revision >= 2
+            && let Ok(address) = u64_at(self.0.bytes(), 132)
+            && address != 0
+        {
+            return Some(address);
+        }
+        let address = u32_at(self.0.bytes(), 36).ok()? as u64;
+        (address != 0).then_some(address)
+    }
+
     /// Selects a nonzero extended DSDT address, otherwise the legacy address.
     pub fn dsdt_address(&self) -> Option<u64> {
         if self.0.header().revision >= 2

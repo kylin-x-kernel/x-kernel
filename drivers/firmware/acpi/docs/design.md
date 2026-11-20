@@ -294,3 +294,13 @@ checksum or a non-DSDT signature. Run both `make check_acpi` and the vendor
 host tests with `--no-default-features`; the latter compiles the decoder
 without alloc/AML. Kernel builds validate existing callers and compatibility
 re-exports.
+
+## System sleep discovery
+
+The bounded borrowed FADT view selects a complete revision-appropriate extended
+FACS pointer or its nonzero legacy fallback. Platform code separately validates
+FACS signature/extent before writing wake fields. AcpiContext copies the first
+two bounded integer sleep types from `_S3` while the boot AML owner is still
+exclusive. The integration owner publishes only this copied fact, so the PM
+critical interval does not allocate or evaluate AML. This query does not execute
+platform-specific `_PTS`/`_WAK` methods or advertise general physical-platform PM.

@@ -61,7 +61,6 @@
 #![no_std]
 #![cfg(target_arch = "x86_64")]
 
-#[cfg(unittest)]
 extern crate alloc;
 
 #[macro_use]
@@ -72,7 +71,7 @@ mod local_apic;
 mod msix;
 
 pub use io_apic::{
-    IoApicRetargetResult, ProbedIoApic, configure_pin_checked, finish_level_retarget,
+    IoApicRetargetResult, ProbedIoApic, SavedIoApics, configure_pin_checked, finish_level_retarget,
     install_io_apic, io_apic_route, pin_for_gsi_in_range, pin_trigger_mode, prepare_level_retarget,
     probe_io_apic, retarget_edge, retarget_supported, retrigger_pin, set_pin_enabled,
 };

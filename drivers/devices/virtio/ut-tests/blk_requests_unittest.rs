@@ -394,6 +394,21 @@ fn polling_requests_reclaim_split_transfers_without_interrupts() {
     disk.finish_close();
     assert!(!hardware.lock().is_queue_live());
 }
+#[def_test(serial)]
+fn closing_a_suspended_disk_prevents_late_resume() {
+    let (disk, hardware) = disk(0, false);
+    disk.suspend().unwrap();
+    let drained = Arc::new(Signals::default());
+    disk.begin_close(drained.clone());
+    assert_eq!(drained.completion.load(Ordering::Relaxed), 1);
+    assert_eq!(disk.resume(), Err(driver_base::DriverError::BadState));
+    assert!(!disk.state.lock().is_accepting);
+    disk.disable_interrupts();
+    disk.finish_close();
+    assert!(!hardware.lock().is_queue_live());
+    assert_eq!(disk.resume(), Err(driver_base::DriverError::BadState));
+}
+
 impl BlockSignals for Signals {
     fn notify_completion(&self) {
         self.completion.fetch_add(1, Ordering::Relaxed);

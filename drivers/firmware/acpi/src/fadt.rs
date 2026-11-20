@@ -46,3 +46,10 @@ pub(super) fn find_dsdt_address(rsdp: usize) -> Option<usize> {
         .unwrap_or_else(|| panic!("required ACPI FADT is missing"));
     usize::try_from(Fadt::new(table).ok()?.dsdt_address()?).ok()
 }
+
+/// Returns the FACS physical address declared by the validated boot FADT.
+/// The caller must separately validate FACS before accessing its wake vector.
+pub fn find_facs_address_from_init() -> Option<u64> {
+    let table = table::probe_optional_root(desc::rsdp_addr()?, *b"FACP")?;
+    Fadt::new(table).ok()?.firmware_control_address()
+}

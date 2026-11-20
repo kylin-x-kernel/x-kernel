@@ -242,6 +242,30 @@ struct Ns16550IoPortSerialDriver;
 impl DeviceDriver for Ns16550IoPortSerialDriver {
     type Data = ();
 
+    fn supports_suspend(&self) -> bool {
+        true
+    }
+
+    fn suspend(
+        &self,
+        _ctx: &kdevice::PmContext<'_>,
+        _data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
+        console_driver::serial::stdout_port()
+            .ok_or(DriverError::BadState)?
+            .suspend_ioport()
+    }
+
+    fn resume(
+        &self,
+        _ctx: &kdevice::PmContext<'_>,
+        _data: Option<&mut Self::Data>,
+    ) -> DriverResult<()> {
+        console_driver::serial::stdout_port()
+            .ok_or(DriverError::BadState)?
+            .resume_ioport()
+    }
+
     fn name(&self) -> &'static str {
         "serial-ns16550-ioport"
     }

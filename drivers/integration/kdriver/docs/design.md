@@ -46,6 +46,7 @@ drivers/integration/kdriver/
 ├── ut-tests/                    # unit-test fixtures included through path_mod_test
 └── src/
     ├── lib.rs                   # crate entry, init_drivers, ownership summary API
+    ├── power.rs                 # owned system-sleep participants and PCI state
     ├── manager.rs               # DeviceManager and the unified discovery pipeline
     ├── enumeration.rs           # EnumerationContext, descriptor buffer bus backends write
     ├── resource.rs              # provider holder and DriverResult wrappers
@@ -982,3 +983,26 @@ discovery or consumer I/O. The X-Kernel provider reads khal's monotonic clock;
 reusable block code imports only driver_os_api. Clock samples may occur under a
 short IRQ-safe accounting lock in task or completion IRQ/softirq context and
 must not allocate or sleep.
+
+## Guest system sleep
+
+`power::PowerDevices` snapshots exact bound driver/device Arcs, validates explicit
+`supports_suspend` contracts, and orders children before parents. It owns PCI
+endpoint BAR/command/INTx-line state; nonzero segments and bridge headers refuse
+preparation. Device callbacks run outside registry locks. A successful prefix
+is recovered in reverse order, followed by original PCI bus-master admission.
+The system coordinator separately owns task/work/IRQ exclusion and CPU join.
+
+The ACPI owner also publishes a copied `_S3` type pair at boot; PM performs no
+AML evaluation while tasks or devices are frozen. Current callbacks implement
+ISA serial, the synthetic PCI host and VirtIO block only. Other driver kinds
+inherit a false capability even if legacy callbacks default to no-op.
+
+The VirtIO block driver uses the activation owned by the current binding.
+The device lifecycle lock serializes each callback with removal. The PM
+dispatcher checks binding identity and restores driver data after the callback,
+including when the driver returns an error.
+Discovery descriptors, including those without runtime device objects, are
+checked for PCI display-class devices before bound participants are captured.
+These devices are rejected even if unbound: firmware VGA option-ROM
+recovery is not implemented. The supported QEMU profile requires `-vga none`.

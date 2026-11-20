@@ -129,8 +129,9 @@ clock-event activation remains the timer driver's responsibility.
   x2APIC systems still use the xAPIC MSI address in this
   implementation (matches QEMU/hardware compatibility, but limits
   APIC-id reach to 8 bits).
-- No suspend/resume path: APIC state is not saved or restored around
-  sleep transitions (`suspend_to_ram` is unsupported platform-wide).
+- IO-APIC routes are captured, masked and reconstructed by the owned
+  system-sleep snapshot. Per-CPU Local APIC reconstruction belongs to the
+  reset-aware platform backend; the legacy suspend_to_ram stub remains unsupported.
 - Controllers with more than 32 inputs have all hardware entries masked
   during init, but the route-vector pool and `IoApicPin` cover only pins
   `0..=31`. Higher pins are not routable by this backend until a later
@@ -180,3 +181,19 @@ inherit the previous destination. The notification is not an acknowledgement:
 an already issued interrupt may still be pending in a LAPIC after the lock is
 released. Device shutdown and safe vector reuse remain caller/system lifecycle
 obligations, not properties proven by a bitmap or by KIRQ software in-flight.
+
+## Sleep snapshot lifetime
+
+The caller of `SavedIoApics::mask_all` must first prepare snapshot storage
+with `SavedIoApics::prepare`. All other CPUs must be parked, local IRQs
+disabled and route mutations excluded until the snapshot restores delivery.
+Preallocated storage avoids heap work with IRQs disabled. Controller identities
+must remain stable across these phases.
+
+Before `SavedIoApics::restore_masked`, restore controller mappings, disable
+local IRQs, hold remote CPUs and exclude external route mutations. A missing
+owned controller after preparation violates the snapshot invariant.
+
+Before `SavedIoApics::resume` restores the original masks, device, controller
+and time recovery must be complete. Every resource reachable from any newly
+enabled IRQ must be usable.
