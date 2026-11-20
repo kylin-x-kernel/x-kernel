@@ -129,7 +129,7 @@ fn close_visits_unprepared_cpus_before_republication(cpus: usize) -> unittest::T
     }
     let target = cpus - 1;
     assert!(on_cpu(target, || {
-        kplat::nm_irq::NmiMechanismIf::configure_nmi(of::pmu_irq_or(kbuild_config::PMU_IRQ))
+        super::super::prepare_nmi_delivery(of::pmu_irq_or(kbuild_config::PMU_IRQ))
     }));
     if cpus > 1 {
         let mut attempted_unprepared = false;

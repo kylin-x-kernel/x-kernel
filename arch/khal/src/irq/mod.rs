@@ -9,8 +9,3 @@
 //! registration.
 
 mod manager;
-#[cfg(feature = "nmi")]
-mod nmi;
-
-#[cfg(feature = "nmi")]
-pub use nmi::*;

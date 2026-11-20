@@ -141,3 +141,12 @@ modules out of non-test builds. Private module visibility is retained;
 extraction does not widen the production API or change the existing unsafe
 firmware-call contracts. These tests check result handling, not firmware
 quality or entropy quality.
+
+
+## PMU delivery preparation ownership
+
+`peripherals::pmu::prepare_nmi_delivery` owns the GIC descriptor and rejects NMI
+callers or unavailable mechanisms before entering KIRQ's per-CPU preparation
+protocol. The mechanism interface exposes no IRQ-promotion hook. Existing KIRQ
+admission, disabled/inactive PPI checks and retry obligations are unchanged;
+source arming and activation still prepare before enabling delivery.

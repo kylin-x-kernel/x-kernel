@@ -170,23 +170,6 @@ macro_rules! nmi_if_impl {
                 current_mode()
             }
 
-            fn configure_nmi(hwirq: usize) -> bool {
-                if current_mode() == NmiMode::None {
-                    warn!("configure_nmi: NMI unavailable; hwirq {hwirq}");
-                    return false;
-                }
-                let _guard = kspin::NoPreemptIrqSave::new();
-                let desc = kirq::gic_level_irq_desc(hwirq);
-                // Initial preparation precedes PMU IRQ activation. Repeated
-                // preparation is a no-op, but still checks Closing admission.
-                let result = kirq::prepare_percpu_nmi(desc);
-                if let Err(err) = result {
-                    warn!("configure_nmi: local preparation failed; hwirq={hwirq}, error={err:?}");
-                    return false;
-                }
-                true
-            }
-
             fn info() -> NmiSourceInfo {
                 NmiSourceInfo {
                     name: if current_mode() == NmiMode::Hardware {

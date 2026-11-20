@@ -14,12 +14,12 @@ restriction owned by the regular action; it does not block the trusted kernel
 setter, change automatic selection, or establish an SPI-to-CPU initial route.
 PPI and real-NMI lifecycle paths are unchanged. An ordinary action needs no NMI
 preparation or local action publication.
-Activation skips `configure_nmi` in mode `None`. Periodic NMI shutdown and global
+Activation skips `prepare_nmi_delivery` in mode `None`. Periodic NMI shutdown and global
 NMI retirement remain unsupported in that mode; they do not retire the ordinary
 fallback action.
 
 With an available NMI mechanism and `nmi-pmu`, PMU IRQ activation first prepares
-the local registered Line through `NmiMechanismIf::configure_nmi` and KIRQ's
+the local registered Line through the PMU-owned `prepare_nmi_delivery` helper and KIRQ's
 `prepare_percpu_nmi`. Failure leaves the line disabled and is diagnosed.
 The platform selects the mechanism; irq-driver programs attributes, while KIRQ
 owns admission and per-CPU preparation records. Later periodic-source setup

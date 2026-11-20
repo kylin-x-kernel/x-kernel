@@ -29,9 +29,8 @@ This module now owns only trap-entry responsibilities:
 ```text
 arch/khal/src/
 ├── irq/
-│   ├── mod.rs       # adapter helper exports only
-│   ├── manager.rs   # trap handlers
-│   └── nmi.rs       # khal::irq::configure_nmi (per-CPU interrupt line promotion, delegated to the platform NmiMechanismIf)
+│   ├── mod.rs       # trap adapter module
+│   └── manager.rs   # trap handlers
 └── lib.rs           # khal::nmi / khal::pmu mechanism-neutral facade (re-export kplat)
 ```
 
@@ -70,8 +69,8 @@ watchdog / perf consumers
             |-- early_init / late_init   # mechanism probing + per-CPU enablement
             |-- mode / info              # runtime mechanism query (Pseudo / Hardware / None)
             |-- enable_periodic_nmi      # periodic NMI source (currently PMU)
-            |-- quiesce_nmi               # park the local periodic source on the terminating path
-            `-- khal::irq::configure_nmi # per-CPU interrupt line promotion
+            `-- quiesce_nmi              # park the local periodic source on the terminating path
+                    Source backends own local delivery preparation.
 ```
 
 ## Firmware and device-tree transport (`khal::firmware`)
@@ -144,11 +143,10 @@ exists. Early console and PMU discovery use allocation-free
 - `khal::quiesce_nmi()`: to be called only from the terminal halt path; it pins the current CPU with `NoPreempt`,
   and stops the armed local periodic source while keeping the callback and the IRQ configuration. It is a no-op when there is no `nmi_pmu` source or the local
   source is uninitialized, and must not re-arm after the call.
-- `khal::irq::configure_nmi(hwirq)` delegates CPU-local preparation through the
-  platform to KIRQ. Initial preparation requires a registered disabled source;
-  repeated preparation rechecks admission without rewriting live attributes.
-  Shared sources are unsupported. False means rejected/failed preparation,
-  including an unavailable mechanism or a closing Line; it does not enable IRQs.
+- Local delivery preparation belongs to the periodic source backend. AArch64
+  PMU calls `kirq::prepare_percpu_nmi` with its GIC descriptor; native sources
+  need not promote an ordinary IRQ. Mechanism initialization/query and the
+  mandatory periodic source remain separate contracts.
 - `khal::nmi::mode()`: returns `NmiMode::{Pseudo, Hardware, None}`, for consumers
   (such as the watchdog) to decide whether to enable NMI-dependent features.
 

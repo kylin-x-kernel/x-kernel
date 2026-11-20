@@ -35,10 +35,10 @@ It trusts that:
 2. **NMI mechanism facade boundary**
    `khal::nmi` re-exports interfaces such as `mode()` / `enable_periodic_nmi()` to consumers.
    When the mechanism is unavailable (`mode() == NmiMode::None`), consumers must disable NMI-dependent features;
-   `configure_nmi` can also reject Closing, unsupported source types or failed
-   local preparation. A false result must not be treated as prepared delivery;
-   partial controller failure retains cleanup obligations in KIRQ. Periodic
-   source activation remains separate from this preparation contract.
+   source backends own local routing preparation and reject Closing, unsupported
+   source types or controller failures before activation. HAL exposes no generic
+   IRQ-promotion entry. Partial controller failure retains cleanup obligations
+   in KIRQ; failed arming must not be treated as prepared delivery.
    The final shutdown path stops the current CPU's periodic source via `quiesce_nmi()`; this path holds
    `NoPreempt` and relies on the PMU backend's shared counter access and atomic enabled state to safely
    cover any NMI dispatch that may already have arrived.

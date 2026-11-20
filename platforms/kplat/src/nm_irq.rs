@@ -17,10 +17,9 @@
 //!   Consumer (watchdog)
 //!     → khal::nmi::enable_periodic_nmi(period_ns, cb)
 //!       → PeriodicNmiSourceIf provider (e.g. PMU cycle counter backend)
-//!         → khal::irq::configure_nmi(hwirq)          (per CPU)
-//!           → NmiMechanismIf::configure_nmi(hwirq)
-//!             → kirq::prepare_percpu_nmi(desc)
-//!               → local GIC NMI attribute / pseudo-NMI priority transaction
+//!         → source-owned local delivery preparation (per CPU)
+//!           → kirq::prepare_percpu_nmi(source descriptor)
+//!             → local GIC NMI attribute / pseudo-NMI priority transaction
 //!   pmu feature init (kruntime)
 //!     → khal::pmu::register_overflow_dispatch(hwirq)
 //!       → pmu-only build: kirq::try_register_startup(...)
@@ -58,8 +57,8 @@ pub trait NmiMechanismIf {
     /// Called during `early_driver_init`, after the interrupt controller
     /// distributor has been mapped and initialised. Typically queries
     /// controller‑wide NMI capability (for example, `GICD_TYPER.NMI` on GICv3.3);
-    /// per-IRQ NMI attributes and the per-CPU enable belong to
-    /// `configure_nmi` / `late_init`.
+    /// source-specific delivery attributes belong to the source backend,
+    /// while per-CPU mechanism enablement belongs to `late_init`.
     fn early_init() -> bool;
 
     /// Per‑CPU NMI initialization.
@@ -76,24 +75,11 @@ pub trait NmiMechanismIf {
 
     /// Current operating NMI mode.
     ///
-    /// Used by [`NmiMechanismIf::configure_nmi`] to decide how to promote an IRQ
-    /// line to NMI delivery.
+    /// Source backends use this to select their local delivery preparation.
     fn mode() -> NmiMode;
 
     /// Returns the static descriptor for this NMI implementation.
     fn info() -> NmiSourceInfo;
-
-    /// Promote the hardware interrupt `hwirq` to NMI delivery on the
-    /// **calling CPU** according to the current [`NmiMode`].
-    ///
-    /// The platform validates the selected mechanism and enters KIRQ's local
-    /// preparation protocol. The irqchip owns mode-specific attributes. Initial
-    /// preparation requires a disabled, registered CPU-local NMI source and is
-    /// performed before PMU IRQ activation on every participating CPU. Repeated
-    /// preparation is a no-op but still rejects Closing. Shared lines are not
-    /// supported by this entry. Returns false on rejected or failed preparation;
-    /// it does not enable the source or start its producer.
-    fn configure_nmi(hwirq: usize) -> bool;
 }
 
 /// Source‑neutral periodic NMI provider.

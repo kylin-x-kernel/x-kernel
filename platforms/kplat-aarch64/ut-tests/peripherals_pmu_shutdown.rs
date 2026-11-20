@@ -255,7 +255,7 @@ fn event_counter_owner_rejects_periodic_arm_and_shutdown_unchanged() -> unittest
     let _ = counter.check_and_clear_overflow();
     assert!(super::shutdown_periodic_source());
     let irq = of::pmu_irq_or(kbuild_config::PMU_IRQ);
-    assert!(kplat::nm_irq::NmiMechanismIf::configure_nmi(irq));
+    assert!(super::prepare_nmi_delivery(irq));
     let mut owner = EventOwnerScope {
         pin: &pin,
         is_installed: false,

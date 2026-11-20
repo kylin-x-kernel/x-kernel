@@ -23,6 +23,25 @@ kcpu_slot::cpu_slot_cell_with_template! {
         unsafe { lazyinit::LazyInit::new() };
 }
 
+/// Prepares this CPU's disabled PMU PPI before activation or counter setup.
+/// The source owns its GIC descriptor; the mechanism only supplies the mode.
+/// Requires pinned task/IRQ context outside NMI. KIRQ owns admission and the
+/// irqchip owns the priority/attribute transaction; no producer is started here.
+#[cfg(feature = "nmi-pmu")]
+pub(crate) fn prepare_nmi_delivery(irq: usize) -> bool {
+    if kirq::context::is_in_nmi() || kplat::nm_irq::mode() == kplat::nm_irq::NmiMode::None {
+        return false;
+    }
+    let _pin = kspin::NoPreemptIrqSave::new();
+    match kirq::prepare_percpu_nmi(kirq::gic_level_irq_desc(irq)) {
+        Ok(()) => true,
+        Err(error) => {
+            log::warn!("PMU local NMI preparation failed: irq={irq}, error={error:?}");
+            false
+        }
+    }
+}
+
 /// Arms an exclusively owned local periodic source.
 ///
 /// Rejects existing counter ownership and NMI callers before changing hardware
@@ -59,7 +78,7 @@ pub(crate) fn arm_periodic_source(period_ns: u64, handler: PerfCb) -> bool {
     let irq = of::pmu_irq_or(kbuild_config::PMU_IRQ);
     // Initial teardown may have no preparation record. Preparation independently
     // verifies completed hardware disable and no active claim, even on first use.
-    if !kplat::nm_irq::NmiMechanismIf::configure_nmi(irq) {
+    if !prepare_nmi_delivery(irq) {
         let _ = shutdown_periodic_source();
         return false;
     }
@@ -325,7 +344,7 @@ macro_rules! pmu_if_impl {
                 let irq = of::pmu_irq_or(kbuild_config::PMU_IRQ);
                 #[cfg(feature = "nmi-pmu")]
                 if kplat::nm_irq::NmiMechanismIf::mode() != kplat::nm_irq::NmiMode::None
-                    && !kplat::nm_irq::NmiMechanismIf::configure_nmi(irq)
+                    && !$crate::peripherals::pmu::prepare_nmi_delivery(irq)
                 {
                     log::warn!(
                         "PMU IRQ remains disabled after local NMI preparation failure: {irq}"
