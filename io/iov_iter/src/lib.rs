@@ -155,6 +155,15 @@ pub trait IovSink {
     }
 }
 
+/// Marker for [`IovSink`] implementations whose `revert` accepts nonzero
+/// counts, rewinding the cursor and restoring the remaining count.
+///
+/// Direct I/O destinations require this capability so the engine can rewind an
+/// end-of-file tail, mirroring Linux `iov_iter_revert`. Implementing this trait
+/// asserts [`IovSink::revert`] is a real rewind, not the default that rejects
+/// every nonzero count.
+pub trait RewindableSink: IovSink {}
+
 enum IovSourceInner<'a> {
     Kvec { buf: &'a [u8], offset: usize },
     Reader(&'a mut dyn IovSource),
@@ -197,6 +206,69 @@ pub type IovIterSource<'a> = IovIter<'a, IovIterSourceDirection>;
 
 /// Data destination passed to `read_iter`.
 pub type IovIterDest<'a> = IovIter<'a, IovIterDestDirection>;
+
+/// Data destination whose sink supports nonzero rewind.
+///
+/// Required by consumers that must give back an over-copied end-of-file tail.
+/// Only constructible from a [`RewindableSink`] writer or a kernel slice, so the
+/// rewind capability is part of the type. Operations forward to the wrapped
+/// [`IovIterDest`].
+pub struct IovIterDestRewind<'a>(IovIterDest<'a>);
+
+impl IovIterDestRewind<'_> {
+    /// Returns the remaining byte count.
+    pub fn count(&self) -> usize {
+        self.0.count()
+    }
+
+    /// Shrinks the remaining transfer budget to at most `count` bytes.
+    ///
+    /// Leaves the cursor and the wrapped destination unchanged.
+    pub fn truncate(&mut self, count: usize) {
+        self.0.truncate(count);
+    }
+
+    /// Copies bytes into the wrapped destination and advances it.
+    ///
+    /// Returns the number of bytes copied.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the wrapped destination's errors unchanged; the wrapper
+    /// count is unchanged on error.
+    pub fn copy_to_iter(&mut self, src: &[u8]) -> KResult<usize> {
+        self.0.copy_to_iter(src)
+    }
+
+    /// Copies without resolving user faults through the wrapped destination.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the wrapped destination's errors unchanged.
+    pub fn copy_to_iter_nofault(&mut self, src: &[u8]) -> KResult<usize> {
+        self.0.copy_to_iter_nofault(src)
+    }
+
+    /// Prepares at most `count` remaining bytes without advancing the cursor.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the wrapped destination's access or allocation errors.
+    pub fn fault_in_writeable(&mut self, count: usize) -> KResult<bool> {
+        self.0.fault_in_writeable(count)
+    }
+
+    /// Rewinds the cursor by `count` bytes and restores that much budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KError::InvalidInput`] if the remaining count would overflow or
+    /// a kernel slice would rewind before its beginning. Adapter errors
+    /// propagate unchanged; the wrapper count is unchanged on error.
+    pub fn revert(&mut self, count: usize) -> KResult<()> {
+        self.0.revert(count)
+    }
+}
 
 /// Creates a source iterator over a kernel byte slice.
 ///
@@ -247,6 +319,23 @@ pub fn iov_iter_dest(writer: &mut dyn IovSink) -> IovIterDest<'_> {
         count,
         _direction: PhantomData,
     }
+}
+
+/// Creates a rewindable destination iterator over a mutable kernel byte slice.
+///
+/// Retains an exclusive mutable borrow of `buf`, starts at offset zero, and sets
+/// the remaining count to `buf.len()`. No allocation or copying occurs.
+pub fn iov_iter_kvec_dest_rewind(buf: &mut [u8]) -> IovIterDestRewind<'_> {
+    IovIterDestRewind(iov_iter_kvec_dest(buf))
+}
+
+/// Creates a rewindable destination iterator borrowing `writer` exclusively.
+///
+/// Snapshots [`IovSink::count`] as the transfer budget without resetting the
+/// adapter cursor. Subsequent copies and rewinds are delegated to `writer`.
+pub fn iov_iter_dest_rewind(writer: &mut dyn RewindableSink) -> IovIterDestRewind<'_> {
+    let sink: &mut dyn IovSink = writer;
+    IovIterDestRewind(iov_iter_dest(sink))
 }
 
 impl<Direction> IovIter<'_, Direction> {
@@ -301,7 +390,9 @@ impl IovIter<'_, IovIterSourceDirection> {
             IovIterInner::Source(IovSourceInner::Reader(reader)) => {
                 reader.revert(count)?;
             }
-            IovIterInner::Dest(_) => unreachable!("source iterator stores source state"),
+            IovIterInner::Dest(_) => {
+                unreachable!("source iterator stores source state")
+            }
         }
         self.count = new_count;
         Ok(())
@@ -344,7 +435,9 @@ impl IovIter<'_, IovIterSourceDirection> {
             IovIterInner::Source(IovSourceInner::Reader(reader)) => {
                 reader.copy_from_iter(&mut dst[..max_len])
             }
-            IovIterInner::Dest(_) => unreachable!("source iterator stores source state"),
+            IovIterInner::Dest(_) => {
+                unreachable!("source iterator stores source state")
+            }
         }?;
 
         self.advance(copied);
@@ -482,3 +575,5 @@ impl IovIter<'_, IovIterDestDirection> {
         Ok(copied)
     }
 }
+
+unittest::path_mod_test!(tests, "../ut-tests/rewind.rs");

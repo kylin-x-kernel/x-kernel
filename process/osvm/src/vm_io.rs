@@ -162,3 +162,5 @@ impl iov_iter::IovSink for VmBytesMut {
         self.rewind_bytes(count)
     }
 }
+
+impl iov_iter::RewindableSink for VmBytesMut {}

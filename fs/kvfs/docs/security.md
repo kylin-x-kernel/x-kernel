@@ -67,6 +67,16 @@ may retry. Both record-lock and BSD-lock entry points propagate the error.
 sleeping reclaim. This change does not make subsequent lock-record, waiter,
 or other VFS allocations fallible.
 
+## Direct I/O read bounce allocation failure
+
+Read bounce buffers allocate fallibly and return `NoMemory` instead of
+panicking the kernel; the engine retries with a smaller bounded stride before
+propagating the error. A failure after earlier transfers leaves the
+already-copied prefix visible in the destination iterator while the request
+position stays unchanged, matching the engine's error-over-partial precedence.
+Only the bounce data buffer uses the fallible path; the smaller submission and
+staging allocations remain infallible.
+
 ## Test Fixture Scope
 
 Demand-read cancellation releases only the wait registration, leaving submitted

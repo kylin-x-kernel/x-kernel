@@ -54,7 +54,7 @@ pub use address_space::{
 };
 pub use command::EmptyCommandPolicy;
 pub use direct_io::{
-    DioDirection, DioMapping, DioMappingFlags, DioMappingKind, DirectIoOperations,
+    DioDirection, DioMapping, DioMappingFlags, DioMappingKind, DirectIoOperations, dio_read_iter,
 };
 pub use fiemap::{FiemapExtentFlags, FiemapExtentInfo, FiemapExtentWriter, FiemapFlags};
 pub use file::{

@@ -306,4 +306,6 @@ impl iov_iter::IovSink for IoVectorBufIo {
     }
 }
 
+impl iov_iter::RewindableSink for IoVectorBufIo {}
+
 unittest::path_mod_test!(tests, "../../ut-tests/io_vector_buf.rs");

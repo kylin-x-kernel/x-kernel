@@ -1990,9 +1990,10 @@ in `kvfs` and will be wired into `read_iter`/`write_iter` in a later change.
   to the request. `offset` is a file-space byte offset; `device_offset` is the
   backing device byte offset of the same first byte, so file byte `offset + k`
   maps to device byte `device_offset + k`. `DioMappingFlags` mirrors the flags
-  a filesystem reports from `iomap_begin` (same bit values); the engine
-  currently consumes `NEW`, which marks a run allocated by this write whose
-  uncovered bytes must stay zero instead of exposing stale data.
+  a filesystem reports from `iomap_begin` (same bit values); the read engine
+  does not consume them yet, and the write path will consume `NEW`, which marks
+  a run allocated by this write whose uncovered bytes must stay zero instead of
+  exposing stale data.
 - `DioDirection::{Read, Write}` states the request direction explicitly; Linux
   carries the same intent as the `IOMAP_WRITE` flag (no flag implies a read).
   On a write the filesystem chooses the concrete allocation form (initialized,
@@ -2013,15 +2014,36 @@ in `kvfs` and will be wired into `read_iter`/`write_iter` in a later change.
   by then because the engine submits data bios only after it returns;
   `dio_end_io` must likewise finish its conversion and size publication before
   returning.
-- No fixed per-bio byte limit exists. The engine submits one bio per mapping
-  run and the block layer splits it by device limits, as buffered I/O and
-  writeback do. The engine's owned bounce buffer may use an internal
-  allocation stride, which does not affect splitting semantics.
-- `dio_alignment` is the offset/length alignment in bytes; memory alignment is
-  guaranteed by the engine's owned bounce buffer.
+- Reads transfer through bounded, fallible bounce buffers, each stride
+  submitted and awaited synchronously; the engine has no batching equivalent,
+  trading read throughput for simple synchronous completion.
+- A mapped run whose end exceeds the backing device capacity returns `EINVAL`
+  before submission instead of surfacing a block-layer I/O error.
+- When a bounce allocation fails, the engine halves the stride down to the
+  device logical block size and retries before propagating `NoMemory`. Linux's
+  bounce path (`bio_iov_iter_bounce_read`) returns `ENOMEM` immediately; the
+  retry is a deliberate deviation that keeps large reads progressing under
+  transient memory pressure.
+- Read I/O completes while the engine holds the inode data lock shared, so a
+  concurrent truncate or size/policy change (exclusive data lock) cannot free
+  backing blocks under an in-flight bio. Async direct I/O would break that
+  guarantee and needs an inode-level DIO wait before blocks are freed.
+- Two alignment domains apply: the engine checks the filesystem's request
+  offset/length alignment once, and checks each mapped run against the backing
+  device's logical block size, matching Linux `iomap_dio_bio_iter`. Hole and
+  unwritten reads issue no device I/O, so only the request-level check applies.
+- On reads, the end-of-file tail rewind runs for both success and error
+  completions, mirroring the iomap iteration epilogue. An error takes
+  precedence over any partial count and never advances the position. The
+  destination iterator type requires a rewindable sink (`RewindableSink`), so
+  the capability is enforced at compile time rather than by convention.
 
 No call site uses the engine yet. `O_DIRECT` still falls back to buffered I/O,
-and `FMode::CAN_ODIRECT` remains an informational open-time flag.
+and `FMode::CAN_ODIRECT` remains an informational open-time flag. On the read
+side, the generic engine entry `dio_read_iter` and the single-run transfer
+primitive `dio_read_chunk` have landed; the production dispatch arrives with
+the kext4 backend wiring.
+
 ## Open validation
 
 `SimpleFileOps::validate_open()` and `SimpleDirOps::validate_open()` are opt-in

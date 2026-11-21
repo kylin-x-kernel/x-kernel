@@ -4,8 +4,10 @@
 
 `iov_iter` provides direction-specific, borrowed I/O cursors and a remaining
 transfer budget for file reads and writes. The complete implementation is in
-`src/lib.rs`; `Cargo.toml` declares the sole direct dependency, `kerrno`, using
-workspace versions. There are no crate-specific features or public submodules.
+`src/lib.rs`; `Cargo.toml` declares two direct dependencies, `kerrno` for error
+codes and `unittest` for the `cfg(unittest)` test harness, both using workspace
+versions. `unittest` only backs the tests registered under `ut-tests/` and adds
+no public interface. There are no crate-specific features or public submodules.
 
 The crate neither implements user-pointer validation nor parses iovec arrays.
 It delegates memory-access policy to `IovSource` and `IovSink` implementations.
@@ -16,10 +18,12 @@ buffers, or provide synchronization.
 
 ```text
 POSIX I/O glue -- constructs adapters --> iov_iter_source / iov_iter_dest
+                                                  / iov_iter_dest_rewind
                                               |
 kernel slices --> iov_iter_kvec_source / iov_iter_kvec_dest
+                                       / iov_iter_kvec_dest_rewind
                                               |
-                                   IovIterSource / IovIterDest
+                     IovIterSource / IovIterDest / IovIterDestRewind
                                               |
                               VFS read_iter / write_iter consumers
                                               |
@@ -27,21 +31,32 @@ kernel slices --> iov_iter_kvec_source / iov_iter_kvec_dest
 ```
 
 `IovIter<'a, Direction>` stores `inner`, a remaining byte `count`, and a
-`PhantomData<Direction>` marker. `IovIterInner` contains either `Source` or
-`Dest`; each direction contains a `Kvec` slice and `offset`, or a borrowed
-`Reader` / `Writer` trait object. Public aliases select the direction marker.
-Constructors keep the marker and inner variant consistent, allowing separate
-source and destination method sets. These variants select storage and direction;
-they do not represent a runtime state-transition protocol.
+`PhantomData<Direction>` marker. `IovIterInner` contains `Source` or `Dest`;
+the destination variants contain a `Kvec` slice and `offset` or a borrowed
+`dyn IovSink`. Public aliases select the direction marker. `IovIterDestRewind`
+is a newtype wrapping `IovIterDest`: only `iov_iter_dest_rewind` (taking a
+`dyn RewindableSink`) and `iov_iter_kvec_dest_rewind` can build it, and its
+explicit forwarding methods keep the wrapped destination unreachable for
+replacement, so the rewind capability stays part of the type without a second
+implementation. Constructors keep the direction marker and inner variant
+consistent. These variants select storage and direction; they do not represent
+a runtime state-transition protocol.
 
 File-I/O consumers supply kernel slices directly or accept constructed iterators.
 The VFS uses the source alias for writes and the destination alias for reads.
-External implementations provide the source/sink traits; the wrapper invokes
-those implementations. `IoSourceAdapter` in `posix/fs` adapts source access and
-rewind operations. `osvm::VmBytesMut` and `posix_types::IoVectorBufIo` implement
-`IovSink` directly, keeping user pointers, segment cursors and fault policy in
-their existing owners. These are integration relationships, not direct Cargo
-dependencies of this crate.
+External implementations provide the source and sink traits; the wrapper invokes
+those implementations. `RewindableSink` is a marker subtrait of `IovSink`: an
+external sink implements it to declare that its `revert` performs a real nonzero
+rewind instead of the default rejection. Rewindable consumers, such as the
+direct-I/O read engine, select that capability by calling
+`iov_iter_dest_rewind` or `iov_iter_kvec_dest_rewind`, then copy and revert
+through the returned `IovIterDestRewind`; the wrapper calls back into the
+sink's `IovSink` methods, including its `revert` override. `IoSourceAdapter` in
+`posix/fs` adapts source access and rewind operations. `osvm::VmBytesMut` and
+`posix_types::IoVectorBufIo` implement `IovSink` and opt into `RewindableSink`,
+keeping user pointers, segment cursors and fault policy in their existing
+owners. These are integration relationships, not direct Cargo dependencies of
+this crate.
 
 ## Construction and transfer flow
 
@@ -91,9 +106,11 @@ without introducing dependencies on user-memory implementations.
 
 Adapters are trusted to report actual transferred lengths and maintain their
 cursors. Saturating budget subtraction prevents arithmetic underflow but does
-not validate reports or repair inconsistent adapter state. Default trait rewinds
-support only zero bytes. The wrapper provides neither transactional copies nor
-automatic retries after partial effects or errors.
+not validate reports or repair inconsistent adapter state. Default `IovSink`
+rewinds support only zero bytes; `RewindableSink` marks the sinks whose `revert`
+accepts nonzero counts, and only those can back `IovIterDestRewind`. The wrapper
+provides neither transactional copies nor automatic retries after partial
+effects or errors.
 
 ## Drop and resource lifecycle
 

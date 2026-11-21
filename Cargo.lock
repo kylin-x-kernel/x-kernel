@@ -2082,6 +2082,7 @@ name = "iov_iter"
 version = "0.3.0-dev"
 dependencies = [
  "kerrno",
+ "unittest",
 ]
 
 [[package]]

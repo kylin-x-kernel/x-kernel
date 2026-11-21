@@ -479,7 +479,7 @@ fn file_block_device(file: &VfsFile) -> VfsResult<Arc<BlockDevice>> {
         .ok_or_else(|| VfsError::from(LinuxError::ENXIO))
 }
 
-fn map_block_error(error: DriverError) -> VfsError {
+pub(crate) fn map_block_error(error: DriverError) -> VfsError {
     match error {
         DriverError::AlreadyExists => KError::AlreadyExists,
         DriverError::WouldBlock => KError::WouldBlock,

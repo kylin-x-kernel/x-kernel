@@ -13,6 +13,7 @@ pub(crate) use dentry::{
     DentryKey, LookupCreateResult, d_inode, d_is_dir, d_is_negative, d_is_symlink,
     d_really_is_positive,
 };
+pub(crate) use device::map_block_error;
 pub use device::{
     CharacterDeviceRegistration, DeviceAccess, DeviceAccessPolicy, DeviceFileOps, MmapMapper,
     cdev_add, cdev_add_named, cdev_del, check_device_access, open_character_device,
