@@ -583,6 +583,63 @@ fn handler_disable_survives_fasteoi_tail() {
 }
 
 #[def_test(serial)]
+fn handled_fasteoi_dispatch_clears_a_near_limit_unhandled_streak() {
+    let virq = 0x5f6a;
+    let line = fasteoi_line(virq);
+    assert!(
+        line.lock()
+            .install_regular_action(crate::action::IrqAction::regular(Arc::new(|_| {
+                crate::IrqEvent::HANDLED
+            })))
+    );
+    {
+        let mut entry = line.lock();
+        let plan = entry.prepare_auto_enable();
+        entry.commit_platform_plan(plan);
+        entry.seed_unhandled_for_tests(crate::runtime::unhandled::UNCLAIMED_LIMIT - 1, 11);
+    }
+    MASKS.store(0, Ordering::Relaxed);
+    UNMASKS.store(0, Ordering::Relaxed);
+    assert!(IRQ_STATE.lock().descs.insert(virq, line.clone()).is_none());
+    let mut completions = 0;
+    assert_eq!(
+        super::dispatch_claim(crate::IrqRef::Virq(virq), || completions += 1),
+        Some(virq)
+    );
+    let removed = IRQ_STATE.lock().descs.remove(&virq);
+    assert!(
+        removed
+            .as_ref()
+            .is_some_and(|stored| Arc::ptr_eq(stored, &line))
+    );
+    assert_eq!(completions, 1);
+    // Handled service must clear the seeded streak rather than charge its
+    // near-limit count and mask a line that is making progress.
+    assert_eq!(line.lock().unhandled_counts_for_tests(), (0, 0));
+    assert_eq!(MASKS.load(Ordering::Relaxed), 0);
+    assert_eq!(UNMASKS.load(Ordering::Relaxed), 0);
+}
+
+#[def_test(serial)]
+fn handled_percpu_completion_clears_the_unhandled_streak() {
+    let virq = 0x5f6b;
+    let mut entry = IrqStateDesc::test_new(IrqDesc::from_virq(virq));
+    entry.set_flow_for_tests(crate::IrqFlow::PerCpu);
+    entry.seed_unhandled_for_tests(crate::runtime::unhandled::UNCLAIMED_LIMIT - 1, 5);
+    let line = Arc::new(IrqLine::new(entry));
+    let guard = IrqDispatchGuard::new_percpu(virq, line.clone());
+    assert_eq!(
+        IrqDispatch {
+            resolved_irq: Some(virq),
+            guard: Some(guard),
+        }
+        .complete(|| {}),
+        Some(virq)
+    );
+    assert_eq!(line.lock().unhandled_counts_for_tests(), (0, 0));
+}
+
+#[def_test(serial)]
 fn dispatch_guard_finishes_original_line_not_replacement() {
     let virq = 0x5f34;
     let original = Arc::new(IrqLine::new(IrqStateDesc::test_new(IrqDesc::from_virq(

@@ -50,7 +50,7 @@ fn ns16550_rx_activation_preserves_fifo_and_line_configuration() {
         let port = unsafe {
             SerialPort::new_mmio_ns16550(
                 base, PhysAddr::from_usize(0), size_of_val(&registers),
-                SerialRole::Auxiliary, 2, width,
+                SerialRole::Auxiliary, 2, width, false,
             )
         };
         assert_eq!(registers[1], 0);
@@ -343,6 +343,7 @@ fn atomic_ns16550_write_preserves_layout_and_configuration() {
                 SerialRole::Auxiliary,
                 2,
                 width,
+                false,
             )
         };
         let before = registers;
@@ -376,6 +377,7 @@ fn atomic_ns16550_write_stops_when_transmitter_stays_busy() {
             SerialRole::Auxiliary,
             2,
             SerialRegWidth::U32,
+            false,
         )
     };
     let before = registers;

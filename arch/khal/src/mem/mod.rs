@@ -10,6 +10,7 @@ mod source;
 
 use heapless::Vec;
 use lazyinit::LazyInit;
+use memaddr::MemoryAddr;
 pub use memaddr::{PAGE_SIZE_4K, PhysAddr, PhysAddrRange, VirtAddr, VirtAddrRange, pa, va};
 
 /// Physical RAM ranges reported by firmware, before kernel image regions and
@@ -117,7 +118,23 @@ pub fn init(boot_info: &boot_info::BootInfo) {
                   overlapping reservations before this subtraction"
     )]
     sub_ranges(ram_regions, &reserved_ranges, |(start, size)| {
-        push(MemoryRegion::new_ram(start, size, "free memory"));
+        // Publish only pages this range owns *entirely*. Firmware reservations
+        // routinely end mid-page, so cutting RAM against them leaves free
+        // ranges that start or end inside a page the reservation still covers.
+        // Handing those to the allocator would either place an allocation on
+        // reserved bytes or, since the allocator only accepts whole aligned
+        // pages, be rejected outright — on RK3588 that left nothing to
+        // allocate from. Aligning inward keeps the partial pages out of
+        // circulation: a page is free only when all of it is.
+        //
+        // The end comes from the original range's end. Aligning the start
+        // first and then adding `size` back would extend the range by the
+        // alignment slack and publish up to a page the reservation covers.
+        let end = (start + size).align_down(PAGE_SIZE_4K);
+        let start = start.align_up(PAGE_SIZE_4K);
+        if end > start {
+            push(MemoryRegion::new_ram(start, end - start, "free memory"));
+        }
     })
     .inspect_err(|(a, b)| error!("Reserved memory region {a:#x?} overlaps with {b:#x?}"))
     .unwrap();

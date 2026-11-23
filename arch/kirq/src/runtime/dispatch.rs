@@ -10,7 +10,10 @@
 //! after withdrawal. Registration and source shutdown remain outside this module.
 
 use alloc::sync::Arc;
-use core::marker::PhantomData;
+use core::{
+    marker::PhantomData,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use kcompletion::DeferredWake;
 use kspin::{NoPreemptIrqSave, SpinNoIrqGuard};
@@ -32,7 +35,9 @@ impl IrqDispatch {
     ///
     /// The caller supplies the original claim's completion, on the claiming CPU.
     /// A running fasteoi owner clears running and completes under its original
-    /// Line lock. Accepted PerCpu completion retains its unlocked contract.
+    /// Line lock. Accepted PerCpu completion runs the claim without Line
+    /// exclusion; its guard then briefly reacquires the Line to account for the
+    /// consecutive-unhandled streak.
     pub(super) fn complete(mut self, complete_claim: impl FnOnce()) -> Option<crate::Virq> {
         let resolved_irq = self.resolved_irq;
         if let Some(guard) = self
@@ -99,16 +104,31 @@ fn complete_with_deferred_affinity(entry: &mut IrqStateDesc, complete_claim: imp
     }
 }
 
+/// Reports an unhandled claim that has no descriptor to account against.
+///
+/// Descriptor-backed lines are sampled from their consecutive-unhandled
+/// streak in [`report_finished`]. These two paths have no descriptor and
+/// therefore no per-line state, so a global counter keeps a storm on such a
+/// line from turning the console into the bottleneck: the first few reports go
+/// out in full, then a power-of-two sample.
+fn report_unrouted_unhandled(report: impl FnOnce()) {
+    static SEEN: AtomicU64 = AtomicU64::new(0);
+    let seen = SEEN.fetch_add(1, Ordering::Relaxed) + 1;
+    if seen <= 8 || seen.is_power_of_two() {
+        report();
+    }
+}
+
 /// Dispatches a real claim and consumes its original completion on every path.
 pub(super) fn dispatch_claim(source: IrqRef, complete_claim: impl FnOnce()) -> Option<crate::Virq> {
     let _context_guard = NoPreemptIrqSave::new();
     let Some((virq, line)) = super::index::lookup(source) else {
-        warn!("Unhandled IRQ {source:?}");
+        report_unrouted_unhandled(|| warn!("Unhandled IRQ {source:?}"));
         complete_claim();
         return None;
     };
     let Some(line) = line else {
-        warn!("Unhandled IRQ {virq}");
+        report_unrouted_unhandled(|| warn!("Unhandled IRQ {virq}"));
         // A resolved source without a descriptor still completes its own claim.
         complete_claim();
         return Some(virq);
@@ -437,10 +457,9 @@ impl IrqDispatchGuard {
 
 impl Drop for IrqDispatchGuard {
     fn drop(&mut self) {
-        if self.admission == DispatchAdmission::Finished
-            || (self.admission == DispatchAdmission::PerCpu && !self.is_unhandled)
-        {
-            // A handled PerCpu claim has no execution state to release.
+        if self.admission == DispatchAdmission::Finished {
+            // An explicit completion already released admission and accounted
+            // for this dispatch.
             return;
         }
         let finished = {
@@ -468,9 +487,14 @@ fn finish_admission(
         DispatchAdmission::Running => entry.finish_running_dispatch(),
         DispatchAdmission::Finished => return (None, None),
     };
-    let report = is_unhandled
-        .then(|| entry.record_unhandled_dispatch())
-        .flatten();
+    let report = if is_unhandled {
+        entry.record_unhandled_dispatch()
+    } else {
+        // Successful service breaks the streak: only consecutive unclaimed
+        // events may drive a healthy line to the masking threshold.
+        entry.reset_unhandled_dispatch();
+        None
+    };
     (wake, report)
 }
 
@@ -484,13 +508,22 @@ fn report_finished(
     wake_execution_idle(wait_set);
     if let Some(report) = report {
         warn!(
-            "Unhandled IRQ {} (descriptor lifetime count={}, previous warnings suppressed={}, \
-             count saturated={}; reports at powers of two and first saturation)",
+            "Unhandled IRQ {} (consecutive unhandled count={}, previous reports suppressed={}, \
+             count saturated={}; reports at powers of two, at the unclaimed limit, and first \
+             saturation)",
             virq,
             report.count,
             report.suppressed,
             report.count == u64::MAX,
         );
+        if report.mask {
+            warn!(
+                "Unhandled IRQ {virq}: {} unclaimed interrupts — masking the line. Nothing claims \
+                 it, and leaving it enabled starves the machine.",
+                super::unhandled::UNCLAIMED_LIMIT,
+            );
+            crate::disable_irq_nosync(virq);
+        }
     }
 }
 

@@ -1,0 +1,2 @@
+# Compiled blobs are produced from the checked-in sources, not committed.
+*.dtb

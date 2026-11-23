@@ -108,8 +108,8 @@ fn resolve_port(
                 .ok_or(DriverError::InvalidInput)?;
             // SAFETY: `vaddr` is the device's exclusively-mapped NS16550 MMIO
             // window returned by `devm_iomap`. `layout` was decoded from the
-            // matching device-tree node and supplies the register stride and
-            // access width.
+            // matching device-tree node and supplies the register stride,
+            // access width, and UART family.
             unsafe {
                 SerialPort::new_mmio_ns16550(
                     vaddr,
@@ -118,6 +118,7 @@ fn resolve_port(
                     SerialRole::Auxiliary,
                     layout.reg_shift,
                     layout.reg_width,
+                    layout.designware,
                 )
             }
         }

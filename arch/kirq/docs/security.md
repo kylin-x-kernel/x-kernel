@@ -1019,7 +1019,7 @@ constraints to prevent dropping across threads, thereby preventing the wrong per
 |------|----------|----------|----------|-----------|
 | F-01 | duplicate regular handler registration | The second action is rejected | Device initialization fails but the existing handler is not overwritten | `register()` returns `false` with a warning |
 | F-02 | duplicate shared action token release | The token does not match the target line or has already been released | The target handler is not removed or the release fails | `free_irq_action()` deletes an action only by line-local token and returns `None` on failure |
-| F-03 | unknown IRQ dispatch | No handler to call | The interrupt is completed, but the functional event is lost | A warning records `Unhandled IRQ` |
+| F-03 | unknown IRQ dispatch | No handler to call | The interrupt is completed, but the functional event is lost | A warning records `Unhandled IRQ`; a descriptor-backed line that remains unclaimed for 100,000 consecutive events is masked, and any handled dispatch resets the streak |
 | F-04 | NMI action unavailable | No locally published handler | Source event is not serviced | Complete the original claim without invoking a handler or entering a potentially locking NMI logger |
 | F-05 | platform backend does not complete or completes twice | Controller state abnormal | Possible interrupt storm or interrupt stall | The internal `completed` flag of the claimed IRQ guard prevents duplicate completion |
 | F-06 | trap adapter does not disable preemption | The `handle_irq()` execution context does not meet the constraints | lifecycle and scheduling boundaries confused | The `khal::irq` adapter creates `NoPreempt` |
@@ -1111,13 +1111,19 @@ they should be controlled by procfs/syslog permission policy.
 - Descriptor-backed unclaimed action fanout uses saturating event counters
   and power-of-two warning sampling. Accounting is serialized by the existing
   Line lock used for in-flight completion; formatting and logging occur after
-  releasing that lock. No directory lookup or lock is needed for accounting.
-  It never masks an IRQ or changes disable depth. Any visited shared action claiming
-  an IRQ prevents an unhandled count, including a faulty always-claiming
-  action; these diagnostics cannot establish that hardware was acknowledged.
-- Unhandled reports are bounded per descriptor lifetime, not per unit of
-  time or across repeated descriptor recreation. Counters combine CPUs and
-  action-set changes within that lifetime. A suppressed tail has no public
+  releasing that lock. No directory lookup is needed, and accounting adds no
+  lock beyond the existing Line lock. At each 100,000-event streak boundary
+  the line is masked through `disable_irq_nosync`, which also records one
+  ordinary disable-depth
+  increment; this is a circuit breaker, and the diagnostic never re-enables
+  the line. Any visited shared action claiming an IRQ prevents an unhandled
+  count, including a faulty always-claiming action; these diagnostics cannot
+  establish that hardware was acknowledged.
+- Unhandled reports are bounded per consecutive-unhandled streak, not per unit
+  of time or across repeated descriptor recreation. A handled dispatch resets
+  the streak, so a line that still services some interrupts does not
+  accumulate isolated unclaimed events toward masking. Counters combine CPUs
+  and action-set changes within one streak. A suppressed tail has no public
   query or teardown report and is discarded with the descriptor. Unknown-source,
   missing-descriptor, no-action admission and unsupported-thread warnings remain
   separate, so this change does not contain all IRQ-related log storms. A

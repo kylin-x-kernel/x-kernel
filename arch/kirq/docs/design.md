@@ -641,18 +641,18 @@ the external test call paths of `context::test_support` and `softirq::test_suppo
 | `runtime_manager.rs` | 49 | None, 43 of them serial |
 | `rcu_irq_entry.rs` | 2 | None, 1 of them serial |
 | `rcu_context.rs` | 1 | None |
-| `unhandled_unittest.rs` | 4 | None |
+| `unhandled_unittest.rs` | 6 | None |
 | `irq_work.rs` | 6 | None, all serial |
 
-There are 13 guest modules in total (including 2 fixtures with zero test cases) and 103 test cases; x86_64 has 102 test cases.
+There are 13 guest modules in total (including 2 fixtures with zero test cases) and 105 test cases; x86_64 has 104 test cases.
 82 test cases remain serial, and there are no user test cases. All guest modules require `cfg(unittest)`.
 `context::test_support::with_nmi_context` retains the safety contract of the mainline; the newly added NMI classification
 test case verifies, while holding the ordinary context lock, that the query bypasses that lock. The separate mount of `tests_rcu_entry` retains
 the RCU watching balance checks for dedicated NMI and nested IRQ/NMI.
 
-The four test cases for unhandled IRQ counting also retain host coverage: `tests/host/unhandled.rs` uses
+The six test cases for unhandled IRQ counting also retain host coverage: `tests/host/unhandled.rs` uses
 `#[test]`, and `ut-tests/unhandled_unittest.rs` uses `#[unittest::def_test]`.
-The two test bodies are identical and respectively verify the reporting boundary, suppression counting, and saturation semantics; later changes must be kept in sync.
+The two test bodies are identical and respectively verify the reporting boundary, suppression counting, saturation and masking semantics, and that a reset discards the whole streak; later changes must be kept in sync.
 The host mount retains the module name `unhandled_unittest`, with the condition `all(test, not(unittest))`;
 the guest macro invocation has an additional outer `cfg(unittest)`, so a standalone host import of the production source does not need to resolve
 `unittest`, and the two mounts are mutually exclusive. The host tests were not converted to guest tests, and no public test API was introduced.
@@ -1093,7 +1093,7 @@ arch/kirq/src/
 │   ├── dispatch.rs     # normal IRQ action fanout
 │   ├── entry.rs        # trap entry, generic claim routing and IRQ-exit ordering
 │   ├── rcu.rs          # interrupt watching and scoped NMI read bridge
-│   ├── unhandled.rs    # descriptor-lifetime unclaimed-event diagnostics
+│   ├── unhandled.rs    # consecutive-unclaimed-event diagnostics
 │   ├── resend.rs       # retained-Line pending replay queue and executor binding
 │   ├── nmi.rs          # Line-owned NMI publication, scoped dispatch and retirement
 │   ├── nmi/action.rs   # Sole owner and quiescent CPU-local publication
@@ -1872,44 +1872,61 @@ For a descriptor with ordinary action admission, dispatch visits the current
 action chain up to its captured publication ceiling and ORs the visited actions'
 claim results. Concurrent unlink can bypass unseen actions; this is not an
 exact admission-time fanout snapshot. Only a completely unclaimed
-fanout increments the descriptor's unhandled count. `HANDLED` with no source
-bits is still a claim; a claim is not proof that a device deasserted its IRQ.
+fanout extends the descriptor's consecutive-unhandled streak; any handled
+completion resets it. `HANDLED` with no source bits is still a claim; a claim is
+not proof that a device deasserted its IRQ.
 
-The count and pending suppressed-report count are saturating `u64`s owned by
-`IrqDescRuntimeState`. Accounting uses the retained Line's state critical section
-at execution-admission completion, without acquiring `IRQ_STATE`. CPUs sharing a
-Line, including a per-CPU IRQ descriptor, share this diagnostic count. Accounting
-adds no lock beyond those used by cleanup, nor an atomic, allocation, clock read,
-feature switch or controller call.
+The streak count and pending suppressed-report count are saturating `u64`s owned
+by `IrqDescRuntimeState`. Accounting uses the retained Line's state critical
+section at execution-admission completion, without acquiring `IRQ_STATE`. This
+includes completed per-CPU dispatches: their guard enters the same critical
+section to account for or clear the streak instead of bypassing shared state.
+CPUs sharing a Line, including a per-CPU IRQ descriptor, share this diagnostic
+count. Accounting adds no lock beyond those used by cleanup, nor an atomic,
+allocation, clock read, feature switch or controller call.
 This warning budget remains active without `KFEAT_IRQ_STAT`; it records only
 unclaimed fanout, rather than adding general per-CPU IRQ activity statistics.
 The existing guard and claim completion ordering is retained; an owned summary
 is logged after releasing the Line lock and waking synchronization waiters.
 Consequently reports can appear out of order across CPUs, or after a later
-descriptor lifetime has begun. A virq and count are not a unique lifetime id.
+streak has begun. A virq and count are not a unique streak id.
 
-Reports occur at counts 1, 2, 4, ... and once at `u64::MAX`, at most 65 reports
-per descriptor lifetime. Each report gives its cumulative count and the number
-of earlier events suppressed since the previous scheduled report. This is
-event-count sampling, not a time-based rate limit. Reaching `u64::MAX` marks a
-lower bound; later events never wrap or restart logging. Logging filters may
-hide a scheduled report, as with other `warn!` calls.
+Reports occur at counts 1, 2, 4, ..., at every `UNCLAIMED_LIMIT` (100,000)
+boundary, and once at `u64::MAX`. Each report gives its current streak count
+and the number of earlier events suppressed since the previous scheduled
+report. This is event-count sampling, not a time-based rate limit. Reaching
+`u64::MAX` marks a lower bound; later events never wrap or restart logging.
+Logging filters may hide a scheduled report, as with other `warn!` calls.
 
-Handled dispatches, action additions/removals, descriptor metadata updates,
-and enable/disable do not reset the counters. Existing execution ownership
-prevents an old snapshot from being charged to a newly created descriptor.
-Actual descriptor removal discards its counters; recreation starts at zero.
+At each `UNCLAIMED_LIMIT` boundary the line is masked with
+`disable_irq_nosync`. A line that has produced this many consecutive
+interrupts nobody claims is not about to be claimed, and leaving it enabled
+costs the whole machine rather than one peripheral; the threshold matches the
+order of Linux's `note_interrupt`. The mask is a circuit breaker, not a
+permanent policy: a subsequent successful registration auto-enables the line
+through the ordinary registration path, and a second unbroken storm is masked
+again at the next boundary.
+
+A handled dispatch resets the streak and its pending suppressed-report count,
+for a shared Line and for a per-CPU descriptor alike, so isolated unclaimed
+events separated by successful service cannot accumulate to the masking
+threshold on a healthy line. Action additions/removals, descriptor metadata
+updates, and enable/disable do not reset the counters. Existing execution
+ownership prevents an old snapshot from being charged to a newly created
+descriptor. Actual descriptor removal discards its counters; recreation starts
+at zero.
 No public counter-query API or final teardown summary is provided, so an
 unreported tail is not preserved after removal and report spacing can grow
-large. These counts are not per-action attribution, a failure ratio, a hardware
-mask policy, or a recovery detector.
+large. These counts are not per-action attribution, a failure ratio, or a
+recovery detector.
 
-Unresolved sources, resolved sources without descriptors, admission with no
-actions, and unsupported threaded-state warnings remain separate diagnostic
-paths and can still log on each occurrence. If an admitted ordinary traversal
-visits no actions because of concurrent unlink, its merged result is unhandled
-and participates in the sampled count. Dedicated NMI dispatch remains outside
-`IRQ_STATE`.
+Unresolved sources and resolved sources without descriptors have no descriptor
+to account against or mask, so a global counter rate-limits those two warnings
+to the first eight reports and then a power-of-two sample. Admission with no
+actions and unsupported threaded-state warnings remain separate diagnostic
+paths. If an admitted ordinary traversal visits no actions because of
+concurrent unlink, its merged result is unhandled and participates in the
+sampled count. Dedicated NMI dispatch remains outside `IRQ_STATE`.
 
 ### `register(desc, handler)`
 

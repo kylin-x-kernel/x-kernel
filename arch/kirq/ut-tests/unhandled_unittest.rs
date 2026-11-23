@@ -2,7 +2,7 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
-use super::UnhandledIrqState;
+use super::{UNCLAIMED_LIMIT, UnhandledIrqState};
 
 #[unittest::def_test]
 fn first_and_power_of_two_reports_account_for_every_event() {
@@ -66,4 +66,32 @@ fn saturation_reports_once_and_never_wraps() {
     state.suppressed = u64::MAX;
     assert!(state.record().is_none());
     assert_eq!(state.suppressed, u64::MAX);
+}
+
+#[unittest::def_test]
+fn unclaimed_limit_reports_and_requests_masking() {
+    let mut state = UnhandledIrqState {
+        count: UNCLAIMED_LIMIT - 1,
+        suppressed: 0,
+    };
+    let report = state.record().expect("the unclaimed limit reports");
+    assert_eq!(report.count, UNCLAIMED_LIMIT);
+    assert!(report.mask);
+    assert!(state.record().is_none());
+}
+
+#[unittest::def_test]
+fn reset_discards_the_entire_streak() {
+    let mut state = UnhandledIrqState {
+        count: UNCLAIMED_LIMIT - 1,
+        suppressed: 7,
+    };
+    state.reset();
+    assert_eq!((state.count, state.suppressed), (0, 0));
+    let report = state
+        .record()
+        .expect("the first event after a handled dispatch reports");
+    assert_eq!(report.count, 1);
+    assert_eq!(report.suppressed, 0);
+    assert!(!report.mask);
 }

@@ -89,6 +89,9 @@ struct StdoutDesc {
     /// 16550 MMIO register access width from `reg-io-width`.
     #[cfg(feature = "ns16550-mmio")]
     reg_width: SerialRegWidth,
+    /// Whether the stdout UART is a DesignWare `snps,dw-apb-uart`.
+    #[cfg(feature = "ns16550-mmio")]
+    designware: bool,
     irq: Option<serial::EarlyIrq>,
 }
 
@@ -100,6 +103,12 @@ pub struct SerialMmioLayout {
     pub reg_shift: u32,
     /// Device-tree `reg-io-width` decoded as a typed MMIO access width.
     pub reg_width: SerialRegWidth,
+    /// Whether the node is a `snps,dw-apb-uart`.
+    ///
+    /// A DesignWare UART has a `USR` register that clears its busy-detect
+    /// interrupt; a plain NS16550-compatible UART does not decode that byte
+    /// offset, so the backend must not read it there.
+    pub designware: bool,
 }
 
 struct InputIrqState {
@@ -214,6 +223,8 @@ fn stdout_desc_from_device_tree() -> Option<StdoutDesc> {
     let reg_shift = node.property_u32("reg-shift").unwrap_or(0);
     #[cfg(feature = "ns16550-mmio")]
     let reg_width = serial_reg_width_from_node(node)?;
+    #[cfg(feature = "ns16550-mmio")]
+    let designware = node.is_compatible("snps,dw-apb-uart");
 
     #[cfg(feature = "pl011")]
     if node
@@ -227,6 +238,8 @@ fn stdout_desc_from_device_tree() -> Option<StdoutDesc> {
             reg_shift,
             #[cfg(feature = "ns16550-mmio")]
             reg_width,
+            #[cfg(feature = "ns16550-mmio")]
+            designware,
             irq,
         });
     }
@@ -245,6 +258,8 @@ fn stdout_desc_from_device_tree() -> Option<StdoutDesc> {
             reg_shift,
             #[cfg(feature = "ns16550-mmio")]
             reg_width,
+            #[cfg(feature = "ns16550-mmio")]
+            designware,
             irq,
         });
     }
@@ -270,6 +285,7 @@ pub fn ns16550_mmio_layout_for_paddr(paddr: usize) -> Option<SerialMmioLayout> {
         return Some(SerialMmioLayout {
             reg_shift: 0,
             reg_width: SerialRegWidth::U8,
+            designware: false,
         });
     };
     for node in fdt.all_nodes() {
@@ -286,6 +302,7 @@ pub fn ns16550_mmio_layout_for_paddr(paddr: usize) -> Option<SerialMmioLayout> {
                     return Some(SerialMmioLayout {
                         reg_shift: node.property_u32("reg-shift").unwrap_or(0),
                         reg_width: serial_reg_width_from_node(node)?,
+                        designware: node.is_compatible("snps,dw-apb-uart"),
                     });
                 }
             }
@@ -294,6 +311,7 @@ pub fn ns16550_mmio_layout_for_paddr(paddr: usize) -> Option<SerialMmioLayout> {
     Some(SerialMmioLayout {
         reg_shift: 0,
         reg_width: SerialRegWidth::U8,
+        designware: false,
     })
 }
 
@@ -329,6 +347,7 @@ fn build_stdout_port(desc: &StdoutDesc) -> SerialPort {
                     SerialRole::Stdout,
                     desc.reg_shift,
                     desc.reg_width,
+                    desc.designware,
                 )
             }
         }

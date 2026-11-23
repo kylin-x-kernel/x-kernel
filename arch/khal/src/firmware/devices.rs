@@ -195,6 +195,11 @@ pub fn pci_legacy_irq(bus: u8, device: u8, function: u8, pin: u8) -> Option<Inte
 /// node's remaining compatibles. The visitor then receives the matched raw
 /// firmware ID plus the node's primary MMIO / IRQ resources, if present.
 ///
+/// Nodes that firmware marks unavailable (`status` absent means available;
+/// only `"okay"`/`"ok"` mean enabled) are skipped: a disabled node is not a
+/// device, and handing one to a driver makes probe run against hardware that
+/// was deliberately left unconfigured.
+///
 /// Today this walks the published firmware-node root. ACPI `_HID/_CID` walks
 /// can be added here without touching callers — the matcher signature stays
 /// string-based and firmware-neutral.
@@ -207,6 +212,15 @@ pub fn for_each_compatible(
     };
 
     for node in root.descendants() {
+        // `of_device_is_available()`: an absent `status` means available, and
+        // only "okay"/"ok" mean enabled. A disabled node is not a device —
+        // creating a descriptor for one hands a driver a firmware entry whose
+        // hardware was deliberately left unconfigured, and the driver's probe
+        // runs against registers that answer nothing. An unreadable status is
+        // treated as unavailable for the same reason.
+        if !node.is_available().unwrap_or(false) {
+            continue;
+        }
         let Some(firmware_id) = node.firmware_ids().find_map(&mut matcher) else {
             continue;
         };

@@ -821,6 +821,21 @@ impl IrqStateDesc {
         self.runtime.unhandled.record()
     }
 
+    /// Clears the consecutive-unhandled streak after a handled dispatch.
+    pub(super) fn reset_unhandled_dispatch(&mut self) {
+        self.runtime.unhandled.reset()
+    }
+
+    #[cfg(unittest)]
+    pub(super) const fn unhandled_counts_for_tests(&self) -> (u64, u64) {
+        self.runtime.unhandled.counts_for_tests()
+    }
+
+    #[cfg(unittest)]
+    pub(super) fn seed_unhandled_for_tests(&mut self, count: u64, suppressed: u64) {
+        self.runtime.unhandled.seed_for_tests(count, suppressed);
+    }
+
     pub(super) fn execution_idle_completion(&self) -> Arc<Completion> {
         self.runtime.execution_idle_completion()
     }

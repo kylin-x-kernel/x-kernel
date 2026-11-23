@@ -369,6 +369,20 @@ pub(super) fn set_nmi_attr(irq: usize, nmi: bool) -> bool {
     }
 }
 
+/// Report an out-of-range INTID a few times, then stay quiet.
+///
+/// The report itself runs at the interrupt rate, so an unthrottled warning
+/// would turn a broken CPU interface into a second source of load.
+fn report_out_of_range(irq: usize) {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static OUT_OF_RANGE: AtomicUsize = AtomicUsize::new(0);
+    let seen = OUT_OF_RANGE.fetch_add(1, Ordering::Relaxed);
+    if seen < 4 {
+        warn!("GICv3: out-of-range INTID {irq:#x}");
+    }
+}
+
 /// Ack an interrupt and return `(hwirq, cookie, is_nmi)`.
 ///
 /// Does **not** open the pseudo‑NMI window; that is the caller's decision.
@@ -397,6 +411,22 @@ fn ack_irq() -> Option<(usize, usize, bool)> {
         return None;
     }
     let irq = ack.to_u32() as usize;
+
+    // The architectural INTID range is 0..=1023 (SGI 0-15, PPI 16-31, SPI
+    // 32-1019, special 1020-1023); anything above that is not something the
+    // distributor can have handed us without an ITS, so either the CPU
+    // interface is misconfigured or the read itself is wrong. Dispatching such
+    // a value as a real line produces an interrupt nothing claims, which the
+    // line then asserts again immediately — a storm at the interrupt rate.
+    if irq > 1023 {
+        report_out_of_range(irq);
+        // Return the value the CPU interface gave us before dropping it:
+        // leaving an ack active keeps the wrong source asserted, and the
+        // caller's `None` path restores the NMI window as for a spurious ack.
+        TRAP_OP.eoi1(ack);
+        aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
+        return None;
+    }
 
     // After ack, running priority reflects this interrupt's priority.  NMI
     // sources are programmed at priority 0.  The RPR read only decides
@@ -548,7 +578,15 @@ pub(super) fn dispatch_irq_from_irqsoff() -> Option<(usize, usize)> {
             TRAP_OP.eoi1(ack);
             // Order the acknowledged interrupt before the handler.
             aarch64_cpu::asm::barrier::isb(aarch64_cpu::asm::barrier::SY);
-            Some((irq, irq))
+            if irq > 1023 {
+                // Same CPU-interface inconsistency as in `ack_irq`: the value
+                // was deactivated above, but it names no line this kernel can
+                // dispatch without feeding the storm.
+                report_out_of_range(irq);
+                None
+            } else {
+                Some((irq, irq))
+            }
         }
         _ => None,
     };

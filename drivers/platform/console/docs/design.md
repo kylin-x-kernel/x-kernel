@@ -37,7 +37,12 @@ PL011 and I/O-port 16550 adapters use vendored `init_masked` APIs rather than
 enabling RX transiently through the upstream `init` and masking it afterward.
 The local MMIO 16550 backend clears DLAB and masks IER before FIFO setup.
 For NS16550 MMIO, it also saves the register stride and access width decoded during
-the same construction path.
+the same construction path. When firmware describes the node as
+`snps,dw-apb-uart` and the mapping covers the fixed `USR` byte at offset 0x7C,
+initialization reads `USR` after the DLAB-clearing `LCR` write to quiesce the
+busy-detect source that write can raise. A plain 16550 or a shorter mapping
+skips that read, so initialization never probes an undecoded or unmapped
+offset.
 The stdout instance is published through `LazyInit` after construction;
 the early console and runtime driver share one `Arc<SerialPort>`.
 
@@ -109,7 +114,17 @@ enabled during registration while the UART source is still masked. Emergency
 output does not participate in receive activation.
 The action acknowledges and collects a receive batch under the port lock, then
 wakes the bound input `Waker` after unlocking. An unrelated IRQ reports unhandled.
-Ports without prepared IRQ input retain direct hardware reads.
+
+Acknowledging is per-backend and must cover every source that backend claims. A
+16550 deasserts its line only by having its source serviced, and the sources that
+carry no byte need a register read of their own: a latched receiver error needs
+`LSR`, and a DesignWare busy detect needs `USR`. Only a node whose firmware
+compatible is `snps,dw-apb-uart` gets the `USR` read; the register is
+DesignWare-specific, not common ground shared by every 16550-compatible part.
+Draining the FIFO clears neither, so a backend that can only collect bytes
+leaves those asserted — and on a level-triggered input that is an unbounded
+storm, not a missed interrupt. Ports without prepared IRQ input retain direct
+hardware reads.
 
 The port owns only an optional input `Waker`, not a work handle or CPU routing.
 The consumer must supply a non-sleeping, allocation-free IRQ-safe implementation.

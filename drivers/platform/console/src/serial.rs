@@ -141,9 +141,13 @@ impl Backend {
                 }
                 false
             }
-            // The NS16550 backends have no explicit ack in the existing code.
+            // A 16550 deasserts its line by having its source serviced; the
+            // backend decodes `IIR` and reads the register that clears it.
+            // Without an ack the backend can only ever report "handled" by
+            // reading a byte, so a source that carries none — a latched
+            // receiver error, or a DesignWare busy detect — stays asserted.
             #[cfg(feature = "ns16550-mmio")]
-            Backend::Ns16550Mmio(_) => false,
+            Backend::Ns16550Mmio(uart) => uart.ack_interrupt(),
             #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
             Backend::Ns16550IoPort(_) => false,
         }
@@ -278,10 +282,15 @@ impl SerialPort {
     /// `reg_width` is the device-tree `reg-io-width` value decoded as a typed
     /// MMIO access width. Rockchip DesignWare UARTs use 32-bit accesses.
     ///
+    /// `designware` says whether the device is a `snps,dw-apb-uart`, whose
+    /// busy-detect interrupt is cleared only by reading its `USR` register.
+    /// `size` is the length of the mapped window and bounds that fixed-offset
+    /// read.
+    ///
     /// # Safety
     ///
     /// `uart_base` must name a valid, exclusively-mapped NS16550 MMIO register
-    /// window for the lifetime of this port.
+    /// window of `size` bytes for the lifetime of this port.
     #[cfg(feature = "ns16550-mmio")]
     pub unsafe fn new_mmio_ns16550(
         uart_base: VirtAddr,
@@ -290,12 +299,18 @@ impl SerialPort {
         role: SerialRole,
         reg_shift: u32,
         reg_width: SerialRegWidth,
+        designware: bool,
     ) -> Self {
         let stride = 1usize << reg_shift;
         // SAFETY: caller guarantees `uart_base` is an exclusive NS16550 MMIO
-        // map. The decoded DT layout supplies the register stride and access
-        // width used for all volatile register operations.
-        let uart = unsafe { Ns16550MmioPort::new(uart_base.as_usize(), stride, reg_width) };
+        // map of `size` bytes. The decoded DT layout supplies the register
+        // stride and access width. `designware` comes from the same node's
+        // `snps,dw-apb-uart` compatible, so it matches whether this hardware
+        // decodes the fixed-offset `USR` register that `init_preserve_baud`
+        // and `ack_interrupt` read only when the flag is set.
+        let uart = unsafe {
+            Ns16550MmioPort::new(uart_base.as_usize(), stride, reg_width, size, designware)
+        };
         // SAFETY: the port was constructed from the same exclusive MMIO window;
         // line/FIFO/interrupt setup is programmed without touching the baud
         // divisor configured by firmware.
@@ -306,6 +321,7 @@ impl SerialPort {
                 base: uart_base.as_usize(),
                 stride,
                 reg_width,
+                size,
             },
             SerialIdent::Mmio { paddr, size },
             role,

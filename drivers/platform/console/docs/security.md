@@ -32,7 +32,14 @@ configuration at call time.
   a mapping that outlives the port, and exclusive initialization.
   The stdout mapping comes from `iomap_device`; auxiliary mappings come from `devm_iomap`.
 - `SerialPort::new_mmio_ns16550` and `Port::new` require the same mapping validity;
-  register stride and width must match the device.
+  `size` must be the real length of the window starting at `base`, because the
+  DesignWare `USR` register has a fixed byte offset (0x7C) that `reg-shift`
+  does not bound. Register stride and width must match the device, and
+  `designware` must match whether the device is a DesignWare APB UART
+  (`snps,dw-apb-uart`): the flag gates the fixed-offset `USR` access, which a
+  plain 16550 does not decode. The backend reads `USR` only when `designware`
+  is true and `size` covers 0x7C through the configured access width; a short
+  or overstated `size` would otherwise allow a probe outside the mapping.
   Emergency handles reuse fixed values checked during normal construction.
 - `EmergencyTx::try_send_raw` builds an independent local handle for each backend
   (`Pl011Uart::new` for PL011, `Port::new` or `uart_16550::SerialPort::new` for
@@ -51,6 +58,25 @@ Volatile access is not synchronization: characters may interleave, writers may
 race for FIFO capacity, and bytes may be lost.
 This path provides no Linux nbcon-style ownership arbitration and does not support
 concurrent changes to the baud rate or other configuration.
+
+## Interrupt Acknowledgment
+
+The NS16550 MMIO backend deasserts its line only by servicing the source that
+`IIR` reports. Two sources carry no byte and need their own register read: a
+latched receiver error needs `LSR`, and a DesignWare busy detect needs `USR`
+(at byte offset 0x7C). `ack_interrupt` decodes the whole `IIR` identifier
+nibble, not `IIR[0]`: the DesignWare busy-detect code has bit 0 set, and the
+classic "bit 0 set means no interrupt pending" test would classify a live
+interrupt as idle. The backend reads `USR` only when firmware describes the
+node as `snps,dw-apb-uart`; a plain 16550 does not decode that offset, and
+probing it on another part would fault outside the device's register window.
+
+Leaving such a source asserted on a level-triggered GIC input is an unbounded
+interrupt storm that costs the whole machine, not one missed input event. The
+unclaimed-interrupt watchdog masks the line after 100,000 events, so a source
+this backend cannot name is contained rather than fatal. On DesignWare,
+`init_preserve_baud` reads `USR` after the `LCR` write so console bring-up
+does not arm busy detect in the first place.
 
 ## Threats and Failure Handling
 

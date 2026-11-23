@@ -25,6 +25,8 @@ pub(super) enum EmergencyTx {
         base: usize,
         stride: usize,
         reg_width: SerialRegWidth,
+        /// Length of the mapping at `base`, for the local handle's contract.
+        size: usize,
     },
     #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
     Ns16550IoPort { base: u16 },
@@ -108,11 +110,14 @@ impl EmergencyTx {
                 base,
                 stride,
                 reg_width,
+                size,
             } => {
                 // SAFETY: these immutable values came from the same validated
                 // mapping/layout as the normal port. This local handle only
-                // polls LSR and writes DATA; it never initializes the device.
-                let mut port = unsafe { Port::new(*base, *stride, *reg_width) };
+                // polls LSR and writes DATA; it never initializes the device,
+                // so the DesignWare-only registers are never touched and the
+                // family flag is irrelevant here.
+                let mut port = unsafe { Port::new(*base, *stride, *reg_width, *size, false) };
                 port.try_send_raw(byte).is_ok()
             }
             #[cfg(all(feature = "ns16550-ioport", target_arch = "x86_64"))]
