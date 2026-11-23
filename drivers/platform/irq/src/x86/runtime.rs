@@ -303,7 +303,15 @@ pub(crate) fn notify_cpu(interrupt_id: usize, target: TargetCpu) {
                 );
                 return;
             };
-            x86_apic::send_ipi_raw(interrupt_id, raw_cpu_id);
+            #[expect(
+                clippy::expect_used,
+                reason = "CG-021-no-panic-on-reachable-failure: kcpu_id_map's x86 loader \
+                          publishes only enabled MADT LocalApic entries whose apic_id is u8; the \
+                          raw_cpu_id lookup above therefore fits both APIC modes. Fixed sends \
+                          wait for idle and cannot return hardware Busy"
+            )]
+            x86_apic::send_ipi_raw(interrupt_id, raw_cpu_id)
+                .expect("published CPU identity cannot be encoded by the local APIC");
         }
         TargetCpu::AllButSelf { me: _, total: _ } => x86_apic::send_ipi_all_but_self(interrupt_id),
     }

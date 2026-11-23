@@ -20,6 +20,11 @@ sequentially. Each AP uses its actual raw APIC ID, restores its own context and
 controller, and publishes acknowledgment before the next target starts. The
 software CPU barrier remains held until device/time recovery completes.
 Raw TSC delays implement the INIT/SIPI budget while MONOTONIC is frozen.
+LAPIC reconstruction uses `restore_local_after_reset` under the PM barrier;
+the permanent runtime handle is retained. INIT/SIPI uses narrow operations with
+bounded hardware polling and typed submission/completion errors. AP boot returns
+those through CpuStartIf; S3 entry and CPU restoration return them to their PM
+caller. The APIC layer does not select a terminal boot/recovery policy.
 IOAPIC routes are reconstructed masked and original masks are restored only by
 finish, after device recovery and remote join.
 

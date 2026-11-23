@@ -180,7 +180,7 @@ impl IoApicRegistry {
             pin,
             expected,
             |vector, destination| {
-                send_ipi_raw(usize::from(vector), RawCpuId::new(usize::from(destination)));
+                send_ipi_raw(usize::from(vector), RawCpuId::new(usize::from(destination))).is_ok()
             },
         )
     }

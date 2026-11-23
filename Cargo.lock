@@ -5942,7 +5942,6 @@ dependencies = [
  "riscv",
  "sbi-rt",
  "unittest",
- "x2apic",
  "x86-apic",
  "x86_64",
 ]

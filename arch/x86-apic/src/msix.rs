@@ -95,12 +95,11 @@ impl MsixVectorAllocator {
             .is_some_and(|actual| expected.is_none_or(|expected| actual == expected))
     }
 
-    fn retrigger(&self, vector: u8, send: impl FnOnce(u8, u8)) -> bool {
+    fn retrigger(&self, vector: u8, send: impl FnOnce(u8, u8) -> bool) -> bool {
         let Some(destination) = self.destination(vector) else {
             return false;
         };
-        send(vector, destination);
-        true
+        send(vector, destination)
     }
 }
 
@@ -109,6 +108,8 @@ impl MsixVectorAllocator {
 /// device owner must still stop and drain delivery before releasing a vector.
 /// Call in task/ordinary IRQ context after local APIC preparation, never NMI,
 /// retaining the source allocation across the call.
+/// Returns false when the allocation has no bound target or IPI submission
+/// rejects that target; this does not release the allocation or its binding.
 pub fn retrigger_msi(vector: usize) -> bool {
     let Ok(vector) = u8::try_from(vector) else {
         return false;
@@ -116,7 +117,7 @@ pub fn retrigger_msi(vector: usize) -> bool {
     MSIX_VECTOR_ALLOCATOR
         .lock()
         .retrigger(vector, |vector, destination| {
-            send_ipi_raw(usize::from(vector), RawCpuId::new(usize::from(destination)));
+            send_ipi_raw(usize::from(vector), RawCpuId::new(usize::from(destination))).is_ok()
         })
 }
 

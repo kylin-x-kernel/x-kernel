@@ -204,6 +204,26 @@ routing. Callbacks do not derive an MSI target from the replay CPU. Device-owned
 MSI masking, posted deliveries and vector-reuse safety are not supplied by these
 flow operations. Generic disable suppresses handlers but cannot stop MSI traffic.
 
+The vendor `RuntimeLocalApic::send_fixed_ipi` returns `Result<(), IpiSendError>`.
+Its xAPIC encoder returns `IpiSendError::InvalidDestination` for a destination
+wider than eight bits. The `x86-apic` wrapper maps that error to
+`KError::InvalidInput` before returning the public `KResult` from
+`x86_apic::send_ipi_raw`. Raw IDs that exceed `u32::MAX` return the same
+`KError::InvalidInput` during `raw_ipi_target` conversion before vendor encoding.
+Both checks precede ICR writes.
+
+The APIC retrigger helpers convert a rejected send to `false` and leave the
+programmed IO-APIC route or MSI destination binding intact. The IRQ driver's
+`retrigger_io` and `retrigger_msi` callbacks log a rejection and return `false`
+to KIRQ. During hardware resend, KIRQ clears the pending bit when the callback
+returns `true` and retains it on `false`.
+
+`notify_cpu` returns `()`. For a `TargetCpu::Specific` destination, a missing
+raw id in the CPU map causes a warning and an early return without submitting
+an IPI. The x86 MADT loader publishes enabled `LocalApic` entries with `u8`
+APIC ids, which fit either controller mode. A send error after that lookup
+triggers the internal invariant check in `notify_cpu` and panics.
+
 Production selectors reject unsupported identities rather than assigning a
 Legacy flow. x86 retains only explicit IO-APIC/MSI bindings and fixed raw
 timer/IPI PerCpu identities. A KIRQ candidate with no selected flow does not

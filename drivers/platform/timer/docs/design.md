@@ -195,8 +195,10 @@ before dispatch coalesce. Report consumption and flag clearing hold the same
 lock as detection publication. Dispatch rearms its own timer as well as notifying
 peers, even when the detecting CPU differs. It never resamples to construct
 diagnostics.
-x86 LAPIC access goes through `x86_apic::with_local_apic`,
-which masks local interrupts while borrowing the current CPU's APIC handle.
+x86 LAPIC access uses `prepare_local_timer` and `set_local_timer_initial`.
+These operations pin the CPU, mask ordinary IRQs and borrow only immutable
+runtime register metadata. The timer driver retains ownership of timer writes;
+NMI-owned LVTPC operations cannot overlap a mutable borrow of the whole LAPIC.
 
 Each PIT sample owns a stack-local `PitChannel2` guard. Its destructor restores
 the saved port `0x61` speaker and gate control byte on every normal return path,

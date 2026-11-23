@@ -10,7 +10,7 @@ use crate::lapic::LocalApicMode;
 
 #[derive(Debug)]
 pub enum LocalApicRegister {
-    X2apic(Msr),
+    X2apic(u32),
     XapicOffset(u64),
 }
 
@@ -20,7 +20,7 @@ impl LocalApicRegister {
             LocalApicMode::XApic { xapic_base } => {
                 Self::XapicOffset(xapic_base + loc.1 as u64)
             }
-            LocalApicMode::X2Apic => Self::X2apic(Msr::new(loc.0)),
+            LocalApicMode::X2Apic => Self::X2apic(loc.0),
         }
     }
 
@@ -33,7 +33,7 @@ impl LocalApicRegister {
             Self::XapicOffset(addr) => {
                 core::ptr::read_volatile(*addr as *const u32)
             }
-            Self::X2apic(msr) => msr.read() as u32,
+            Self::X2apic(msr) => Msr::new(*msr).read() as u32,
         }
     }
 
@@ -45,11 +45,11 @@ impl LocalApicRegister {
                     core::ptr::read_volatile((*addr + 0x10) as *const u32);
                 (lower as u64) | ((upper as u64) << 32)
             }
-            Self::X2apic(msr) => msr.read(),
+            Self::X2apic(msr) => Msr::new(*msr).read(),
         }
     }
 
-    pub unsafe fn write(&mut self, value: u32) {
+    pub unsafe fn write(&self, value: u32) {
         #[cfg(test)]
         if let Self::XapicOffset(address) = self {
             super::register_tests::record_write(*address, value);
@@ -58,20 +58,34 @@ impl LocalApicRegister {
             LocalApicRegister::XapicOffset(offset) => {
                 core::ptr::write_volatile(*offset as *mut u32, value)
             }
-            LocalApicRegister::X2apic(msr) => msr.write(value as u64),
+            LocalApicRegister::X2apic(msr) => {
+                Msr::new(*msr).write(value as u64)
+            }
         }
     }
 
-    pub unsafe fn write_u64(&mut self, value: u64) {
+    pub unsafe fn write_u64(&self, value: u64) {
         match self {
             LocalApicRegister::XapicOffset(offset) => {
                 core::ptr::write_volatile(
                     (*offset + 0x10) as *mut u32,
                     (value >> 32) as u32,
                 );
+                #[cfg(test)]
+                super::register_tests::record_write(
+                    *offset + 0x10,
+                    (value >> 32) as u32,
+                );
                 core::ptr::write_volatile(*offset as *mut u32, value as u32);
+                #[cfg(test)]
+                super::register_tests::record_write(*offset, value as u32);
             }
-            LocalApicRegister::X2apic(msr) => msr.write(value),
+            LocalApicRegister::X2apic(msr) => {
+                #[cfg(test)]
+                super::register_tests::record_msr_write(*msr, value);
+                #[cfg(not(test))]
+                Msr::new(*msr).write(value);
+            }
         }
     }
 }
@@ -148,7 +162,7 @@ macro_rules! read {
 macro_rules! write {
     ($name:ident) => {
         paste::item! {
-            pub unsafe fn [<write_ $name>](&mut self, value: u32) {
+            pub unsafe fn [<write_ $name>](&self, value: u32) {
                 self.$name.write(value);
             }
         }
@@ -162,7 +176,7 @@ macro_rules! read_write {
 
         paste::item! {
             pub unsafe fn [<set_ $name _bit>](
-                &mut self,
+                &self,
                 bit: usize,
                 val: bool,
             ) {
@@ -174,7 +188,7 @@ macro_rules! read_write {
             }
 
             pub unsafe fn [<set_ $name _bit_range>](
-                &mut self,
+                &self,
                 pos: Range<usize>,
                 val: u32,
             ) {
@@ -246,11 +260,11 @@ impl LocalApicRegisters {
         self.base().bit(bit)
     }
 
-    pub unsafe fn write_base(&mut self, value: u64) {
-        self.base.write(value)
+    pub unsafe fn write_base(&self, value: u64) {
+        Msr::new(IA32_APIC_BASE).write(value)
     }
 
-    pub unsafe fn set_base_bit(&mut self, bit: usize, value: bool) {
+    pub unsafe fn set_base_bit(&self, bit: usize, value: bool) {
         let mut base = self.base();
         base.set_bit(bit, value);
         self.write_base(base);
@@ -264,11 +278,19 @@ impl LocalApicRegisters {
         self.icr().bit(bit)
     }
 
-    pub unsafe fn write_icr(&mut self, value: u64) {
+    pub unsafe fn write_icr(&self, value: u64) {
         self.icr.write_u64(value)
     }
 
-    pub unsafe fn set_icr_bit(&mut self, bit: usize, value: bool) {
+    /// Writes only xAPIC's command word, preserving the destination register.
+    ///
+    /// # Safety
+    /// This must be a live xAPIC mapping and `value` must use shorthand.
+    pub unsafe fn write_icr_low(&self, value: u32) {
+        self.icr.write(value)
+    }
+
+    pub unsafe fn set_icr_bit(&self, bit: usize, value: bool) {
         let mut icr = self.icr();
         icr.set_bit(bit, value);
         self.write_icr(icr);

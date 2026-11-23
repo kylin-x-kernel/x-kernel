@@ -50,7 +50,6 @@ its external data boundaries.
 | --- | --- |
 | `src/x86_lapic_tsc.rs::read_tsc_raw` calls `_rdtsc` | Compiled only for supported x86_64 targets, where the instruction is available. It accesses counter state without dereferencing memory. All local TSC reads use this helper. |
 | `src/x86_lapic_tsc.rs::PitChannel2::{acquire,start_one_shot,has_elapsed}` and `Drop` perform port I/O | Bootstrap executes at CPL0 with exclusive ownership of channel 2. `start_one_shot` asserts a nonzero reload and writes both bytes. The platform calls `early_init` before secondary CPUs and other port users; calibration masks local interrupts around each sample. The guard restores the saved control byte before that interval ends. |
-| `src/x86_lapic_tsc.rs::{init_percpu,arm_timer_after,disarm_timer}` program LAPIC registers | The calling CPU's APIC must already be initialized. `x86_apic::with_local_apic` checks the local handle and masks local interrupts during its mutable borrow. Boot hooks order APIC initialization before timer setup and keep CPU IRQ delivery masked until the handler is installed; runtime calls depend on that completed setup. |
 | `src/arm_generic.rs::write_physical_timer_tval`, with `vmm`, executes `msr CNTHP_TVAL_EL2` | The host runs at EL2 with VHE as required by the physical-timer helpers. The assembly takes one `in(reg)` integer, writes the timer register, and has no pointer operand or Rust output. Initialization passes zero; deadline programming bounds positive intervals to `i32::MAX`, within the register's signed 32-bit range. |
 
 The RISC-V backend contains no explicit unsafe block; privileged counter and SBI
@@ -68,9 +67,15 @@ PIT ownership is global across CPUs. Local interrupt masking protects one sample
 from local IRQ handlers, while the boot sequence prevents other CPUs and drivers
 from reprogramming channel 2. Every normal sample return releases the local guard.
 
-LAPIC handles belong to the current CPU and use an IRQ-masked borrow supplied
-by `x86_apic`. ARM samples and state updates share an IRQ-safe lock; remote
-repair requests use independent per-CPU atomic pending flags.
+The safe x86 timer operations `init_percpu`, `arm_timer_after` and `disarm_timer`
+use `x86_apic::prepare_local_timer` and `set_local_timer_initial`. These APIs
+require completed local APIC initialization, check the published CPU-local
+handle and mask ordinary IRQs while borrowing immutable register metadata.
+The timer driver owns timer programming; NMI access uses different source
+registers. Boot hooks order APIC initialization before timer setup and retain
+IRQ exclusion until the handler is installed. ARM samples and state updates
+share an IRQ-safe lock; remote repair requests use independent per-CPU atomic
+pending flags.
 
 ## Threat analysis
 

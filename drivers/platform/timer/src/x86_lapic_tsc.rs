@@ -611,19 +611,7 @@ fn read_tsc_raw() -> u64 {
 ///
 /// Panics if the calling CPU has no initialized local APIC handle.
 pub fn init_percpu() {
-    use x2apic::lapic::{TimerDivide, TimerMode};
-
-    x86_apic::with_local_apic(|lapic| {
-        // SAFETY: with_local_apic retains the initialized current-CPU
-        // controller with IRQs/preemption disabled and exclusive access.
-        unsafe { lapic.set_timer_mode(TimerMode::OneShot) };
-        // SAFETY: with_local_apic retains the initialized current-CPU
-        // controller with IRQs/preemption disabled and exclusive access.
-        unsafe { lapic.set_timer_divide(TimerDivide::Div1) };
-        // SAFETY: with_local_apic retains the initialized current-CPU
-        // controller with IRQs/preemption disabled and exclusive access.
-        unsafe { lapic.enable_timer() };
-    });
+    x86_apic::prepare_local_timer();
 }
 
 /// Returns elapsed TSC ticks since primary timer initialization.
@@ -694,32 +682,23 @@ fn interrupt_id() -> usize {
 /// Panics if the TSC conversion ratio has not been initialized.
 fn arm_timer_after(interval: ktime_types::TimeSpan) {
     let interval_ns = interval.as_nanos_u64_saturating();
-    // SAFETY: the local APIC timer is initialized before deadline programming, and
-    // the helper masks local interrupts while borrowing the CPU-local LAPIC handle.
-    {
-        x86_apic::with_local_apic(|lapic| {
-            if interval_ns != 0 {
-                #[expect(
-                    clippy::expect_used,
-                    reason = "CG-021-no-panic-on-reachable-failure: LAPIC timer initialization \
-                              installs its conversion ratio before publishing timer operations"
-                )]
-                let apic_ticks = NANOS_TO_LAPIC_TICKS_RATIO
-                    .get()
-                    .expect("x86 LAPIC deadline ratio is not initialized")
-                    // Initial-count is 32-bit; clamp and re-arbitrate on the early IRQ.
-                    .mul_trunc(interval_ns)
-                    .clamp(1, u32::MAX as u64);
-                // SAFETY: with_local_apic holds the initialized current-CPU
-                // controller exclusively with IRQs and preemption disabled.
-                unsafe { lapic.set_timer_initial(apic_ticks as u32) };
-            } else {
-                // SAFETY: with_local_apic holds the initialized current-CPU
-                // controller exclusively with IRQs and preemption disabled.
-                unsafe { lapic.set_timer_initial(1) };
-            }
-        });
-    }
+    let initial = if interval_ns != 0 {
+        #[expect(
+            clippy::expect_used,
+            reason = "CG-021-no-panic-on-reachable-failure: LAPIC timer initialization installs \
+                      its conversion ratio before publishing timer operations"
+        )]
+        let ticks = NANOS_TO_LAPIC_TICKS_RATIO
+            .get()
+            .expect("x86 LAPIC deadline ratio is not initialized")
+            // Initial-count is 32-bit; re-arbitrate after an early expiry.
+            .mul_trunc(interval_ns)
+            .clamp(1, u32::MAX as u64) as u32;
+        ticks
+    } else {
+        1
+    };
+    x86_apic::set_local_timer_initial(initial);
 }
 
 /// Stops the current CPU's LAPIC timer countdown.
@@ -730,15 +709,7 @@ fn arm_timer_after(interval: ktime_types::TimeSpan) {
 ///
 /// Panics if the calling CPU has no initialized local APIC handle.
 fn disarm_timer() {
-    // SAFETY: LAPIC bring-up completes before any deadline programming, the
-    // same precondition as `arm_timer`. `with_local_apic` masks local interrupts
-    // while borrowing this CPU's LAPIC handle. Writing 0 to
-    // the initial-count register stops the current countdown (Intel SDM).
-    unsafe {
-        x86_apic::with_local_apic(|lapic| {
-            lapic.set_timer_initial(0);
-        });
-    }
+    x86_apic::set_local_timer_initial(0);
 }
 
 unittest::path_mod_test!(tests, "../ut-tests/x86_lapic_tsc.rs");

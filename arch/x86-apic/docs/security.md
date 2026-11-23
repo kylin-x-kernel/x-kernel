@@ -66,9 +66,9 @@ All unsafe blocks carry `SAFETY:` comments and fall into four groups:
   propagates to the runtime's fatal boot boundary.
 - IO-APIC volatile register access — serialized by the crate's
   `SpinNoIrq`, bounds-checked per redirection entry.
-- The per-CPU `LocalApic` borrow in `with_local_apic` — soundness rests
-  on one leaked handle per CPU, installed before interrupts are enabled,
-  and local IRQ masking for the borrow duration.
+- The per-CPU `RuntimeLocalApic` shared borrow: immutable mode/register metadata
+  is Release-published once and acquired by pinned readers. NMI entry never
+  reconstructs an exclusive borrow over an interrupted caller's handle.
 
 ## Protected Resources
 
@@ -92,7 +92,9 @@ clock-event activation remains the timer driver's responsibility.
 - `IO_APICS` (`LazyInit<SpinNoIrq<IoApicRegistry>>`): every installed
   IO-APIC handle, its probed pin count, assigned vectors, and configured-pin
   flags; every redirection access goes through the registry lock.
-- `LOCAL_APIC_PTR` (per-CPU): the exclusive Local APIC handle slot.
+- `LOCAL_APIC_PTR` (per-CPU atomic): one permanent shared runtime handle. Source
+  owners serialize timer/error/performance LVT changes. xAPIC directed writers
+  exclude ordinary IRQs; NMI shorthand preserves ICR2. x2APIC uses one MSR write.
 - `MSIX_VECTOR_ALLOCATOR` (`SpinNoIrq` bitmap and destination bindings): the MSI-X vector window
   `0x40..0xf0`; double allocation is structurally impossible (bits are
   set under the lock), and `free` clears bits only for in-window
@@ -197,3 +199,57 @@ owned controller after preparation violates the snapshot invariant.
 Before `SavedIoApics::resume` restores the original masks, device, controller
 and time recovery must be complete. Every resource reachable from any newly
 enabled IRQ must be usable.
+
+`restore_local_after_reset` requires the owning CPU's restored APIC-base access,
+mapping and CPU-local storage, plus quiesced NMI producers and exclusive LAPIC
+hardware ownership. Masked setup must complete and the fixed APIC error handler
+must be installed and ready before error delivery is enabled. No ICR writer
+may span reset. Temporary startup metadata does not replace or mutate the
+permanently published runtime handle. Timer
+rearming belongs to clock recovery after masked LAPIC reconstruction.
+
+## NMI reentry and ICR transaction boundary
+
+The vendor runtime handle is neither Send nor Sync and has immutable register
+metadata. Kernel access stays on the published owner CPU. An NMI may share the
+handle while interrupting ordinary code; there is no overlapping `&mut` and no
+normal lock acquisition. Source-owned RMWs still require a separate ownership
+contract; shared references alone do not serialize device state.
+
+There is no software ICR owner for an NMI to wait on. Ordinary directed xAPIC
+writers exclude local IRQs, and NMI shorthand touches only the low word so ICR2
+survives interruption. `try_send_nmi_raw` rejects directed xAPIC sends in
+effective NMI context before register access; x2APIC submits the complete target
+and command in one MSR write. Unsafe vendor callers must obey the same context
+restriction. No source may reset the controller while a send is active.
+
+Ordinary fixed sends wait for hardware idle without a timeout; a stuck controller
+can stall the IRQ-off sender. `send_ipi_raw` validates arbitrary RawCpuId values:
+ids wider than 32 bits, or wider than 8 bits in xAPIC mode, return InvalidInput
+without ICR writes. Self/broadcast have no destination field to reject. Device
+retrigger propagates a rejected send as false and retains its routing/binding.
+The IRQ provider's notification path uses only ids resolved from the x86 MADT
+CPU map (u8 local APIC ids); a failed send there violates that established
+internal invariant and cannot be silently ignored. Startup and NMI use bounded
+polling. ResourceBusy and InvalidInput leave ICR unchanged; BadState means no
+local owner was published, and OperationNotSupported rejects directed xAPIC
+NMI reentry. TimedOut is a post-submission failure: a command may still arrive.
+The APIC layer returns it rather than halting the CPU. Startup/recovery callers
+must retain trampoline pages, saved stacks, mappings and source ownership until
+delivery and remote execution are settled. Errors are neither cancellation nor
+a remote-stop/handler-completion barrier.
+
+An accepted shorthand NMI must finish local xAPIC delivery before returning to
+an interrupted destination writer. On completion timeout the NMI source owner
+must retain that interrupted context until idle or terminal recovery; resuming
+it immediately could write the outer command while hardware remains busy.
+
+Public NMI operations require initialized NMI entry on every destination.
+LVTPC writes additionally require validated hardware capability and exclusive
+producer/routing ownership. Those primitives do not establish a PMU backend or
+make x86 hardlockup detection available by themselves.
+
+For x2APIC, the ICR WRMSR is non-serializing. The runtime performs MFENCE/LFENCE
+before submission so a destination cannot observe notification before the
+sender's preceding request stores are published. This ordering is independent
+of CPU-local context exclusion and does not acknowledge remote processing.

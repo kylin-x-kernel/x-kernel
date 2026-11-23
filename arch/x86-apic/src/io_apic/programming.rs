@@ -296,11 +296,12 @@ pub(super) fn finish_level(
 /// Issues edge retrigger to the physical destination/vector read from the
 /// entry. Rejects unsupported, changed or reassigned routing without sending
 /// an IPI.
+/// Returns the sender's submission result after validating the stored route.
 pub(super) fn retrigger(
     registers: &mut impl Registers,
     pin: IoApicPin,
     expected_vector: u8,
-    send: impl FnOnce(u8, u8),
+    send: impl FnOnce(u8, u8) -> bool,
 ) -> bool {
     if !valid_pin(registers, pin) {
         return false;
@@ -314,6 +315,5 @@ pub(super) fn retrigger(
     {
         return false;
     }
-    send(entry.vector(), entry.dest());
-    true
+    send(entry.vector(), entry.dest())
 }

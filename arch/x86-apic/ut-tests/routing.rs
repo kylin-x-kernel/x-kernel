@@ -18,7 +18,10 @@ fn msi_retrigger_retains_message_target_until_allocation_release() {
     assert!(pool.bind_destination(vector, 7));
     assert!(!pool.bind_destination(vector, 3));
     let sent = Cell::new(None);
-    assert!(pool.retrigger(vector, |vector, cpu| sent.set(Some((vector, cpu)))));
+    assert!(pool.retrigger(vector, |vector, cpu| {
+        sent.set(Some((vector, cpu)));
+        true
+    }));
     assert_eq!(sent.get(), Some((vector, 7)));
     assert!(pool.free(vector));
     assert!(!pool.matches_destination(vector, None));
@@ -28,9 +31,23 @@ fn msi_retrigger_retains_message_target_until_allocation_release() {
     assert_eq!(reused, vector);
     assert!(!pool.retrigger(reused, |_, _| panic!("stale destination")));
     assert!(pool.bind_destination(reused, 9));
-    assert!(pool.retrigger(reused, |vector, cpu| sent.set(Some((vector, cpu)))));
+    assert!(pool.retrigger(reused, |vector, cpu| {
+        sent.set(Some((vector, cpu)));
+        true
+    }));
     assert_eq!(sent.get(), Some((reused, 9)));
     assert!(pool.free(reused));
+}
+
+#[def_test]
+fn msi_retrigger_reports_send_rejection_and_keeps_target_binding() {
+    let mut pool = super::MsixVectorAllocator::new();
+    let vector = pool.alloc().unwrap();
+    assert!(pool.bind_destination(vector, 7));
+    assert!(!pool.retrigger(vector, |_, _| false));
+    assert!(pool.matches_destination(vector, Some(7)));
+    assert!(pool.retrigger(vector, |_, destination| destination == 7));
+    assert!(pool.free(vector));
 }
 
 #[def_test]

@@ -57,3 +57,28 @@ unsafe {
 ```
 
 Please refer to the documentation for more details.
+
+
+## Prepared runtime handles
+
+`LocalApic::into_runtime` consumes the exclusive startup object. The resulting
+`RuntimeLocalApic` keeps immutable mode/register metadata and is neither Send
+nor Sync; its owner pins operations to the prepared CPU. Source-specific timer,
+error and performance-LVT operations use shared references with explicit unsafe
+hardware-ownership contracts. They do not update builder configuration caches.
+
+`send_fixed_ipi` waits for hardware idle without a timeout; `try_send_ipi`
+instead returns Busy before any write. xAPIC directed commands require ordinary
+IRQ exclusion and cannot run in NMI. Shorthand writes only the low command
+word, preserving an interrupted sender's destination; x2APIC uses one complete
+MSR write. There is no atomic software claim. Callers choose bounded retry and
+completion policies and retain source/target lifecycle ownership. Success
+confirms submission only, not remote execution or cancellation of older sends.
+
+The runtime x2APIC command path publishes earlier memory stores with
+`MFENCE; LFENCE` before its non-serializing ICR WRMSR, following Linux's
+`weak_wrmsr_fence`. The command tests construct x2APIC metadata independently
+of host CPUID. Test-only MSR recording intercepts complete command writes;
+tests cover 32-bit targets, NMI encoding and one MSR operation per command.
+Mock xAPIC tests inject a shorthand NMI between the outer high/low writes and
+check that the outer target survives while both commands are submitted.

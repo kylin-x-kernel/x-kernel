@@ -362,13 +362,10 @@ fn restore_local_apic() {
             core::arch::asm!("out dx, al", in("dx") 0xa1u16, in("al") 0xffu8);
         }
     }
-    x86_apic::with_local_apic(|lapic| {
-        // SAFETY: assembly restored APIC-base access and this CPU's slot base;
-        // IRQs remain masked and the permanent handle belongs to this CPU.
-        unsafe { lapic.enable_masked() };
-        // SAFETY: the local APIC mapping and configured error vector are live.
-        unsafe { lapic.enable_error() };
-    });
+    // SAFETY: assembly restored APIC-base access and this CPU's slot base;
+    // the PM barrier retains IRQ exclusion, quiesced NMIs and all LAPIC sources.
+    // The permanent mapping and fixed error handler remain live across sleep.
+    unsafe { x86_apic::restore_local_after_reset() };
 }
 
 extern "C" fn request_s3(argument: *mut ()) {
@@ -538,11 +535,9 @@ impl kplat::sys::SystemSleepIf {
         // Firmware may leave APs executing its final rendezvous instructions.
         // Put every AP into wait-for-SIPI before reusing the shared low page;
         // sequentially resetting only the next AP leaves the others unowned.
-        x86_apic::with_local_apic(|lapic| {
-            // SAFETY: all remote saved stacks belong to the active PM barrier;
-            // no AP has resumed kernel execution or been released yet.
-            unsafe { lapic.send_init_ipi_all() };
-        });
+        // SAFETY: all remote saved stacks belong to the active PM barrier;
+        // no AP has resumed kernel execution or been released yet.
+        unsafe { x86_apic::send_init_ipi_all_but_self() }?;
         raw_delay(10_000);
         log::debug!("S3_RESUME: boot CPU context restored");
         // SAFETY: controller mappings are retained and remote CPUs remain reset.
@@ -559,55 +554,51 @@ impl kplat::sys::SystemSleepIf {
             if cpu.as_usize() == 0 || result.is_err() {
                 return;
             }
-            // SAFETY: the previous wake entry has returned into high kernel
-            // text. The new AP remains reset until its SIPI below.
-            #[expect(
-                clippy::expect_used,
-                reason = "CG-021-no-panic-on-reachable-failure: ACTIVE retains the installed wake \
-                          page until every remote callback joins"
-            )]
-            // SAFETY: ACTIVE retains this boot-owned page until AP join.
-            let wake = unsafe { (*WAKE.0.get()).as_mut() }.expect("active S3 wake page");
-            unsafe extern "C" {
-                static s3_wake_start: u8;
-                static s3_wake_context: u8;
-            }
-            let offset =
-                ptr::addr_of!(s3_wake_context) as usize - ptr::addr_of!(s3_wake_start) as usize;
-            wake.patch(offset, context_address(cpu.as_usize()) as u64);
-            // Publish ordinary wake-page stores before either MMIO xAPIC or
-            // x2APIC WRMSR can start a remote instruction fetch. x2APIC ICR
-            // writes are not a general memory-serialization instruction.
-            core::sync::atomic::fence(Ordering::SeqCst);
-            let Some(raw) = kcpu_id_map::raw_cpu_id(cpu) else {
-                result = Err(KError::BadState);
-                return;
-            };
-            let id = x86_apic::raw_apic_id(raw.as_usize() as u8);
-            x86_apic::with_local_apic(|lapic| {
-                // SAFETY: the BSP owns this live APIC; the target is a reset AP.
-                unsafe { lapic.send_init_ipi(id) };
-            });
-            raw_delay(10_000);
-            let vector =
-                (crate::peripherals::bootmem::ap_trampoline_page_paddr() / PAGE_SIZE_4K) as u8;
-            for _ in 0..2 {
-                x86_apic::with_local_apic(|lapic| {
-                    // SAFETY: the complete wake page was installed before INIT.
-                    unsafe { lapic.send_sipi(vector, id) };
-                });
-                raw_delay(200);
-            }
-            for _ in 0..10_000 {
-                // Pair with the AP's Release after context/LAPIC restoration;
-                // the AP no longer reads the shared low-memory wake image.
-                if CPU_RESTORED[cpu.as_usize()].load(Ordering::Acquire) {
-                    log::debug!("S3_RESUME: CPU {} context restored", cpu.as_usize());
-                    return;
+            result = (|| {
+                // SAFETY: the previous wake entry has returned into high kernel
+                // text. The new AP remains reset until its SIPI below.
+                #[expect(
+                    clippy::expect_used,
+                    reason = "CG-021-no-panic-on-reachable-failure: ACTIVE retains the installed \
+                              wake page until every remote callback joins"
+                )]
+                // SAFETY: ACTIVE retains this boot-owned page until AP join.
+                let wake = unsafe { (*WAKE.0.get()).as_mut() }.expect("active S3 wake page");
+                unsafe extern "C" {
+                    static s3_wake_start: u8;
+                    static s3_wake_context: u8;
                 }
-                raw_delay(100);
-            }
-            result = Err(KError::TimedOut);
+                let offset =
+                    ptr::addr_of!(s3_wake_context) as usize - ptr::addr_of!(s3_wake_start) as usize;
+                wake.patch(offset, context_address(cpu.as_usize()) as u64);
+                // Publish ordinary wake-page stores before either MMIO xAPIC or
+                // x2APIC WRMSR can start a remote instruction fetch. x2APIC ICR
+                // writes are not a general memory-serialization instruction.
+                core::sync::atomic::fence(Ordering::SeqCst);
+                let raw = kcpu_id_map::raw_cpu_id(cpu).ok_or(KError::BadState)?;
+                // SAFETY: the PM barrier retains this reset AP's context and wake
+                // page while the BSP serializes recovery through INIT/SIPI.
+                unsafe { x86_apic::send_init_ipi_raw(raw) }?;
+                raw_delay(10_000);
+                let vector =
+                    (crate::peripherals::bootmem::ap_trampoline_page_paddr() / PAGE_SIZE_4K) as u8;
+                for _ in 0..2 {
+                    // SAFETY: the complete wake page was installed before INIT;
+                    // the barrier retains it and the saved stack until AP join.
+                    unsafe { x86_apic::send_startup_ipi_raw(vector, raw) }?;
+                    raw_delay(200);
+                }
+                for _ in 0..10_000 {
+                    // Pair with the AP's Release after context/LAPIC restoration;
+                    // the AP no longer reads the shared low-memory wake image.
+                    if CPU_RESTORED[cpu.as_usize()].load(Ordering::Acquire) {
+                        log::debug!("S3_RESUME: CPU {} context restored", cpu.as_usize());
+                        return Ok(());
+                    }
+                    raw_delay(100);
+                }
+                Err(KError::TimedOut)
+            })();
         });
         result
     }

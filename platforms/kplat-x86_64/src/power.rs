@@ -57,8 +57,7 @@ impl CpuStartIf {
                 logical_cpu_id.as_usize()
             )
         });
-        crate::mp::start_secondary_cpu(raw_cpu_id, pa!(stack_top_paddr));
-        Ok(())
+        crate::mp::start_secondary_cpu(raw_cpu_id, pa!(stack_top_paddr))
     }
 }
 

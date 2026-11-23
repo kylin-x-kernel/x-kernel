@@ -76,8 +76,11 @@ pub use io_apic::{
     probe_io_apic, retarget_edge, retarget_supported, retrigger_pin, set_pin_enabled,
 };
 pub use local_apic::{
-    end_of_interrupt, handle_error_interrupt, init_local_primary, init_secondary, raw_apic_id,
-    send_ipi_all_but_self, send_ipi_raw, send_ipi_self, set_local_timer_enabled, with_local_apic,
+    end_of_interrupt, handle_error_interrupt, init_local_primary, init_secondary,
+    prepare_local_timer, raw_apic_id, restore_local_after_reset, send_init_ipi_all_but_self,
+    send_init_ipi_raw, send_ipi_all_but_self, send_ipi_raw, send_ipi_self, send_startup_ipi_raw,
+    set_local_performance_nmi_enabled, set_local_timer_enabled, set_local_timer_initial,
+    try_send_nmi_all_but_self, try_send_nmi_raw,
 };
 pub use msix::{msi_route_matches, retrigger_msi};
 

@@ -5,6 +5,7 @@
 //! Shared x86 SMP bring-up helpers.
 
 use kcpu_id_map::RawCpuId;
+use kerrno::KResult;
 use khal::{
     mem::{PAGE_SIZE_4K, PhysAddr, p2v, pa, v2p},
     time::spin_wait,
@@ -80,22 +81,22 @@ unsafe fn setup_startup_page(stack_top: PhysAddr) {
 }
 
 /// Starts a secondary CPU with the given raw APIC ID and stack.
-pub(crate) fn start_secondary_cpu(raw_apic_id: RawCpuId, stack_top: PhysAddr) {
+/// Submission errors propagate to CpuStartIf; a timeout may leave a submitted
+/// command pending, so the boot owner must retain the trampoline and stack.
+pub(crate) fn start_secondary_cpu(raw_apic_id: RawCpuId, stack_top: PhysAddr) -> KResult {
     // SAFETY: the caller passes the stack top for the target AP, and this helper
     // prepares the reserved trampoline page before any SIPI is sent.
     unsafe { setup_startup_page(stack_top) };
 
     let start_page_idx = (ap_trampoline_page_paddr() / PAGE_SIZE_4K) as u8;
-    let apic_id = apic::raw_apic_id(raw_apic_id.as_usize() as u8);
-    // SAFETY: the local APIC was initialized on the bootstrap CPU before SMP
-    // bring-up, and the helper serializes access while issuing the INIT IPI.
-    unsafe { apic::with_local_apic(|lapic| lapic.send_init_ipi(apic_id)) };
+    // SAFETY: serialized AP boot owns this target and its prepared trampoline.
+    unsafe { apic::send_init_ipi_raw(raw_apic_id) }?;
     spin_wait(TimeSpan::from_millis(10));
-    // SAFETY: the trampoline page is prepared and `start_page_idx` names that
-    // low-memory page, so sending the startup IPI is valid for this target APIC ID.
-    unsafe { apic::with_local_apic(|lapic| lapic.send_sipi(start_page_idx, apic_id)) };
+    // SAFETY: target is in the INIT/SIPI startup sequence; the live trampoline
+    // and patched stack remain valid through AP initialization.
+    unsafe { apic::send_startup_ipi_raw(start_page_idx, raw_apic_id) }?;
     spin_wait(TimeSpan::from_micros(200));
-    // SAFETY: x86 AP bring-up requires re-sending the same SIPI after the mandated
-    // delay; the trampoline page and target APIC ID are unchanged.
-    unsafe { apic::with_local_apic(|lapic| lapic.send_sipi(start_page_idx, apic_id)) };
+    // SAFETY: target is in the INIT/SIPI startup sequence; the live trampoline
+    // and patched stack remain valid through AP initialization.
+    unsafe { apic::send_startup_ipi_raw(start_page_idx, raw_apic_id) }
 }

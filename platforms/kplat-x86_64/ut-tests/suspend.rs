@@ -82,12 +82,10 @@ fn firmware_s3_wake_restores_saved_execution_context() -> unittest::TestResult {
     // SAFETY: the wake page and boot mapping are installed; this test retains
     // the single CPU's context and stack through the non-returning S3 request.
     unsafe { context.save_and_call(enter_qemu_s3, (port as usize) as *mut ()) };
-    x86_apic::with_local_apic(|lapic| {
-        // SAFETY: resume restored APIC-base access, and IRQs remain disabled.
-        unsafe { lapic.enable_masked() };
-        // SAFETY: same restored local controller and configured error vector.
-        unsafe { lapic.enable_error() };
-    });
+    // SAFETY: resume restored APIC-base access and CPU-local storage; this
+    // single-CPU fixture retains IRQ exclusion and quiesced NMI/timer sources.
+    // The permanent mapping and fixed error handler remain live.
+    unsafe { x86_apic::restore_local_after_reset() };
     khal::time::resume_monotonic_clock(&clock).unwrap();
     khal::time::restore_local_timer();
     khal::time::arm_timer(khal::time::monotonic_time() + ktime_types::TimeSpan::from_millis(1));

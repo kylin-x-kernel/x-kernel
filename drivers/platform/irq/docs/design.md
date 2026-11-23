@@ -697,6 +697,14 @@ CPU/vector under routing exclusion, not the CPU that happens to request replay.
 Local timer/IPI state and MSI shutdown/vector-release ownership remain separate
 work; request issuance is not proof that a remote handler has completed.
 
+Directed x86 fixed IPI submission uses the fallible `x86_apic::send_ipi_raw`.
+Device retrigger propagates submission rejection as false so KIRQ retains the
+pending resend. Infallible `notify_cpu` resolves Specific targets through the
+x86 CPU map, whose MADT loader publishes only enabled LocalApic u8 identities;
+these fit both APIC modes. The provider checks this invariant at submission
+instead of discarding a scheduler/TLB notification on an impossible encoding
+failure. Self/all-but-self use destination-free shorthand.
+
 ## GIC Source Admission
 
 GICv2 and GICv3 initialization cache the exclusive standard INTID limit from

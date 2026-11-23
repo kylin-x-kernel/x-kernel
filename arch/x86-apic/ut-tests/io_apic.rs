@@ -187,8 +187,15 @@ fn failed_mask_or_restore_readback_reports_failure() {
 fn retrigger_uses_programmed_destination_without_changing_mask() {
     let mut registers = Model::new(IrqFlags::MASKED);
     let mut sent = None;
-    assert!(retrigger(&mut registers, pin(4), 0x24, |vector, destination| sent =
-        Some((vector, destination))));
+    assert!(retrigger(
+        &mut registers,
+        pin(4),
+        0x24,
+        |vector, destination| {
+            sent = Some((vector, destination));
+            true
+        }
+    ));
     assert_eq!(sent, Some((0x24, 7)));
     assert!(registers.writes.is_empty());
     for flags in [IrqFlags::LEVEL_TRIGGERED, IrqFlags::LOGICAL_DEST] {
@@ -219,6 +226,21 @@ fn retrigger_uses_programmed_destination_without_changing_mask() {
     for pin in [32, usize::MAX] {
         assert!(IoApicPin::try_from_usize(pin).is_none());
     }
+}
+
+#[def_test]
+fn retrigger_reports_send_rejection_without_changing_the_route() {
+    let mut registers = Model::new(IrqFlags::MASKED);
+    let route_before = (registers.vector, registers.flags);
+    assert!(!retrigger(&mut registers, pin(4), 0x24, |_, _| false));
+    assert_eq!((registers.vector, registers.flags), route_before);
+    assert!(registers.writes.is_empty());
+    assert!(retrigger(
+        &mut registers,
+        pin(4),
+        0x24,
+        |vector, destination| { vector == 0x24 && destination == 7 }
+    ));
 }
 
 struct InitModel {

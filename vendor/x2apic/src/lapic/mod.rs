@@ -7,6 +7,9 @@ mod builder;
 pub use builder::xapic_base;
 pub use builder::LocalApicBuilder;
 
+mod runtime;
+pub use runtime::{IpiCommand, IpiSendError, IpiTarget, RuntimeLocalApic};
+
 mod lapic_msr;
 use lapic_msr::*;
 pub use lapic_msr::{
@@ -51,6 +54,13 @@ pub struct LocalApic {
 }
 
 impl LocalApic {
+    /// Consumes the exclusive startup handle into a shared runtime interface.
+    /// Runtime timer writes do not update the builder's cached settings.
+    /// xAPIC NMI shorthand preserves ICR2; x2APIC uses one complete MSR write.
+    pub fn into_runtime(self) -> RuntimeLocalApic {
+        RuntimeLocalApic::new(self)
+    }
+
     /// Enables the local APIC with its timer, error vector and LINT pins masked.
     ///
     /// Unlike `enable`, this initializes a stopped one-shot timer regardless
@@ -381,16 +391,7 @@ impl LocalApic {
     }
 
     fn format_icr(&self, vector: u8, mode: IpiDeliveryMode) -> u64 {
-        let mut icr_val = 0;
-
-        icr_val.set_bit_range(ICR_VECTOR, u64::from(vector));
-        icr_val.set_bit_range(ICR_DELIVERY_MODE, mode.into_u64());
-        icr_val.set_bit(
-            ICR_DESTINATION_MODE,
-            self.ipi_destination_mode == IpiDestMode::Logical,
-        );
-        icr_val.set_bit(ICR_LEVEL, true);
-        icr_val
+        format_icr(vector, mode, self.ipi_destination_mode)
     }
 
     // Misc configuration
@@ -441,6 +442,22 @@ impl LocalApic {
     }
 }
 
+fn format_icr(
+    vector: u8,
+    mode: IpiDeliveryMode,
+    destination_mode: IpiDestMode,
+) -> u64 {
+    let mut value = 0;
+    value.set_bit_range(ICR_VECTOR, u64::from(vector));
+    value.set_bit_range(ICR_DELIVERY_MODE, mode.into_u64());
+    value.set_bit(
+        ICR_DESTINATION_MODE,
+        destination_mode == IpiDestMode::Logical,
+    );
+    value.set_bit(ICR_LEVEL, true);
+    value
+}
+
 #[cfg(test)]
 #[path = "../../tests/host/local_apic.rs"]
 mod register_tests;
@@ -464,4 +481,5 @@ const _: fn() = || {
     // has more than one candidate impl and will therefore fail to compile
     // without explicit type annotations.
     let _ = <LocalApic as AmbiguousIfImpl<_>>::some_item;
+    let _ = <RuntimeLocalApic as AmbiguousIfImpl<_>>::some_item;
 };
