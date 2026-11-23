@@ -209,12 +209,38 @@ pub struct Thread {
     /// it. See `exec_de_thread`.
     exec_sweep_target: AtomicBool,
     accessing_user_memory: AtomicBool,
+    /// Nesting depth of fault-suppressed user-copy windows owned by this thread.
+    ///
+    /// Matches Linux `task_struct::pagefault_disabled`: per-task, not per-CPU, so
+    /// a window can be preempted without suppressing faults raised by the task
+    /// that runs next on this CPU, and the increment/decrement pair never
+    /// interleaves with another task's counter.
+    ///
+    /// `Relaxed` is sufficient because the counter is private to the owning
+    /// thread's current-CPU execution flow; faults caused by its copies are
+    /// delivered on that same CPU, so no cross-CPU publication exists.
+    pagefault_disabled: AtomicU32,
     pub(super) restart_block: Mutex<RestartSlot>,
     no_new_privileges: AtomicBool,
     seccomp: super::SeccompContext,
     cgroup: TaskMembership,
     #[cfg(feature = "tee")]
     tee_session_ctx: Mutex<Option<KBox<dyn TeeSessionCtxTrait>>>,
+}
+
+/// Restores fault resolution when the owning thread leaves a no-fault window.
+///
+/// Obtainable only through [`Thread::pagefault_guard`]; its `Drop` re-enables
+/// fault resolution exactly once per guard.
+pub struct PagefaultGuard<'a>(&'a Thread);
+
+impl Drop for PagefaultGuard<'_> {
+    fn drop(&mut self) {
+        // The paired guard is the only decrementer, so a nonzero depth holds by
+        // construction; keep it as a fail-stop against future misuse.
+        debug_assert!(self.0.pagefault_disabled.load(Ordering::Relaxed) > 0);
+        self.0.pagefault_disabled.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl Thread {
@@ -306,6 +332,7 @@ impl Thread {
                 is_exiting: AtomicBool::new(false),
                 exec_sweep_target: AtomicBool::new(false),
                 accessing_user_memory: AtomicBool::new(false),
+                pagefault_disabled: AtomicU32::new(0),
                 restart_block: Mutex::new(RestartSlot::empty()),
                 no_new_privileges: AtomicBool::new(no_new_privileges),
                 seccomp: super::SeccompContext::new(),
@@ -618,6 +645,30 @@ impl Thread {
     pub fn set_accessing_user_memory(&self, accessing: bool) {
         self.accessing_user_memory
             .store(accessing, Ordering::Release);
+    }
+
+    /// Opens one nesting level of this thread's fault-suppressing window.
+    ///
+    /// While the returned guard lives, a fault raised by a user-memory copy is
+    /// reported through the copy's exception-table fixup instead of being
+    /// resolved.
+    ///
+    /// Returns: a guard whose drop closes exactly one nesting level.
+    ///
+    /// Locking: none. Must not sleep. Safe to nest and to call with preemption
+    /// enabled; the depth travels with the thread across a preemption. Call on
+    /// the current thread only.
+    pub fn pagefault_guard(&self) -> PagefaultGuard<'_> {
+        self.pagefault_disabled.fetch_add(1, Ordering::Relaxed);
+        PagefaultGuard(self)
+    }
+
+    /// Returns whether fault resolution is currently suppressed for this thread.
+    ///
+    /// Returns: `true` when a [`PagefaultGuard`] is live on this thread's
+    /// execution flow.
+    pub fn pagefault_disabled(&self) -> bool {
+        self.pagefault_disabled.load(Ordering::Relaxed) != 0
     }
 
     /// Installs a per-thread TEE session context if one is not present yet.

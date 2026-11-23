@@ -57,6 +57,11 @@ fn handle_page_fault(vaddr: VirtAddr, access_flags: MappingFlags) -> bool {
         return false;
     };
 
+    // Suppress resolution while the owning thread holds a no-fault window; the
+    // raised fault is delivered on this CPU, where `thread` is the same task.
+    if unlikely(thread.pagefault_disabled()) {
+        return false;
+    }
     if unlikely(!thread.is_accessing_user_memory()) {
         return false;
     }
@@ -84,15 +89,30 @@ const MAX_USER_PAGE_FAULT_ATTEMPTS: usize = 16;
 
 // Retry only the current user page after returning through the assembly fixup.
 // File-backed faults can wait for disk I/O here, outside exception context.
+//
+// - `whole_first`: attempt one bulk copy across user pages before splitting;
+//   callers that do not copy bytes (writability probes) pass `false`.
 fn copy_user_pages(
     start: usize,
     len: usize,
     access_flags: MappingFlags,
+    whole_first: bool,
     mut copy_fn: impl FnMut(usize, usize) -> usize,
 ) -> MemResult {
     check_access(start, len)?;
     let mut offset = 0;
     let mut fault_attempts = 0;
+    if whole_first && len != 0 {
+        // One bulk copy across user pages; a fault reports the remaining byte
+        // count, so the page loop below resumes after the copied prefix. Bytes
+        // before the fault are already written; the slow path may copy that
+        // prefix again, which is idempotent for both directions.
+        let remaining = copy_fn(0, len);
+        if remaining == 0 {
+            return Ok(());
+        }
+        offset = len - remaining;
+    }
     while offset < len {
         let address = start + offset;
         let count = (PAGE_SIZE_4K - address % PAGE_SIZE_4K).min(len - offset);
@@ -211,6 +231,11 @@ fn atomic_load_u32_inner(addr: usize, resolve_faults: bool) -> MemResult<u32> {
     let failed = if resolve_faults {
         access_user_memory(operation)
     } else {
+        let curr = current_may_uninit();
+        let _nofault = curr
+            .as_ref()
+            .and_then(|task| task.try_as_thread())
+            .map(|thread| thread.pagefault_guard());
         operation()
     };
     if unlikely(failed != 0) {
@@ -298,13 +323,10 @@ fn atomic_cmpxchg_u32_inner(addr: usize, old: u32, new: u32) -> MemResult<(bool,
     // Keep the architecture-exclusive sequence local to this CPU.
     let _irq = IrqSave::new();
     let curr = current_may_uninit();
-    let outer_access = curr
+    let _nofault = curr
         .as_ref()
         .and_then(|task| task.try_as_thread())
-        .filter(|thread| thread.is_accessing_user_memory());
-    if let Some(thread) = outer_access {
-        thread.set_accessing_user_memory(false);
-    }
+        .map(|thread| thread.pagefault_guard());
     // SAFETY: `check_access` validated the 4-byte user range, `addr` is
     // 4-byte aligned, and `observed` is a live kernel stack slot. The
     // assembly exception table converts a user-memory fault into a nonzero
@@ -317,9 +339,6 @@ fn atomic_cmpxchg_u32_inner(addr: usize, old: u32, new: u32) -> MemResult<(bool,
             core::ptr::addr_of_mut!(observed),
         )
     };
-    if let Some(thread) = outer_access {
-        thread.set_accessing_user_memory(true);
-    }
     if unlikely(failed != 0) {
         Err(MemError::NoAccess)
     } else {
@@ -336,26 +355,38 @@ unsafe impl VirtMemIo for Vm {
     }
 
     fn read_mem(&mut self, start: usize, buf: &mut [MaybeUninit<u8>]) -> MemResult {
-        copy_user_pages(start, buf.len(), MappingFlags::READ, |offset, count| {
-            // SAFETY: the validated user page and this subrange of `buf` cover
-            // `count` bytes. The exception table reports inaccessible memory.
-            let destination = unsafe { buf.as_mut_ptr().cast::<u8>().add(offset) };
-            // SAFETY: copy_user_pages validated the user source; destination
-            // covers count exclusively borrowed kernel bytes. Faults are handled
-            // by user_copy's exception-table path.
-            unsafe { user_copy(destination, (start + offset) as _, count) }
-        })
+        copy_user_pages(
+            start,
+            buf.len(),
+            MappingFlags::READ,
+            true,
+            |offset, count| {
+                // SAFETY: the validated user page and this subrange of `buf` cover
+                // `count` bytes. The exception table reports inaccessible memory.
+                let destination = unsafe { buf.as_mut_ptr().cast::<u8>().add(offset) };
+                // SAFETY: copy_user_pages validated the user source; destination
+                // covers count exclusively borrowed kernel bytes. Faults are handled
+                // by user_copy's exception-table path.
+                unsafe { user_copy(destination, (start + offset) as _, count) }
+            },
+        )
     }
 
     fn write_mem(&mut self, start: usize, buf: &[u8]) -> MemResult {
-        copy_user_pages(start, buf.len(), MappingFlags::WRITE, |offset, count| {
-            // SAFETY: the validated user page and this subrange of `buf` cover
-            // `count` bytes. The exception table reports inaccessible memory.
-            let source = unsafe { buf.as_ptr().add(offset) };
-            // SAFETY: The kernel source has count initialized bytes, and
-            // copy_user_pages validated the user destination; user_copy handles faults.
-            unsafe { user_copy((start + offset) as _, source, count) }
-        })
+        copy_user_pages(
+            start,
+            buf.len(),
+            MappingFlags::WRITE,
+            true,
+            |offset, count| {
+                // SAFETY: the validated user page and this subrange of `buf` cover
+                // `count` bytes. The exception table reports inaccessible memory.
+                let source = unsafe { buf.as_ptr().add(offset) };
+                // SAFETY: The kernel source has count initialized bytes, and
+                // copy_user_pages validated the user destination; user_copy handles faults.
+                unsafe { user_copy((start + offset) as _, source, count) }
+            },
+        )
     }
 
     fn write_mem_nofault(&mut self, start: usize, buf: &[u8]) -> MemResult<usize> {
@@ -363,12 +394,24 @@ unsafe impl VirtMemIo for Vm {
             return Ok(0);
         }
         check_access(start, buf.len())?;
+        // Suppress fault resolution on the owning thread. The depth travels
+        // with the thread across a preemption, and the fault this copy raises
+        // is delivered on this CPU, where the handler reads the same depth.
         let curr = current();
         let thread = curr.try_as_thread().ok_or(MemError::NoAccess)?;
-        // Preserve an outer access window, but never resolve a fault in this copy.
-        let was_accessing = thread.is_accessing_user_memory();
-        thread.set_accessing_user_memory(false);
-        let mut copied = 0;
+        let _nofault = thread.pagefault_guard();
+        let mut copied = {
+            // SAFETY: `check_access` validated the whole user range; `buf` is a
+            // live kernel slice of `buf.len()` initialized bytes; faults return
+            // through `user_copy`'s exception table without forming user
+            // references, and fault resolution stays suppressed while the guard
+            // is live.
+            let remaining = unsafe { user_copy(start as *mut u8, buf.as_ptr(), buf.len()) };
+            if remaining == 0 {
+                return Ok(buf.len());
+            }
+            buf.len() - remaining
+        };
         while copied < buf.len() {
             let address = start + copied;
             // A bulk-copy fixup may report the start of its current batch.
@@ -385,7 +428,6 @@ unsafe impl VirtMemIo for Vm {
                 break;
             }
         }
-        thread.set_accessing_user_memory(was_accessing);
         Ok(copied)
     }
 
@@ -397,7 +439,7 @@ unsafe impl VirtMemIo for Vm {
             .address_space()
             .map_err(|_| MemError::NoAccess)?;
         let required = MappingFlags::USER | MappingFlags::WRITE;
-        copy_user_pages(start, len, MappingFlags::WRITE, |offset, count| {
+        copy_user_pages(start, len, MappingFlags::WRITE, false, |offset, count| {
             let address = VirtAddr::from_usize(start + offset);
             let mm = space.lock();
             let is_writable = mm.can_access_range(address, count, required)

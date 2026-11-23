@@ -9,7 +9,9 @@ mod restart;
 mod seccomp;
 mod task_ext;
 
-pub use core::{CurrentThread, NiceValue, PreparedUserClone, SchedulerParameters, Thread};
+pub use core::{
+    CurrentThread, NiceValue, PagefaultGuard, PreparedUserClone, SchedulerParameters, Thread,
+};
 
 pub(crate) use cpu_time::{PrevCputime, TaskCputime};
 pub use current::{

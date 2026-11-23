@@ -123,11 +123,11 @@ pub use stat::TaskStat;
 #[cfg(feature = "tee")]
 pub use tee_task_iface::{TeeSessionCtxTrait, TeeTaCtx};
 pub use thread::{
-    AsThread, CurrentFiles, CurrentThread, NiceValue, PreparedUserClone, SchedulerParameters,
-    SeccompContext, Thread, current_files, current_fs_context, current_thread_cpu_clock,
-    current_user_mm_id, current_user_pid, current_user_ppid, current_user_process,
-    current_user_process_address_space, current_user_process_fs_context, current_user_thread,
-    current_user_tid, try_current_user_process, with_current_user_thread,
+    AsThread, CurrentFiles, CurrentThread, NiceValue, PagefaultGuard, PreparedUserClone,
+    SchedulerParameters, SeccompContext, Thread, current_files, current_fs_context,
+    current_thread_cpu_clock, current_user_mm_id, current_user_pid, current_user_ppid,
+    current_user_process, current_user_process_address_space, current_user_process_fs_context,
+    current_user_thread, current_user_tid, try_current_user_process, with_current_user_thread,
 };
 pub(crate) use thread::{PrevCputime, TaskCputime};
 pub use timer_delivery::{

@@ -38,7 +38,7 @@ syscall / runtime
 - `access_user_memory()` requires the current task to resolve to a thread.
 - User-string loads access user addresses, so they may sleep and resolve page faults.
 - Ordinary `osvm` copy entry points require a sleepable thread context and do not disable IRQs themselves. A page fault returns through the exception-table fixup, then the calling task fills the page back in. Filling a file page may wait for block I/O.
-- The trap handler for atomic user access depends on the current thread's `accessing_user_memory` flag and takes over page faults only inside that window.
+- The trap handler takes over a fault only while the current thread's `accessing_user_memory` window is open and its fault-suppression depth is zero. Atomic nofault access raises that depth for the instruction, matching Linux `pagefault_disable()`.
 
 ## Algorithms
 
@@ -46,7 +46,7 @@ syscall / runtime
 
 1. The caller starts an access through an `osvm` pointer wrapper or `vm_load_string*()`.
 2. `Vm` first checks that the user address is in range.
-3. `copy_user_pages()` splits the copy on 4 KiB user-page boundaries and calls `user_copy` for each piece.
+3. `copy_user_pages()` can first attempt one architecture copy over the whole range (`read_mem` and `write_mem` pass `whole_first: true`; writability probes do not). When that bulk attempt reports a remaining byte count, it resumes from the fault point and splits the rest on 4 KiB user-page boundaries, calling `user_copy` for each piece.
 4. Ordinary copies do not open the in-trap fill window. On a fault, the exception-table fixup returns, and the calling task then calls the current process's `MmSpace::handle_page_fault()`. This avoids waiting for IRQ-driven disk completion while IRQs are masked in exception context.
 5. One progress loop tries the current page fragment first. Success advances the offset and resets that page's fault count. Failure invokes the captured live MM's task-context resolver. On admission `Retry`, that resolver retains the current runtime, drops the MM mutex and waits for its resources. Each subsequent attempt performs fresh VMA lookup and permission checks. These waits do not spend the copy's materialization budget.
 6. After `Resolved`, the copy may fault again so shared-file materialization and write permission can finish in stages. Completed/COW attempts that still do not enable a copy retain the per-page bound of 16. Explicit no-progress and permanent faults fail immediately. This protects against a backing provider repeatedly claiming progress without turning temporary lock contention into `NoAccess`. A successful return still means the entire output was initialized.
@@ -86,12 +86,16 @@ These primitives give futex and robust-list paths a TOCTOU-free read or update o
 
 ### Locked copies and prefaulting
 
-`Vm::write_mem_nofault` validates the range and splits architecture copies at
-user-page boundaries. It accumulates completed fragments and stops on the first
-short copy, so a bulk fixup cannot hide an earlier writable page's progress.
+`Vm::write_mem_nofault` validates the range and first attempts one architecture
+copy over the whole range, which may span user pages. If that attempt reports a
+remaining byte count, it resumes from there and splits the remainder at
+user-page boundaries, accumulating completed fragments and stopping on the
+first short copy, so a bulk fixup cannot hide an earlier writable page's
+progress.
 The returned prefix leaves the destination cursor on the page needing fault
-preparation. It temporarily closes any outer user-fault access window and restores
-that window after the copy.
+preparation. The copy raises the thread's no-fault depth for its duration, so a
+fault returns through the fixup instead of being resolved; the depth is nested
+and travels with the thread across a preemption.
 It never invokes MM or waits for an inode lock. `Vm::fault_in_writeable` instead
 checks VMA permissions and actual writable user PTEs under MM serialization, then
 uses the existing task-context fault driver for missing permissions. The driver

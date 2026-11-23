@@ -28,6 +28,8 @@ enum FaultBehavior {
     AdmissionWait,
     AdmissionReprotect(VirtAddr),
     NoProgress,
+    /// Resolves immediately, so trap-handler resolution succeeds in place.
+    Immediate,
 }
 
 struct SleepableBacking {
@@ -97,12 +99,14 @@ impl VmRuntimeOps for SleepableBacking {
     ) -> FaultCompletionResult {
         // Exercise the same context requirement as IRQ-driven block I/O, without
         // depending on disk timing. A remembered wake permits a deterministic park.
-        let mut wait = ktask::future::PreparedTaskWait::prepare()?;
-        if khal::context::in_exception_context() {
-            return Err(KError::BadState);
+        if !matches!(self.behavior, FaultBehavior::Immediate) {
+            let mut wait = ktask::future::PreparedTaskWait::prepare()?;
+            if khal::context::in_exception_context() {
+                return Err(KError::BadState);
+            }
+            wait.waker().wake_by_ref();
+            wait.park();
         }
-        wait.waker().wake_by_ref();
-        wait.park();
         let attempt = self.faults.fetch_add(1, Ordering::Relaxed) + 1;
         match self.behavior {
             FaultBehavior::StagedWrite
@@ -416,4 +420,110 @@ fn user_nofault_copy_preserves_prefix_before_an_unmapped_page() {
         // SAFETY: successful read_mem initialized every output byte.
         assert_eq!(unsafe { byte.assume_init() }, 0x5a);
     }
+}
+
+#[def_test(user)]
+fn user_nofault_copy_balances_pagefault_depth_on_all_exits() {
+    let curr = current();
+    let space = curr.as_thread().process().address_space().unwrap();
+    let start = VirtAddr::from_usize(kaddr_layout::USER_HEAP_BASE + 0x1000_0000);
+    let backing = Arc::new(SleepableBacking {
+        pages: PrivateBackend::new(start, PageSize::Size4K),
+        faults: AtomicUsize::new(0),
+        behavior: FaultBehavior::Normal,
+    });
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    backing.install(&mut space.lock(), start, PAGE_SIZE_4K, flags);
+    let mut vm = Vm::new();
+    vm.fault_in_writeable(start.as_usize(), 1).unwrap();
+
+    assert_eq!(vm.write_mem_nofault(start.as_usize(), &[0x5a]), Ok(1));
+    assert!(!curr.as_thread().pagefault_disabled());
+
+    assert_eq!(vm.write_mem_nofault(start.as_usize(), &[]), Ok(0));
+    assert!(!curr.as_thread().pagefault_disabled());
+
+    assert_eq!(
+        vm.write_mem_nofault(USER_SPACE_BASE - 1, &[0x5a]),
+        Err(MemError::NoAccess)
+    );
+    assert!(!curr.as_thread().pagefault_disabled());
+
+    space.lock().unmap(start, PAGE_SIZE_4K).unwrap();
+}
+
+#[def_test(user)]
+fn user_nofault_copy_fault_exit_balances_pagefault_depth() {
+    let curr = current();
+    let space = curr.as_thread().process().address_space().unwrap();
+    let start = VirtAddr::from_usize(kaddr_layout::USER_HEAP_BASE + 0x1000_0000);
+    let backing = Arc::new(SleepableBacking {
+        pages: PrivateBackend::new(start, PageSize::Size4K),
+        faults: AtomicUsize::new(0),
+        behavior: FaultBehavior::AdmissionWait,
+    });
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    backing.install(&mut space.lock(), start, PAGE_SIZE_4K, flags);
+    let mut vm = Vm::new();
+
+    assert_eq!(vm.write_mem_nofault(start.as_usize(), &[0x5a]), Ok(0));
+    assert!(!curr.as_thread().pagefault_disabled());
+
+    space.lock().unmap(start, PAGE_SIZE_4K).unwrap();
+}
+
+#[def_test(user)]
+fn user_nofault_copy_nests_pagefault_depth() {
+    let curr = current();
+    let space = curr.as_thread().process().address_space().unwrap();
+    let start = VirtAddr::from_usize(kaddr_layout::USER_HEAP_BASE + 0x1000_0000);
+    let backing = Arc::new(SleepableBacking {
+        pages: PrivateBackend::new(start, PageSize::Size4K),
+        faults: AtomicUsize::new(0),
+        behavior: FaultBehavior::Normal,
+    });
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    backing.install(&mut space.lock(), start, PAGE_SIZE_4K, flags);
+    let mut vm = Vm::new();
+    vm.fault_in_writeable(start.as_usize(), 1).unwrap();
+
+    let thread = curr.as_thread();
+    let outer = thread.pagefault_guard();
+    assert!(thread.pagefault_disabled());
+    assert_eq!(vm.write_mem_nofault(start.as_usize(), &[0x5a]), Ok(1));
+    assert!(thread.pagefault_disabled());
+    drop(outer);
+    assert!(!thread.pagefault_disabled());
+
+    space.lock().unmap(start, PAGE_SIZE_4K).unwrap();
+}
+
+#[def_test(user)]
+fn user_pagefault_guard_suppresses_trap_resolution_in_access_window() {
+    let curr = current();
+    let space = curr.as_thread().process().address_space().unwrap();
+    let start = VirtAddr::from_usize(kaddr_layout::USER_HEAP_BASE + 0x1000_0000);
+    let backing = Arc::new(SleepableBacking {
+        pages: PrivateBackend::new(start, PageSize::Size4K),
+        faults: AtomicUsize::new(0),
+        behavior: FaultBehavior::Immediate,
+    });
+    let flags = MappingFlags::USER | MappingFlags::READ | MappingFlags::WRITE;
+    backing.install(&mut space.lock(), start, PAGE_SIZE_4K, flags);
+    let thread = curr.as_thread();
+
+    // A nofault atomic suppresses trap-handler resolution even inside an access
+    // window: the fault returns through the fixup instead of being resolved.
+    let suppressed = access_user_memory(|| atomic_load_u32_nofault(start.as_usize()));
+    assert_eq!(suppressed, Err(MemError::NoAccess));
+    assert_eq!(backing.faults.load(Ordering::Relaxed), 0);
+    assert!(!thread.pagefault_disabled());
+
+    // The faultable variant keeps resolving the same page inside the window.
+    let resolved = access_user_memory(|| atomic_load_u32(start.as_usize()));
+    assert_eq!(resolved, Ok(0));
+    assert_eq!(backing.faults.load(Ordering::Relaxed), 1);
+    assert!(!thread.pagefault_disabled());
+
+    space.lock().unmap(start, PAGE_SIZE_4K).unwrap();
 }

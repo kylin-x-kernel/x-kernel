@@ -26,7 +26,7 @@
 - `check_access()` allows only the valid user-space interval.
 - `atomic_cmpxchg_u32()`, `atomic_load_u32()`, `atomic_u32_eq()`, and `fault_in_user_writeable()` also require the address to be 4-byte aligned.
 - `fault_in_user_writeable()` uses the live MM's task-context resolver and does not modify the user word. Admission waits run outside the MM mutex and repeat mapping checks. The caller must be allowed to sleep and must not hold a non-sleepable lock. `Resolved` and retry-class outcomes return success; the caller repeats its store after a retry-class outcome. `OutOfMemory` returns `ENOMEM`. Permission denial, an unmapped address, and every other failure return `NoAccess` immediately. This path must not bypass a read-only mapping.
-- `handle_page_fault()` handles a fault only while the current thread has explicitly entered the user-memory access window.
+- `handle_page_fault()` handles a fault only while the current thread has explicitly entered the user-memory access window and holds no fault-suppression depth.
 - An ordinary copy must not wait for block-device completion on the exception path with IRQs disabled. The caller must be allowed to sleep and must not hold a non-sleepable lock. The requirement is not met by relaxing block-driver context checks.
 - `kuaccess` must preserve the typed outcome classification of `MmSpace::handle_page_fault()`. Only `Resolved` and retry-class outcomes may become a handled trap. Unmapped, permission denied, bus error, OOM, no-progress, and generic failure must become a user-copy or atomic-user failure, not another retry.
 - An ordinary copy may fault the same page again after `Resolved`, so staged mapping and write-permission preparation can finish. Completed/COW attempts for one page share a budget of 16. Admission retries wait on the backing provider's existing locks outside the MM mutex and do not consume this budget. An explicit `NoProgress` fails immediately. If the budget is exhausted and the copy still cannot finish, the result is `NoAccess`. A partially initialized buffer must not be reported as a complete success. Reads and writes use `READ` and `WRITE` fault permissions respectively and must not bypass a read-only mapping.
@@ -64,12 +64,16 @@
 ## Page-cache destination boundary
 
 The nofault write provider validates the entire user range before entering the
-architecture exception-table copy. Each copy stays within one user page;
-completed fragments are accumulated before any short fragment is returned.
-This prevents a bulk fixup from discarding progress before a missing next page
-and repeatedly preparing an already writable page. It creates no user references
-and exposes only the successfully copied prefix. Closing the thread's access window prevents
-nested callers from accidentally resolving a fault under a source folio lock.
+architecture exception-table copy. It first attempts one architecture copy over
+the whole range, which may span user pages. If that attempt reports a remaining
+byte count, the provider resumes from the fault point and falls back to
+per-page copies: each retry stays within one user page and completed fragments
+are accumulated before any short fragment is returned. This prevents a bulk
+fixup from discarding progress before a missing next page and repeatedly
+preparing an already writable page. It creates no user references
+and exposes only the successfully copied prefix. Raising the thread's no-fault
+depth prevents nested callers from accidentally resolving a fault under a source
+folio lock.
 Prefaulting is separate, checks both VMA policy and PTE permissions, and must run
 outside backing-provider locks. A successful preparation grants no lasting
 accessibility guarantee; later copies remain exception protected.

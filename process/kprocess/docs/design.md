@@ -289,6 +289,13 @@ retains init identity; orphan reparenting reserves an init relation slot.
   identities carry only a root projection and `gettid(2)` reports that root
   number, so `pid_identity_in_namespace` also matches a thread's root number
   when the observer namespace has no exact projection for it.
+- `Thread::pagefault_guard()` opens one nesting level of per-thread fault
+  suppression and returns a `PagefaultGuard` that closes it on drop;
+  `Thread::pagefault_disabled()` reports whether any level is live. The guard is
+  re-exported from the thread module and the crate root. Provider: kprocess;
+  consumer: `kuaccess` and other kernel callers that copy user memory and need
+  a fault to return through the architecture exception-table fixup (direction
+  kprocess -> consumer).
 
 `TaskStat::from_thread` samples the thread's private pending, shared pending and
 blocked masks through one `ThreadSignalManager::masks()` call, then builds the
@@ -358,6 +365,11 @@ require a `Thread` installed in the current task. `current_fs_context` alone
 falls back to `init_fs` for kernel tasks; it still requires initialized filesystem
 state. A `CurrentThread` handle is created without validating its payload, but
 its dereference requires a matching user runtime.
+
+`Thread::pagefault_guard()` must be called on the current thread, must not
+sleep, and is safe to nest and to call with preemption enabled; the depth it
+counts travels with the thread across preemption. `Thread::pagefault_disabled()`
+is a lock-free read of that depth, safe from the page-fault handler on this CPU.
 
 The process-domain spin rwlock is IRQ-safe and non-sleeping. Relation snapshots
 use its read side; fork/exit/reparent/reap/publication mutations use its write
@@ -586,6 +598,16 @@ process snapshot is current. `Process::resources` can retain the resource object
 after its fd-table slot was detached, and `mm_id` remains available while the
 runtime shell exists even after active mm ownership is released.
 
+`Thread::pagefault_disabled` is a per-thread `AtomicU32` nesting depth shared
+between the owning thread's execution flow and the page-fault handler. The
+owning thread increments it through `pagefault_guard()` and the returned guard
+decrements it on drop; the handler on the same CPU reads it to decide whether
+to resolve a fault or fall through to the exception-table fixup. A fault raised
+by the thread's copy is delivered where that copy executes, and the depth
+travels with the thread across preemption and migration, so `Relaxed` ordering
+suffices: no cross-CPU publication exists and no other task's counter can
+interleave. Debug builds assert that the drop-time depth is nonzero.
+
 ## Resource lifecycle, decisions and limitations
 
 Threads strongly retain runtime, while Process retains it weakly to avoid an
@@ -595,6 +617,12 @@ user clears mappings; `LiveAddressSpace` delays that event while held. Exit take
 owner slots once and drops objects outside their locks; repeated detach is safe
 while the runtime shell remains reachable. Zombies/pidfds retain stable identity
 without requiring attached files, filesystem paths or namespaces.
+
+`PagefaultGuard` is the release token for one nesting level of the thread's
+fault-suppression depth. Only `Thread::pagefault_guard()` creates it; it borrows
+the thread, allocates nothing, and its `Drop` decrements the depth exactly once,
+asserting in debug builds that a level was open. Guards nest and release in
+reverse order, and the depth ends with the owning thread.
 
 The namespace owner (`nsproxy`) follows the opposite lifetime from files and
 MM: `release_zombie_namespaces` is called from `wait_reap` at the final reap

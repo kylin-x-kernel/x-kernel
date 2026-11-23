@@ -23,7 +23,8 @@ use unittest::{assert, assert_eq, def_test};
 
 use crate::{
     AsThread, ForkAddressSpace, ForkFdTable, ForkFs, ForkParent, ForkSignalActions, Process,
-    ProcessExecUpdate, ProcessExitPublication, ProcessForkConfig, TaskStat, build_process_thread,
+    ProcessExecUpdate, ProcessExitPublication, ProcessForkConfig, TaskStat, Thread,
+    build_process_thread,
     process::INIT_PROC,
     process_exit, process_signals, procfs,
     publication::{prepare_user_task, process_publication},
@@ -338,7 +339,12 @@ fn ensure_init() -> Arc<Process> {
     Process::new_init(1)
 }
 
-fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
+fn build_test_thread() -> (
+    Arc<Process>,
+    Arc<kidentity::PidHandle>,
+    crate::Tid,
+    KBox<Thread>,
+) {
     let parent = ensure_init();
     let task_number =
         kidentity::allocate_root_pid_handle().expect("test leader identity should allocate");
@@ -362,10 +368,39 @@ fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
         initial_cred(),
     )
     .expect("test thread preparation");
+    (process, task_number, pid, thread)
+}
+
+fn build_prepared_test_user_task() -> (Arc<Process>, TaskInner) {
+    let (process, task_number, pid, thread) = build_test_thread();
     let task = TaskInner::new_user(ktask::PreparedTaskEntry::new_nowait(|| {}).expect("test entry preparation"), String::from("test-user-thread"), task_number, thread);
 
     task.set_name(format!("test-user-thread-{pid}").as_str());
     (process, task)
+}
+
+#[def_test]
+fn test_pagefault_guard_depth_is_per_thread() {
+    let (_process_a, _task_number_a, _pid_a, thread_a) = build_test_thread();
+    let (_process_b, _task_number_b, _pid_b, thread_b) = build_test_thread();
+    assert!(!thread_a.pagefault_disabled());
+    assert!(!thread_b.pagefault_disabled());
+
+    let outer = thread_a.pagefault_guard();
+    let inner = thread_a.pagefault_guard();
+    assert!(thread_a.pagefault_disabled());
+    // The depth is owned by the thread, so a peer is unaffected.
+    assert!(!thread_b.pagefault_disabled());
+    drop(inner);
+    assert!(thread_a.pagefault_disabled());
+    drop(outer);
+    assert!(!thread_a.pagefault_disabled());
+
+    let peer_guard = thread_b.pagefault_guard();
+    assert!(thread_b.pagefault_disabled());
+    assert!(!thread_a.pagefault_disabled());
+    drop(peer_guard);
+    assert!(!thread_b.pagefault_disabled());
 }
 
 fn publish_test_thread(process: &Arc<Process>, tid: crate::Tid) -> ktask::KtaskRef {
