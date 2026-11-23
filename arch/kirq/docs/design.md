@@ -2809,3 +2809,32 @@ only pointers transferred by `KBox::into_raw`; chained callbacks cast the
 first-field IRQ-work pointer back to its original `repr(C)` owner before
 reconstruction. The local queue fixture outlives both parent and child callbacks.
 The separate host IRQ-work test keeps its standard allocator ownership model.
+
+## IRQ receive statistics and named actions
+
+`IrqLine` owns one `LineStats` array with one `AtomicU64` per possible logical CPU.
+The ordinary dispatch entry records one hardware receive after identity/flow
+resolution and before the flow mask/ack and action fanout. Shared actions on one
+Line therefore contribute one receive, not one per action. A claim that resolves
+to a current, non-retired ordinary configured flow is counted even when it is
+later rejected by action admission or has no action. Replay, the simulated test
+entry, NMI, retired/replaced Lines and Lines without a resolved ordinary flow do
+not add ordinary receive counts. The counter wraps as `u64`.
+
+`IrqLineHandle::stats_snapshot` returns an owned `IrqStatsSnapshot`. It first
+probes only the action count, allocates name storage outside the KIRQ locks, then
+revalidates the current Line and copies classification, descriptor facts, action
+presence, names and counts in one final Line critical section. Counts are Relaxed
+samples and are not one cross-CPU atomic instant. `IrqStatsClass` distinguishes
+`Countable`, `Nmi` and `NoFlow`; an empty name slice does not mean no action, so
+`has_actions` is reported separately.
+
+Action names are validated static display metadata: 1..=63 printable ASCII
+bytes, no comma, and not all spaces. They are not identity, write permission or
+removal keys. Old registration entry points keep unnamed actions; named regular
+options and `try_register_shared_named` are additive.
+
+Name storage currently uses `Vec::try_reserve`. The global allocator may abort
+on OOM, so the current implementation does **not** guarantee that a real OOM is
+reported as `IrqStatsError::NoMemory`; this is a public fallible-collection gap,
+tracked separately. Capacity growth/retry semantics are tested independently.

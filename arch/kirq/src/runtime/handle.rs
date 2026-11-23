@@ -9,7 +9,10 @@
 //! management admission. Enumeration is task/control-only and never creates a
 //! mapping, action or hardware route.
 
-use alloc::sync::{Arc, Weak};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 
 use kcpu_id_map::KCpuMask;
 
@@ -23,7 +26,10 @@ use super::{
     retirement::{self, IrqLineRetirementObserver, IrqLineRetirementSubscription},
     state::{IRQ_STATE, IrqLine},
 };
-use crate::{IrqAffinityError, IrqAffinitySnapshot, IrqDescError, Virq};
+use crate::{
+    IrqAffinityError, IrqAffinitySnapshot, IrqDescError, IrqStatsClass, IrqStatsError,
+    IrqStatsSnapshot, Virq,
+};
 
 /// A retained IRQ Line identity with a stable virq label.
 ///
@@ -201,6 +207,103 @@ impl IrqLineHandle {
             return Err(IrqAffinityError::Management(IrqDescError::UnknownIrq));
         }
         check_user_affinity_change_locked(&entry)
+    }
+
+    /// Returns an owned, current-identity IRQ statistics snapshot.
+    ///
+    /// The probe reads only the action capacity. Allocation happens outside all
+    /// KIRQ locks. The final `IRQ_STATE -> Line` critical section revalidates
+    /// identity and copies classification, descriptor facts, action presence,
+    /// names and counts together. Counts themselves are Relaxed per-CPU samples.
+    pub fn stats_snapshot(&self) -> Result<IrqStatsSnapshot, IrqStatsError> {
+        self.stats_snapshot_inner(|| {})
+    }
+
+    /// Test-only variant that runs `after_probe` between capacity probe and
+    /// allocation, allowing deterministic capacity-race coverage.
+    #[cfg(unittest)]
+    pub(super) fn stats_snapshot_with_hook<F: FnMut()>(
+        &self,
+        mut after_probe: F,
+    ) -> Result<IrqStatsSnapshot, IrqStatsError> {
+        self.stats_snapshot_inner(&mut after_probe)
+    }
+
+    fn stats_snapshot_inner<F: FnMut()>(
+        &self,
+        mut after_probe: F,
+    ) -> Result<IrqStatsSnapshot, IrqStatsError> {
+        if crate::context::is_in_interrupt_context() {
+            return Err(IrqStatsError::InvalidContext);
+        }
+
+        let capacity = {
+            let state = IRQ_STATE.lock();
+            if !state
+                .descs
+                .get(&self.virq)
+                .is_some_and(|current| Arc::ptr_eq(&current, &self.line))
+            {
+                return Err(IrqStatsError::UnknownIrq);
+            }
+            let entry = self.line.lock();
+            if entry.is_retired() {
+                return Err(IrqStatsError::UnknownIrq);
+            }
+            entry.action_count()
+        };
+
+        after_probe();
+        let mut names: Vec<&'static str> = Vec::new();
+        names
+            .try_reserve(capacity)
+            .map_err(|_| IrqStatsError::NoMemory)?;
+
+        for _ in 0..3 {
+            let state = IRQ_STATE.lock();
+            if !state
+                .descs
+                .get(&self.virq)
+                .is_some_and(|current| Arc::ptr_eq(&current, &self.line))
+            {
+                return Err(IrqStatsError::UnknownIrq);
+            }
+            let entry = self.line.lock();
+            if entry.is_retired() {
+                return Err(IrqStatsError::UnknownIrq);
+            }
+
+            let action_count = entry.action_count();
+            if action_count > names.capacity() {
+                drop(entry);
+                drop(state);
+                names.clear();
+                names
+                    .try_reserve(action_count)
+                    .map_err(|_| IrqStatsError::NoMemory)?;
+                after_probe();
+                continue;
+            }
+
+            let class = if entry.has_nmi_action() {
+                IrqStatsClass::Nmi
+            } else if entry.flow.is_none() {
+                IrqStatsClass::NoFlow
+            } else {
+                IrqStatsClass::Countable
+            };
+            let has_actions = entry.has_actions();
+            let desc = entry.desc;
+            let counts = self.line.stats().copy_counts();
+
+            names.clear();
+            entry.collect_action_names(&mut names);
+            let snapshot =
+                IrqStatsSnapshot::new(self.virq, desc, class, has_actions, counts, names);
+            return Ok(snapshot);
+        }
+
+        Err(IrqStatsError::CapacityChanged)
     }
 
     /// Applies a user-originated affinity request to this exact Line.

@@ -10,3 +10,4 @@
 
 pub(crate) mod affinity;
 pub(crate) mod desc;
+pub(crate) mod stats;

@@ -192,8 +192,12 @@ pub(super) fn dispatch_simulated_irq(claim: PendingIrq) -> Option<Virq> {
     assert!(claim.has_no_completion_for_tests());
     let _pin = kspin::NoPreemptIrqSave::new();
     let _hardirq = HardIrqContextGuard::enter();
-    // Exercise the public consumer without creating a hardware obligation.
-    generic_handle_irq(claim)
+    // Exercise the public consumer without recording a hardware receive.
+    super::dispatch::dispatch_claim_entry(
+        claim.source(),
+        super::dispatch::DispatchEntry::Simulated,
+        || claim.complete(),
+    )
 }
 
 #[cfg(unittest)]

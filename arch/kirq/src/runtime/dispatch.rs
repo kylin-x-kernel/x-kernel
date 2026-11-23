@@ -119,8 +119,25 @@ fn report_unrouted_unhandled(report: impl FnOnce()) {
     }
 }
 
+/// Distinguishes a real hardware entry from a test-only simulated claim.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum DispatchEntry {
+    Hardware,
+    #[cfg(unittest)]
+    Simulated,
+}
+
 /// Dispatches a real claim and consumes its original completion on every path.
 pub(super) fn dispatch_claim(source: IrqRef, complete_claim: impl FnOnce()) -> Option<crate::Virq> {
+    dispatch_claim_entry(source, DispatchEntry::Hardware, complete_claim)
+}
+
+/// Dispatches a claim with an explicit entry origin.
+pub(super) fn dispatch_claim_entry(
+    source: IrqRef,
+    entry_origin: DispatchEntry,
+    complete_claim: impl FnOnce(),
+) -> Option<crate::Virq> {
     let _context_guard = NoPreemptIrqSave::new();
     let Some((virq, line)) = super::index::lookup(source) else {
         report_unrouted_unhandled(|| warn!("Unhandled IRQ {source:?}"));
@@ -154,6 +171,9 @@ pub(super) fn dispatch_claim(source: IrqRef, complete_claim: impl FnOnce()) -> O
         complete_claim();
         return Some(virq);
     };
+    if entry_origin == DispatchEntry::Hardware {
+        line.record_receive();
+    }
     match flow {
         IrqFlow::Level(chip) => {
             // SAFETY: lookup paired virq with line; entry comes from line.lock().
@@ -536,3 +556,4 @@ fn wake_execution_idle(wait_set: Option<DeferredWake>) {
 unittest::path_mod_test!(tests_line, "../../ut-tests/line_dispatch.rs");
 unittest::path_mod_test!(tests_edge, "../../ut-tests/edge_dispatch.rs");
 unittest::path_mod_test!(tests_level, "../../ut-tests/level_dispatch.rs");
+unittest::path_mod_test!(tests_stats, "../../ut-tests/stats.rs");

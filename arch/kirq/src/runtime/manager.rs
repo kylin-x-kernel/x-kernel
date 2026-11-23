@@ -110,11 +110,42 @@ pub fn prepare_percpu_forwarding(
     })
 }
 
+/// A validated, static display name for one registered IRQ action.
+///
+/// Names are presentation metadata, not device identity, write permission or a
+/// removal key. The 63-byte bound is an X-Kernel resource contract, not a Linux
+/// limit; commas and control characters are rejected because they delimit the
+/// `/proc/interrupts` row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IrqActionName(&'static str);
+
+impl IrqActionName {
+    /// Validates a static display name.
+    pub fn new(name: &'static str) -> Result<Self, crate::IrqDescError> {
+        let bytes = name.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > 63
+            || bytes
+                .iter()
+                .any(|byte| !(0x20..=0x7e).contains(byte) || *byte == b',')
+            || bytes.iter().all(|byte| *byte == b' ')
+        {
+            return Err(crate::IrqDescError::InvalidActionName);
+        }
+        Ok(Self(name))
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
 /// Options for installing a regular IRQ handler.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IrqRegisterOptions {
     auto_enable: bool,
     user_affinity_restricted: bool,
+    name: Option<IrqActionName>,
 }
 
 impl IrqRegisterOptions {
@@ -123,6 +154,7 @@ impl IrqRegisterOptions {
         Self {
             auto_enable: true,
             user_affinity_restricted: false,
+            name: None,
         }
     }
 
@@ -131,6 +163,7 @@ impl IrqRegisterOptions {
         Self {
             auto_enable: false,
             user_affinity_restricted: false,
+            name: None,
         }
     }
 
@@ -143,6 +176,17 @@ impl IrqRegisterOptions {
     pub const fn restrict_user_affinity(mut self) -> Self {
         self.user_affinity_restricted = true;
         self
+    }
+
+    /// Attaches a validated display name to this regular action.
+    pub const fn with_name(mut self, name: IrqActionName) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    /// Returns the optional registered display name.
+    pub const fn name(self) -> Option<IrqActionName> {
+        self.name
     }
 
     /// Returns whether successful registration should enable the line.
@@ -929,6 +973,13 @@ enum RegistrationKind {
 }
 
 impl RegistrationKind {
+    fn action_name(self) -> Option<&'static str> {
+        match self {
+            Self::Regular(options) => options.name().map(IrqActionName::as_str),
+            Self::PerCpu => None,
+        }
+    }
+
     fn options(self, entry: &IrqStateDesc) -> Result<Option<IrqRegisterOptions>, IrqDescError> {
         match self {
             Self::Regular(options) => {
@@ -955,7 +1006,7 @@ fn register_with_mode(
     // Keep a caller-owned reference until the scoped mutex has been released,
     // including rejection and installation failure.
     validate_management(mode)?;
-    let mut prepared = PreparedAction::regular(handler.clone())?;
+    let mut prepared = PreparedAction::regular_named(handler.clone(), kind.action_name())?;
     let result = with_registration_line_checked(
         spec,
         mode,
@@ -1089,9 +1140,29 @@ pub fn try_register_shared(
     spec: impl Into<IrqSpec>,
     handler: Handler,
 ) -> Result<Option<IrqActionToken>, IrqDescError> {
-    let spec = spec.into();
+    try_register_shared_impl(spec.into(), handler, None)
+}
+
+/// Registers one named shared IRQ action.
+///
+/// The name is static display metadata only; it is not a removal key or a
+/// second identity. Duplicate names are allowed because no Linux-style unique
+/// handler directory is created.
+pub fn try_register_shared_named(
+    spec: impl Into<IrqSpec>,
+    handler: Handler,
+    name: IrqActionName,
+) -> Result<Option<IrqActionToken>, IrqDescError> {
+    try_register_shared_impl(spec.into(), handler, Some(name.as_str()))
+}
+
+fn try_register_shared_impl(
+    spec: IrqSpec,
+    handler: Handler,
+    name: Option<&'static str>,
+) -> Result<Option<IrqActionToken>, IrqDescError> {
     validate_management(ManagementMode::Task)?;
-    let mut prepared = PreparedAction::shared(handler.clone())?;
+    let mut prepared = PreparedAction::shared_named(handler.clone(), name)?;
     let result = with_registration_line_checked(
         spec,
         ManagementMode::Task,

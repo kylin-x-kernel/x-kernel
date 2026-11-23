@@ -101,6 +101,7 @@ pub use model::{
         IrqPolarity, IrqSource, IrqSpec, IrqTrigger, MSI_DOMAIN, PLIC_ROOT_DOMAIN, Virq,
         gic_edge_irq_desc, gic_irq_desc, gic_level_irq_desc, io_apic_irq_desc, plic_irq_desc,
     },
+    stats::{IrqStatsClass, IrqStatsError, IrqStatsSnapshot},
 };
 #[cfg(unittest)]
 pub(crate) use runtime::dispatch;
@@ -113,14 +114,14 @@ pub use runtime::{
     entry::{generic_handle_irq, generic_handle_nmi, handle_irq, handle_nmi},
     handle::{IrqLineHandle, lookup_irq_line, next_irq_line},
     manager::{
-        FwIrqMapError, IrqRegisterOptions, MappedIrq, PerCpuForwarding, descriptor, disable_irq,
-        disable_irq_nosync, enable, enable_irq, free_irq, free_irq_action,
+        FwIrqMapError, IrqActionName, IrqRegisterOptions, MappedIrq, PerCpuForwarding, descriptor,
+        disable_irq, disable_irq_nosync, enable, enable_irq, free_irq, free_irq_action,
         prepare_percpu_forwarding, register, register_disabled, register_shared, synchronize_irq,
         translate_hwirq, try_disable_irq, try_disable_irq_nosync, try_enable, try_enable_irq,
         try_free_irq, try_free_irq_action, try_free_percpu_irq, try_map, try_map_fwspec,
         try_register, try_register_disabled, try_register_percpu, try_register_percpu_startup,
-        try_register_shared, try_register_startup, try_register_with_options, try_synchronize_irq,
-        unregister,
+        try_register_shared, try_register_shared_named, try_register_startup,
+        try_register_with_options, try_synchronize_irq, unregister,
     },
     nmi::{
         NmiShutdown, begin_nmi_shutdown, prepare_percpu_nmi, register_nmi, register_nmi_startup,

@@ -243,6 +243,8 @@ pub enum IrqDescError {
     NoIrqAction { virq: Virq },
     /// The operation requires sleepable task context with IRQs enabled.
     InvalidContext { operation: &'static str },
+    /// A registered action display name violates the static name contract.
+    InvalidActionName,
 }
 
 impl IrqDesc {

@@ -57,11 +57,64 @@ impl SyntheticLine {
     }
 
     /// Installs a synthetic deferred affinity callback for procfs fixtures.
-    pub fn with_deferred_affinity_chip(
-        &self,
-        chip: &'static crate::IrqDeferredAffinityChip,
-    ) {
+    pub fn with_deferred_affinity_chip(&self, chip: &'static crate::IrqDeferredAffinityChip) {
         self.line.lock().test_deferred_affinity = Some(chip);
+    }
+
+    /// Installs a synthetic flow for tests without touching hardware.
+    pub fn set_flow_for_tests(&self, flow: crate::IrqFlow) {
+        self.line.lock().set_flow_for_tests(flow);
+    }
+
+    /// Removes the resolved flow for no-flow classification tests.
+    pub fn clear_flow_for_tests(&self) {
+        self.line.lock().flow = None;
+    }
+
+    /// Installs one regular action through the private test hook.
+    pub fn install_regular_action_for_tests(&self, handler: crate::platform::Handler) -> bool {
+        self.line
+            .lock()
+            .install_regular_action(IrqAction::regular(handler))
+    }
+
+    /// Installs one shared action through the private test hook.
+    pub fn install_shared_action_for_tests(
+        &self,
+        handler: crate::platform::Handler,
+    ) -> Option<crate::IrqActionToken> {
+        self.line.lock().install_shared_action(handler)
+    }
+
+    /// Installs one named shared action through the private test hook.
+    pub fn install_shared_named_action_for_tests(
+        &self,
+        handler: crate::platform::Handler,
+        name: &'static str,
+    ) -> Option<crate::IrqActionToken> {
+        let mut prepared = crate::action::PreparedAction::shared_named(handler, Some(name)).ok()?;
+        self.line.lock().publish_shared_action(&mut prepared)
+    }
+
+    /// Withdraws one shared action without running a management transaction.
+    pub fn withdraw_shared_action_for_tests(&self, token: crate::IrqActionToken) -> bool {
+        self.line.lock().withdraw_action(Some(token)).is_some()
+    }
+
+    /// Installs an NMI action marker for classification tests.
+    pub fn install_nmi_action_for_tests(&self) {
+        self.line.lock().install_nmi_action();
+    }
+
+    /// Runs a pending software replay without creating a hardware claim.
+    pub fn replay_for_tests(&self) {
+        self.line.lock().is_pending = true;
+        crate::runtime::dispatch::replay(self.line.clone());
+    }
+
+    /// Seeds one counter for snapshot/read tests.
+    pub fn set_stats_count_for_tests(&self, cpu: usize, value: u64) {
+        self.line.stats().set_count_for_tests(cpu, value);
     }
 
     pub fn virq(&self) -> usize {

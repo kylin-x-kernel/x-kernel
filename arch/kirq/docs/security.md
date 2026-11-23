@@ -1560,3 +1560,25 @@ hardware work: an out-of-range/already-free owned vector indicates a violated
 allocation invariant. A backend with recoverable release failures requires a
 pre-withdrawal protocol before integration. Reservation Drop does not release
 hardware, and final Line destruction occurs outside the registry lock.
+
+## IRQ statistics observation
+
+Receive statistics are control-plane observations of an already resolved
+ordinary Line. The recorder performs one Relaxed per-CPU increment in the
+hardware claim path; it does not grant execution admission, extend handler
+lifetime, or replace the original controller completion. Replay, simulated test
+entries, NMI and Lines without a resolved ordinary flow do not enter the ordinary
+counters. Counters wrap as `u64` and are sampled without a cross-CPU atomic
+snapshot.
+
+An `IrqStatsSnapshot` is owned and identity-checked. Retired/replaced handles
+return `UnknownIrq`; procfs must treat that as a disappeared row, not EOF.
+Action names are validated static strings and are display metadata only: they do
+not identify a device, authorize affinity changes, or form a second registry.
+`has_actions` is independent from the named-action list so unnamed actions remain
+visible as presence.
+
+The name-storage `Vec::try_reserve` path does not currently guarantee a return
+from real OOM because the global allocator may abort. No security property may
+claim an OOM-safe statistics read until the public fallible collection exists;
+capacity growth and retry are distinct from OOM and are documented separately.

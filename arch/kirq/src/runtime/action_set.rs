@@ -9,6 +9,7 @@
 //! PerCpu removal instead requires caller-completed execution exclusion.
 //! No action grace period or per-action reader count is required.
 
+use alloc::vec::Vec;
 use core::{
     marker::PhantomData,
     ptr,
@@ -137,6 +138,24 @@ impl ActionSet {
 
     pub(super) const fn len(&self) -> usize {
         self.count
+    }
+
+    /// Appends named actions' static display strings under Line exclusion.
+    ///
+    /// Unnamed actions are intentionally omitted; `len()` remains the action
+    /// presence source. The caller must reserve `len()` slots first, so this
+    /// traversal performs no allocation.
+    pub(super) fn collect_names(&self, out: &mut Vec<&'static str>) {
+        let mut raw = self.head;
+        while !raw.is_null() {
+            // SAFETY: the caller holds Line exclusion, which retains every
+            // linked record and publishes its immutable name before linkage.
+            let record = unsafe { &*raw };
+            if let Some(name) = record.action.name() {
+                out.push(name);
+            }
+            raw = record.next.load(Ordering::Acquire);
+        }
     }
 
     /// Scans installed actions under the Line lock for a user-affinity policy.

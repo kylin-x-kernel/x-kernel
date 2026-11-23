@@ -17,12 +17,32 @@ pub(super) struct PreparedAction {
 }
 
 impl PreparedAction {
+    #[cfg(unittest)]
     pub(super) fn regular(handler: Handler) -> Result<Self, crate::IrqDescError> {
-        Self::from_action(IrqAction::regular(handler))
+        Self::regular_named(handler, None)
     }
 
+    pub(super) fn regular_named(
+        handler: Handler,
+        name: Option<&'static str>,
+    ) -> Result<Self, crate::IrqDescError> {
+        Self::from_action(IrqAction::regular_named(handler, name))
+    }
+
+    #[cfg(unittest)]
     pub(super) fn shared(handler: Handler) -> Result<Self, crate::IrqDescError> {
-        Self::from_action(IrqAction::shared(IrqActionToken::new(0), handler))
+        Self::shared_named(handler, None)
+    }
+
+    pub(super) fn shared_named(
+        handler: Handler,
+        name: Option<&'static str>,
+    ) -> Result<Self, crate::IrqDescError> {
+        Self::from_action(IrqAction::shared_named(
+            IrqActionToken::new(0),
+            handler,
+            name,
+        ))
     }
 
     pub(super) fn from_action(action: IrqAction) -> Result<Self, crate::IrqDescError> {
@@ -115,39 +135,45 @@ pub(super) struct IrqAction {
     primary: Handler,
     thread: Option<IrqThreadSlot>,
     flags: IrqActionFlags,
-    #[expect(
-        clippy::allow_attributes,
-        reason = "CG-024-lint-exceptions: Action names are read by unittest until named handler \
-                  registration is exposed"
-    )]
-    #[allow(
-        dead_code,
-        reason = "CG-024-lint-exceptions: dead_code: Action names are read by unittest until \
-                  named handler registration is exposed"
-    )]
     name: Option<&'static str>,
 }
 
 impl IrqAction {
     /// Builds the current public single-handler registration as one action.
+    #[cfg(unittest)]
     pub(super) fn regular(primary: Handler) -> Self {
+        Self::regular_named(primary, None)
+    }
+
+    /// Builds a regular action with an optional registered display name.
+    pub(super) fn regular_named(primary: Handler, name: Option<&'static str>) -> Self {
         Self {
             id: IrqActionId::REGULAR,
             primary,
             thread: None,
             flags: IrqActionFlags::empty(),
-            name: None,
+            name,
         }
     }
 
     /// Builds one shared IRQ action with an explicit removal token.
+    #[cfg(unittest)]
     pub(super) fn shared(token: IrqActionToken, primary: Handler) -> Self {
+        Self::shared_named(token, primary, None)
+    }
+
+    /// Builds a shared action with an optional registered display name.
+    pub(super) fn shared_named(
+        token: IrqActionToken,
+        primary: Handler,
+        name: Option<&'static str>,
+    ) -> Self {
         Self {
             id: IrqActionId::shared(token),
             primary,
             thread: None,
             flags: IrqActionFlags::SHARED,
-            name: None,
+            name,
         }
     }
 
@@ -220,7 +246,6 @@ impl IrqAction {
         self.flags
     }
 
-    #[cfg(unittest)]
     pub(super) const fn name(&self) -> Option<&'static str> {
         self.name
     }

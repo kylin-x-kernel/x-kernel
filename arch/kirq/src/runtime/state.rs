@@ -16,7 +16,7 @@
 //! `registry` child. The explicit reexports below preserve the internal facade
 //! without exposing Line fields or moving controller/source policy here.
 
-use alloc::sync::Arc;
+use alloc::{sync::Arc, vec::Vec};
 
 use intrusive_collections::{LinkedList, intrusive_adapter};
 
@@ -317,6 +317,7 @@ pub(crate) struct IrqLine {
     pub(super) management: kmutex::Mutex<()>,
     pub(super) nmi_action: super::nmi::NmiAction,
     state: SpinNoIrq<IrqStateDesc>,
+    stats: super::stats::LineStats,
     replay_links: intrusive_collections::LinkedListAtomicLink,
 }
 
@@ -327,6 +328,7 @@ impl IrqLine {
             management: kmutex::Mutex::new(()),
             nmi_action: super::nmi::NmiAction::new(),
             state: SpinNoIrq::new(state),
+            stats: super::stats::LineStats::new(),
             replay_links: intrusive_collections::LinkedListAtomicLink::new(),
         }
     }
@@ -340,6 +342,16 @@ impl IrqLine {
     /// does not grant service admission or prove current directory membership.
     pub(crate) fn logical_irq(&self) -> Option<Virq> {
         self.virq.get().copied()
+    }
+
+    /// Records one hardware receive on the claiming CPU.
+    pub(super) fn record_receive(&self) {
+        let cpu = kiface_cpu_api::CurrentCpuIf::current_cpu().as_usize();
+        self.stats.record_receive(cpu);
+    }
+
+    pub(super) fn stats(&self) -> &super::stats::LineStats {
+        &self.stats
     }
 
     #[cfg(unittest)]
@@ -613,6 +625,11 @@ impl IrqStateDesc {
 
     pub(super) fn action_count(&self) -> usize {
         self.runtime.action_count()
+    }
+
+    /// Collects named actions under Line exclusion into preallocated storage.
+    pub(super) fn collect_action_names(&self, out: &mut Vec<&'static str>) {
+        self.runtime.actions.collect_names(out);
     }
 
     /// Returns whether any installed action refuses user-originated routing.
