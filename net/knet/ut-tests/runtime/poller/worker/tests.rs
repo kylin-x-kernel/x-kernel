@@ -2,9 +2,104 @@
 // Copyright 2025 KylinSoft Co., Ltd. <https://www.kylinos.cn/>
 // See LICENSES for license details.
 
+use kalloc_types::KBox;
 use unittest::def_test;
 
-use super::PollState;
+use super::{CpuPolicy, NetworkPoller, NormalQueue, PollState, QueueConfig};
+
+/// Foreground demand remains pending until queue startup can replay it.
+///
+/// # Panics
+/// Panics if unprepared polling consumes demand or claims execution.
+#[def_test]
+fn foreground_notification_before_start_preserves_demand() {
+    let poller = KBox::leak(KBox::new(NetworkPoller::new()).unwrap());
+
+    poller.notify_and_assist(super::PollReason::Tx);
+    let state = poller.state.lock();
+    assert!(state.queue.is_none());
+    assert!(state.has_pending);
+    assert!(!state.is_running);
+}
+
+/// A foreground notification cannot displace the active executor or lose demand.
+///
+/// # Panics
+/// Panics if queue preparation fails or pending demand does not survive ownership.
+#[def_test]
+fn foreground_notification_preserves_running_owner() {
+    let config =
+        QueueConfig::new(&[khal::percpu::this_cpu_id()], CpuPolicy::CurrentCpu, 1).unwrap();
+    let queue = NormalQueue::new("knet-poller-test", config).unwrap();
+    let poller = KBox::leak(KBox::new(NetworkPoller::new()).unwrap());
+    {
+        let mut state = poller.state.lock();
+        state.queue = Some(queue.clone());
+        state.is_running = true;
+    }
+
+    poller.notify_and_assist(super::PollReason::Tx);
+    {
+        let mut state = poller.state.lock();
+        assert!(state.is_running);
+        assert!(state.has_pending);
+        assert!(state.finish(false));
+    }
+    assert!(poller.try_claim(false));
+    {
+        let mut state = poller.state.lock();
+        assert!(!state.has_pending);
+        assert!(!state.finish(false));
+    }
+    let _ = poller.state.lock().queue.take();
+    queue.close_and_drain().unwrap();
+}
+
+/// Fully consumed foreground demand does not submit an empty background round.
+///
+/// # Panics
+/// Panics if foreground polling is skipped, exceeds its budget, or queues work.
+#[def_test]
+fn foreground_round_does_not_queue_completed_work() {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use ktime_types::TimeSpan;
+    use kworkng::QueueFreezeCancellation;
+
+    static POLL_ROUNDS: AtomicUsize = AtomicUsize::new(0);
+
+    let config =
+        QueueConfig::new(&[khal::percpu::this_cpu_id()], CpuPolicy::CurrentCpu, 1).unwrap();
+    let queue = NormalQueue::new("knet-foreground-test", config).unwrap();
+    // Retain any premature submission so a worker cannot hide it by running first.
+    let frozen = queue
+        .freeze(TimeSpan::from_secs(2), &QueueFreezeCancellation::new())
+        .unwrap();
+    let mut poller = NetworkPoller::new();
+    // Keep this poller's progress independent of live network traffic.
+    poller.poll_once = |budget| {
+        assert_eq!(budget.rx_packets, super::ASSIST_BUDGET.rx_packets);
+        assert_eq!(budget.tx_packets, super::ASSIST_BUDGET.tx_packets);
+        assert_eq!(budget.timer_events, super::ASSIST_BUDGET.timer_events);
+        POLL_ROUNDS.fetch_add(1, Ordering::Relaxed);
+        super::super::PollProgress::default()
+    };
+    poller.state.lock().queue = Some(queue.clone());
+    let poller = KBox::leak(KBox::new(poller).unwrap());
+    POLL_ROUNDS.store(0, Ordering::Relaxed);
+
+    poller.notify_and_assist(super::PollReason::Tx);
+
+    let was_queued = poller.work.cancel_pending();
+    let _ = poller.state.lock().queue.take();
+    drop(frozen);
+    queue.close_and_drain().unwrap();
+    assert_eq!(POLL_ROUNDS.load(Ordering::Relaxed), 1);
+    assert!(!was_queued);
+    let state = poller.state.lock();
+    assert!(!state.is_running);
+    assert!(!state.has_pending);
+}
 
 /// IRQ-side requests reach the boot-bound reusable network Work.
 ///

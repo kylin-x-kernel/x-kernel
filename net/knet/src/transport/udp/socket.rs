@@ -219,8 +219,7 @@ impl UdpSocket {
                         )
                     },
                 )?;
-                network_poller().notify(PollReason::Tx);
-                network_poller().assist_once();
+                network_poller().notify_and_assist(PollReason::Tx);
                 Ok(payload_len)
             })
     }

@@ -1345,6 +1345,13 @@ stateDiagram-v2
 
 In the `SCHEDULED` state, the reusable static Work of `knet-poller` and socket assist compete for execution ownership of the next batch. Loopback UDP does not depend on poller ownership; its transmit path completes xmit and `NetRx` delivery within the BH-disabled window.
 
+UDP transmission uses `notify_and_assist` to record pending demand and attempt
+to claim execution in the same state-lock hold, then runs one foreground round
+before submitting background work. This avoids queuing a worker for demand
+that the sending task can consume immediately. If another
+executor owns the poller, it retains the new demand for completion; otherwise,
+remaining work and concurrent notifications schedule a background continuation.
+
 `Interface::poll_at` and TCP deferred close share the protocol timer source, while the IPv4 reassembly queue uses a separate timer source. When a timer expires, it schedules the poller and wakes tasks waiting for socket readiness.
 
 ## Algorithms
@@ -1498,7 +1505,7 @@ wildcard bind addresses retain their listening meaning.
 | 12 | &emsp;**else**: |
 | 13 | &emsp;&emsp;enqueue the complete datagram with the bound interface, or return `WouldBlock` |
 | 14 | &emsp;release Router |
-| 15 | &emsp;network_poller().notify(Tx); network_poller().assist_once() |
+| 15 | &emsp;network_poller().notify_and_assist(Tx), retaining unfinished work for background processing |
 | 16 | **Procedure** `dispatch_budgeted(tx_budget)` |
 | 17 | &emsp;**repeat** up to $B_{\mathrm{tx}}$ times: |
 | 18 | &emsp;&emsp;packet = pop control queue first, otherwise data queue |
