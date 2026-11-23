@@ -25,7 +25,7 @@ pipeline {
         string(name: 'TEST_HARNESS_REPO', defaultValue: 'https://gitee.com/openkylin/starry-test-harness')
         string(name: 'TEST_HARNESS_BRANCH', defaultValue: 'master')
         string(name: 'CI_BUILDER_IMAGE', defaultValue: 'yeanwang/x-kernel-builder:v3.2', description: 'Builder image; set a candidate tag for pre-release validation')
-        string(name: 'ROOTFS_RELEASE_TAG', defaultValue: 'rootfs-v20261111', description: 'RootFS release; set a candidate tag for pre-release validation')
+        string(name: 'ROOTFS_RELEASE_TAG', defaultValue: 'rootfs-v20261120', description: 'RootFS release; set a candidate tag for pre-release validation')
         booleanParam(name: 'ENABLE_DOC_CHECK', defaultValue: false, description: 'Run Rust documentation generation check')
         booleanParam(
             name: 'ENABLE_COVERAGE',
@@ -53,7 +53,7 @@ pipeline {
         TARGET_DIR = '/xkernel-target'
         ROOTFS_CACHE_DIR = '/xkernel-cache/rootfs'
         ROOTFS_VARIANT = 'xkernel-glibc'
-        ROOTFS_RELEASE_TAG = "${params.ROOTFS_RELEASE_TAG?.trim() ?: 'rootfs-v20261111'}"
+        ROOTFS_RELEASE_TAG = "${params.ROOTFS_RELEASE_TAG?.trim() ?: 'rootfs-v20261120'}"
         HARNESS_JOBS = '2'
     }
 
